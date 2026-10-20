@@ -1,0 +1,11 @@
+# local data and big files
+models/
+outputs/
+voices/
+chats/
+memories.json
+prefs.json
+ithaca.json
+*.exe
+*.gguf
+*.safetensors
