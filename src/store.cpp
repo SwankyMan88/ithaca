@@ -50,10 +50,13 @@ static std::string run_python(const std::string& code) {
     PROCESS_INFORMATION pi{};
     std::wstring cmd = L"python -I -X utf8 \"" + file + L"\"";
     std::vector<wchar_t> cl(cmd.begin(), cmd.end()); cl.push_back(0);
-    if (!CreateProcessW(nullptr, cl.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) {
+    if (!CreateProcessW(nullptr, cl.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, dir.c_str(), &si, &pi)) {
         CloseHandle(rd); CloseHandle(wr);
         return "Python was not found on PATH. Install Python to run code blocks.";
     }
+    extern HANDLE g_job;   // dies with Ithaca
+    if (g_job) AssignProcessToJobObject(g_job, pi.hProcess);
+    ResumeThread(pi.hThread);
     CloseHandle(wr);
     std::string out; char b[4096]; DWORD n;
     double t0 = now_sec();

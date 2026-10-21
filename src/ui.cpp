@@ -239,6 +239,7 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.4 11.6-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
 <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></symbol>
 <symbol id="i-expand" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></symbol>
+<symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
 <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
 <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 4 14 8-14 8z"/></symbol>
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -259,7 +260,7 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
   <button class="newchat" id="newchat"><svg class="icon"><use href="#i-plus"/></svg>New chat</button>
   <input class="search" id="search" placeholder="Search chats">
   <div id="history"></div>
-  <div class="sidefoot"><button id="openHub"><svg class="icon"><use href="#i-dl"/></svg>Models</button><button id="openSettings"><svg class="icon"><use href="#i-gear"/></svg>Settings</button></div>
+  <div class="sidefoot"><button id="openHub"><svg class="icon"><use href="#i-dl"/></svg>Models</button><button id="openSettings"><svg class="icon"><use href="#i-gear"/></svg>Settings</button><button id="quitApp" title="Stop Ithaca and free all its memory"><svg class="icon"><use href="#i-power"/></svg>Quit</button></div>
 </aside>
 
 <main>
@@ -946,7 +947,10 @@ If the list is already good, reply with nothing.`},
       const r=await api('/api/load',{path:s.value,threads:+$('mThreads').value,ctx:+$('mCtx').value,vram_mb:+$('mVram').value,ram_mb:+$('mRam').value});
       b.disabled=false;$('mMsg').textContent=r.error?'Failed: '+r.error:`Loaded in ${r.load_ms} ms. Layers move to VRAM/RAM in the background.`;refreshStatus().then(updateCtx)}}}
 $('tabs').querySelectorAll('button').forEach(b=>b.onclick=()=>openSettings(b.dataset.tab));
-$('openSettings').onclick=()=>openSettings();$('openHub').onclick=()=>openSettings('hub');$('modelPick').onclick=()=>openSettings('model');
+$('openSettings').onclick=()=>openSettings();
+$('quitApp').onclick=async()=>{if(busy&&!confirm('A reply is still being written. Quit anyway?'))return;if(!busy&&!confirm('Quit Ithaca? This stops it and frees all of its memory.'))return;
+  try{await fetch('/api/quit',{method:'POST'})}catch(e){}
+  document.body.innerHTML='<div style="display:grid;place-items:center;height:100vh;font-family:inherit;color:var(--dim);text-align:center"><div><h2 style="color:var(--text);margin:0 0 6px">Ithaca has stopped</h2>All memory is freed. You can close this tab, and start Ithaca again any time.</div></div>'};$('openHub').onclick=()=>openSettings('hub');$('modelPick').onclick=()=>openSettings('model');
 $('closeSettings').onclick=()=>{$('settings').classList.remove('open');render()};
 $('settings').onclick=e=>{if(e.target.id=='settings'){$('settings').classList.remove('open');render()}};
 

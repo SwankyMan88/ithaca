@@ -42,6 +42,7 @@ static std::vector<Msg> parse_msgs(const J& arr) {
 }
 static std::mutex g_gen;           // one generation / load at a time
 static std::atomic<bool> g_stop{false};
+[[noreturn]] static void quit_now();
 std::atomic<bool> g_busy{false};
 static std::string g_last_stats = "{}";
 static std::mutex g_stats_m;
@@ -350,6 +351,12 @@ static void handle(SOCKET s) {
         J j; json_parse(body, j);
         respond(s, 200, "application/json", doc_extract_json(j["name"].str("file"), b64decode(j["data"].str())));
     }
+    else if (path == "/api/quit" && method == "POST") {
+        respond(s, 200, "application/json", "{}");
+        closesocket(s);
+        printf("  Quit requested from the app.\n");
+        quit_now();
+    }
     else if (path == "/api/stop" && method == "POST") { g_stop = true; respond(s, 200, "application/json", "{}"); }
     else if (path == "/api/adddir" && method == "POST") {
         J j; json_parse(body, j);
@@ -406,7 +413,45 @@ static void handle(SOCKET s) {
     closesocket(s);
 }
 
-static int serve(int port, bool open_browser) {
+// ---------- lifetime ----------
+// Everything Ithaca starts dies with it: child processes (code run from chat) sit in a kill-on-close job,
+// and quitting ends the process, which releases all RAM, pinned memory and VRAM.
+HANDLE g_job = nullptr;
+static void make_job() {
+    g_job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+    li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (g_job) SetInformationJobObject(g_job, JobObjectExtendedLimitInformation, &li, sizeof li);
+}
+[[noreturn]] static void quit_now() {
+    g_stop = true;
+    if (g_job) TerminateJobObject(g_job, 0);
+    // never hang on the way out (a stuck driver call or a busy thread): hard exit after 3 s
+    std::thread([] { Sleep(3000); TerminateProcess(GetCurrentProcess(), 0); }).detach();
+    fflush(stdout);
+    ExitProcess(0);
+}
+static BOOL WINAPI on_console(DWORD ev) {
+    switch (ev) {
+    case CTRL_C_EVENT: case CTRL_BREAK_EVENT: case CTRL_CLOSE_EVENT: case CTRL_LOGOFF_EVENT: case CTRL_SHUTDOWN_EVENT:
+        quit_now();
+    }
+    return FALSE;
+}
+
+// One Ithaca at a time: a second launch just opens the running one instead of loading models twice.
+static bool other_instance(int port, bool open_browser) {
+    HANDLE m = CreateMutexW(nullptr, TRUE, L"Local\\IthacaServer");
+    if (!(m && GetLastError() == ERROR_ALREADY_EXISTS)) return false;   // we keep the mutex until exit
+    int p = 0; FILE* f = _wfopen((g_store_dir + L"\\port.txt").c_str(), L"rb");
+    if (f) { if (fscanf(f, "%d", &p) != 1) p = 0; fclose(f); }
+    std::string url = "http://127.0.0.1:" + std::to_string(p ? p : port) + "/";
+    printf("\n  Ithaca is already running: %s\n", url.c_str());
+    if (open_browser) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return true;
+}
+
+static int serve(int port, bool open_browser, bool explicit_port) {
     WSADATA wd; WSAStartup(MAKEWORD(2, 2), &wd);
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -417,7 +462,8 @@ static int serve(int port, bool open_browser) {
     }
     if (!bound || listen(ls, 16) != 0) { printf("could not open a local port\n"); return 1; }
     std::string url = "http://127.0.0.1:" + std::to_string(bound) + "/";
-    printf("\n  Ithaca is running:  %s\n  (close this window to quit)\n\n", url.c_str());
+    if (!explicit_port) { FILE* f = _wfopen((g_store_dir + L"\\port.txt").c_str(), L"wb"); if (f) { fprintf(f, "%d", bound); fclose(f); } }
+    printf("\n  Ithaca is running:  %s\n  (close this window, press Ctrl+C or use Quit in the app to stop it)\n\n", url.c_str());
     if (open_browser) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     for (;;) {
         SOCKET c = accept(ls, nullptr, nullptr);
@@ -428,6 +474,8 @@ static int serve(int port, bool open_browser) {
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
+    make_job();
+    SetConsoleCtrlHandler(on_console, TRUE);
     int argc; wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::vector<std::string> args;
     for (int i = 0; i < argc; i++) args.push_back(w_to_utf8(wargv[i]));
@@ -438,7 +486,7 @@ int main() {
     std::string last = load_cfg();
 
     std::string model, prompt, image, draft;
-    int n = 128, port = 7860; bool browser = true, wait = false, gpubench = false; float temp = 0.f;
+    int n = 128, port = 7860; bool browser = true, wait = false, gpubench = false, explicit_port = false; float temp = 0.f;
     for (size_t i = 1; i < args.size(); i++) {
         auto nx = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : ""; };
         const std::string& k = args[i];
@@ -453,7 +501,7 @@ int main() {
         else if (k == "--vram") g_opts.vram_mb = atoll(nx().c_str());
         else if (k == "--ram") g_opts.ram_mb = atoll(nx().c_str());
         else if (k == "--temp") temp = (float)atof(nx().c_str());
-        else if (k == "--port") port = atoi(nx().c_str());
+        else if (k == "--port") { port = atoi(nx().c_str()); explicit_port = true; }
         else if (k == "--no-browser") browser = false;
         else if (k == "--wait") wait = true;
         else if (k == "--gpubench") { wait = true; gpubench = true; }
@@ -547,11 +595,12 @@ int main() {
         return 0;
     }
 
+    if (!explicit_port && other_instance(port, browser)) return 0;
     std::string m = model.empty() ? last : model;
     if (!m.empty()) {
         std::string err;
         if (do_load(m, err)) printf("  loaded %s\n", m.c_str());
         else printf("  could not load %s: %s\n", m.c_str(), err.c_str());
     }
-    return serve(port, browser);
+    return serve(port, browser, explicit_port);
 }
