@@ -79,7 +79,8 @@ bool Gx::init(std::string& err) {
     if (tm) {
         void *a = cu().function(tm, "t_lin"), *b = cu().function(tm, "t_nt"), *c = cu().function(tm, "t_nn"), *d = cu().function(tm, "t_conv");
         if (a && b && c && d) { f_lin_ = a; f_nt_ = b; f_nn_ = c; f_conv_ = d; tc_ = true; f_linf_ = cu().function(tm, "t_linf"); f_linq8_ = cu().function(tm, "t_linq8"); f_linh_ = cu().function(tm, "t_linh"); f_linq8h_ = cu().function(tm, "t_linq8h"); f_fa64_ = cu().function(tm, "t_fa64"); f_fa128_ = cu().function(tm, "t_fa128"); f_fa72_ = cu().function(tm, "t_fa72"); f_linq4_ = cu().function(tm, "t_linq4"); f_linq4m_ = cu().function(tm, "t_linq4m");
-            const char* fk[5] = {"t_fkv64", "t_fkv80", "t_fkv96", "t_fkv128", "t_fkv256"}; for (int i = 0; i < 5; i++) f_fkv_[i] = cu().function(tm, fk[i]); }
+            const char* fk[5] = {"t_fkv64", "t_fkv80", "t_fkv96", "t_fkv128", "t_fkv256"}; for (int i = 0; i < 5; i++) f_fkv_[i] = cu().function(tm, fk[i]);
+            const char* fq[5] = {"t_fkq64", "t_fkq80", "t_fkq96", "t_fkq128", "t_fkq256"}; for (int i = 0; i < 5; i++) f_fkq_[i] = cu().function(tm, fq[i]); }
     }
     ok_ = true;
     return true;
@@ -327,14 +328,16 @@ void Gx::linear(const GT& x, int M, int K, uint64_t W, int N, const GT* bias, GT
     gemm(f_linf_ && K % 32 == 0 && !getenv("ITHACA_NO_FASTLIN") ? (half_ ? f_linh_ : f_linf_) : f_lin_, x.p, W, y.p, bias ? bias->p : 0, M, N, K, K, K, N, 0, 0, 0, 1.f, beta, bias && bias->p ? 1 : 0, 1);
 }
 bool Gx::attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, int p0, int ldq, int kvd, int heads, int grp, int hd,
-                      float scale, int win, int nc) {
-    void* f = hd == 64 ? f_fkv_[0] : hd == 80 ? f_fkv_[1] : hd == 96 ? f_fkv_[2] : hd == 128 ? f_fkv_[3] : hd == 256 ? f_fkv_[4] : nullptr;
+                      float scale, int win, int nc, uint64_t Ks, uint64_t Vs) {
+    const int ix = hd == 64 ? 0 : hd == 80 ? 1 : hd == 96 ? 2 : hd == 128 ? 3 : hd == 256 ? 4 : -1;
+    void* f = ix < 0 ? nullptr : Ks ? f_fkq_[ix] : f_fkv_[ix];
     if (!f || getenv("ITHACA_NO_FLASH")) return false;
     const unsigned DV = hd == 256 ? 128 : hd;
     float sc = scale * 1.4426950409f;
     unsigned T = n, P0 = p0, L = ldq, KV = kvd, G = grp, W = win, NC = nc;
     for (unsigned dv0 = 0; dv0 < (unsigned)hd; dv0 += DV) {
-        void* a[] = {&Q, &Kc, &Vc, &O, &T, &P0, &L, &KV, &G, &sc, &W, &NC, &dv0};
+        unsigned NKV = kvd / hd;
+        void* a[] = {&Q, &Kc, &Vc, &O, &T, &P0, &L, &KV, &G, &sc, &W, &NC, &dv0, &Ks, &Vs, &NKV};
         prof_launch(f, (n + 127) / 128, heads, 1, 256, 0, a);
     }
     return true;

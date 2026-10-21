@@ -46,7 +46,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     if (!g_.open(path, err)) return false;
     path_utf8 = w_to_utf8(path);
     hp = HParams();
-    moe_ = false;
+    moe_ = false; kvq8_ = false;
     hp.arch = g_.gets("general.architecture");
     hp.name = g_.gets("general.name", "model");
     const std::string& a = hp.arch;
@@ -172,6 +172,10 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
                            (hp.hd == 64 || hp.hd == 80 || hp.hd == 96 || hp.hd == 128 || hp.hd == 256);
         gpu_batch_ = flash ? 256 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
         sc_rows_ = flash ? 1 : gpu_batch_;
+        {   // int8 KV needs the flash prompt kernels and the generated decode kernel (they read int8)
+            const int G = hp.n_head / std::max(1, hp.n_kv), NT = (hp.hd + 31) / 32;
+            kvq8_ = flash && G >= 1 && G <= 8 && NT <= 8 && G * NT * 32 <= 1024 && !getenv("ITHACA_KV16") && !getenv("ITHACA_NO_GQA");
+        }
         int64_t act = (int64_t)gpu_batch_ * 4 * ((int64_t)hp.n_embd * 2 + hp.n_head * hp.hd * 2 + kvd * 2 + hp.n_ff * 3 +
                       std::max<int64_t>({hp.n_embd, hp.n_head * hp.hd + 2 * (int64_t)kvd, 2ll * hp.n_ff}) + hp.n_rot) +
                       (int64_t)sc_rows_ * hp.n_head * ctx * 4 + hp.n_vocab * 4ll;
@@ -189,7 +193,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     for (auto& L : layers_) {
         size_t c = 0;
         for (Lin* l : L.lins()) c += gpu_cost(*l);
-        c += (size_t)ctx * kvd * 4;  // f16 K+V cache in VRAM
+        c += (size_t)ctx * kv_pos_bytes();  // K+V cache in VRAM
         if (gpu_open && vused + (int64_t)c <= vram_budget) { L.plan = TIER_GPU; vused += c; continue; }
         gpu_open = false;
         if (rused + (int64_t)L.bytes() <= ram_budget) { L.plan = TIER_RAM; rused += L.bytes(); }
@@ -285,11 +289,12 @@ void Model::tier_thread() {
     {   // decode attention sized for this model's head layout (query heads per kv head, head dim)
         const int G = hp.n_head / std::max(1, hp.n_kv), NT = (hp.hd + 31) / 32;
         if (dev_ok_ && G >= 1 && G <= 8 && NT <= 8 && G * NT * 32 <= 1024 && !getenv("ITHACA_NO_GQA")) {
-            extern std::string gqa_attn_ptx(int, int);
+            extern std::string gqa_attn_ptx(int, int, bool);
             std::string log;
-            if (void* mod = cuda().load_module(gqa_attn_ptx(G, NT), log)) f_gqa_ = cuda().function(mod, "k_attn_gqa");
+            if (void* mod = cuda().load_module(gqa_attn_ptx(G, NT, kvq8_), log)) f_gqa_ = cuda().function(mod, "k_attn_gqa");
             else fprintf(stderr, "[gpu] decode attention JIT failed: %s\n", log.c_str());
         }
+        if (!f_gqa_) kvq8_ = false;
     }
     if (dev_ok_ && !getenv("ITHACA_NO_TC_PREFILL")) { std::string e; tc_prefill_ = (gx().ok() || gx().init(e)) && gx().tensor_cores(); }
     const size_t kvd = (size_t)hp.n_kv * hp.hd;
@@ -308,10 +313,12 @@ void Model::tier_thread() {
                 // already budgets the full context, so growing never pushes this model out of VRAM
                 std::lock_guard<std::mutex> kl(kv_m_);
                 int cap = std::min(ctx, std::max(1024, (n_past + 256 + 511) / 512 * 512));   // room for one more batch
-                L.d_kc = cuda().alloc((size_t)cap * kvd * 2); L.d_vc = cuda().alloc((size_t)cap * kvd * 2);
+                const size_t eb = kvq8_ ? 1 : 2;
+                L.d_kc = cuda().alloc((size_t)cap * kvd * eb); L.d_vc = cuda().alloc((size_t)cap * kvd * eb);
+                if (kvq8_) { L.d_ks = cuda().alloc((size_t)cap * hp.n_kv * 4); L.d_vs = cuda().alloc((size_t)cap * hp.n_kv * 4); }
                 L.kv_cap = cap;
             }
-            ok = L.d_an && L.d_fn && L.d_kc && L.d_vc;
+            ok = L.d_an && L.d_fn && L.d_kc && L.d_vc && (!kvq8_ || (L.d_ks && L.d_vs));
             L.kv_dev = 0;
         }
         if (ok) L.state = TIER_GPU; else L.plan = TIER_RAM;  // VRAM ran out: fall back
@@ -367,9 +374,8 @@ void Model::unload() {
     dX_ = dXN_ = dQ_ = dK_ = dV_ = dATT_ = dF1_ = dF2_ = dT_ = dLOG_ = dSC_ = dCS_ = d_onorm_ = 0;
     for (auto& L : layers_) {
         for (Lin* l : L.lins()) fr(*l);
-        if (L.d_kc) cuda().free(L.d_kc);
-        if (L.d_vc) cuda().free(L.d_vc);
-        L.d_kc = L.d_vc = 0; L.kv_cap = 0;
+        for (uint64_t* p : {&L.d_kc, &L.d_vc, &L.d_ks, &L.d_vs}) { if (*p) cuda().free(*p); *p = 0; }
+        L.kv_cap = 0;
     }
     layers_.clear();
     out_.t = nullptr; out_state_ = TIER_DISK;
@@ -605,19 +611,22 @@ bool Model::ensure_kv(int need) {
         if (!L.d_kc || L.kv_cap >= need) continue;
         int cap = std::min(ctx, std::max(need, L.kv_cap * 2));
         cap = std::min(ctx, (cap + 255) / 256 * 256);
-        uint64_t nk = 0, nv = 0;
+        // K, V (and their scales when int8): bytes per position for each buffer
+        const size_t eb = kvq8_ ? 1 : 2, per[4] = {kvd * eb, kvd * eb, (size_t)hp.n_kv * 4, (size_t)hp.n_kv * 4};
+        uint64_t* cur[4] = {&L.d_kc, &L.d_vc, &L.d_ks, &L.d_vs};
+        const int nbuf = kvq8_ ? 4 : 2;
+        uint64_t nb[4] = {};
         for (int attempt = 0; attempt < 2; attempt++) {
-            nk = cuda().alloc((size_t)cap * kvd * 2); nv = nk ? cuda().alloc((size_t)cap * kvd * 2) : 0;
-            if (nk && nv) break;
-            if (nk) cuda().free(nk);
-            nk = nv = 0;
+            bool all = true;
+            for (int i = 0; i < nbuf && all; i++) all = (nb[i] = cuda().alloc((size_t)cap * per[i])) != 0;
+            if (all) break;
+            for (int i = 0; i < nbuf; i++) if (nb[i]) { cuda().free(nb[i]); nb[i] = 0; }
             if (attempt || !on_vram_short || !on_vram_short()) return false;
         }
-        cuda().dtod(nk, L.d_kc, (size_t)L.kv_cap * kvd * 2);
-        cuda().dtod(nv, L.d_vc, (size_t)L.kv_cap * kvd * 2);
+        for (int i = 0; i < nbuf; i++) cuda().dtod(nb[i], *cur[i], (size_t)L.kv_cap * per[i]);
         cuda().sync();
-        cuda().free(L.d_kc); cuda().free(L.d_vc);
-        L.d_kc = nk; L.d_vc = nv; L.kv_cap = cap;
+        for (int i = 0; i < nbuf; i++) { cuda().free(*cur[i]); *cur[i] = nb[i]; }
+        L.kv_cap = cap;
         grew = true;
     }
     if (grew) {   // captured graphs hold the old KV pointers
@@ -630,8 +639,12 @@ bool Model::ensure_kv(int need) {
 
 int64_t Model::kv_bytes_gpu() const {
     int64_t b = 0;
-    for (auto& L : layers_) if (L.d_kc) b += (int64_t)L.kv_cap * hp.n_kv * hp.hd * 4;
+    for (auto& L : layers_) if (L.d_kc) b += (int64_t)L.kv_cap * kv_pos_bytes();
     return b;
+}
+size_t Model::kv_pos_bytes() const {
+    const size_t kvd = (size_t)hp.n_kv * hp.hd;
+    return kvq8_ ? kvd * 2 + (size_t)hp.n_kv * 8 : kvd * 4;
 }
 
 void Model::rewind(int n) {
@@ -674,18 +687,24 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     unsigned win = L.swa ? (unsigned)hp.swa_window : 0;
     cu.launch(CudaTier::ROPE, un, 1, 256, {&dQ_, &cs, &nh, &hd, &half, &neox, &qd});
     cu.launch(CudaTier::ROPE, un, 1, 256, {&dK_, &cs, &nkv, &hd, &half, &neox, &kvd});
-    cu.ew(CudaTier::KVSTORE, un * kvd, {&dK_, &L.d_kc, &dPOS_, &kvd});
-    cu.ew(CudaTier::KVSTORE, un * kvd, {&dV_, &L.d_vc, &dPOS_, &kvd});
+    if (kvq8_) {
+        cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dK_, &L.d_kc, &L.d_ks, &dPOS_, &hd, &nkv});
+        cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dV_, &L.d_vc, &L.d_vs, &dPOS_, &hd, &nkv});
+    } else {
+        cu.ew(CudaTier::KVSTORE, un * kvd, {&dK_, &L.d_kc, &dPOS_, &kvd});
+        cu.ew(CudaTier::KVSTORE, un * kvd, {&dV_, &L.d_vc, &dPOS_, &kvd});
+    }
     // Decode splits each head's keys over 16 CTAs (flash-decoding) so long chats keep the GPU busy.
     unsigned spl = n == 1 ? 16 : 1;
     double Ta = ppn ? (cu.sync(), now_sec()) : 0;
     // Prompts: tensor-core flash attention straight from the KV cache. Decode: one CTA per kv head reads the
     // cache once for all query heads sharing it (GQA), split over 16 key ranges; else the per-head kernel.
     if (n == 1 && f_gqa_) {
-        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win};
+        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv};
         cu.launch_raw(f_gqa_, nkv, spl, 1, 256, 0, a);
     }
-    else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc)))
+    else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc,
+                                                        kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0)))
         cu.launch(CudaTier::ATTN, nh, un * spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &scale, &spl, &dPM_, &dPL_, &dPO_, &win, &nc});
     if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
     static double t_attn = 0, t_all = 0; static int calls = 0;
@@ -740,7 +759,7 @@ void Model::bench_gpu() {
         cu.htod(dPOS_, &pos, 4);
         unsigned spl = 16;
         unsigned z0 = 0;
-        timeit(nm, (double)pos * kvd * 4, [&] {
+        if (!kvq8_) timeit(nm, (double)pos * kvd * 4, [&] {   // the per-head kernel reads fp16 caches only
             cu.launch(CudaTier::ATTN, nh, spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &sc, &spl, &dPM_, &dPL_, &dPO_, &z0, &z0});
             cu.launch(CudaTier::ATTN_COMB, nh, 1, 128, {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
         });
@@ -748,7 +767,8 @@ void Model::bench_gpu() {
             snprintf(nm, sizeof nm, "gqa @%u", pos);
             unsigned z1 = 0;
             timeit(nm, (double)pos * kvd * 4, [&] {
-                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1};
+                unsigned nkv1 = hp.n_kv;
+                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1, &L.d_ks, &L.d_vs, &nkv1};
                 cu.launch_raw(f_gqa_, hp.n_kv, spl, 1, 256, 0, a);
             });
         }
@@ -847,9 +867,31 @@ const float* Model::eval(const int* toks, int n_all) {
                     Layer& M = layers_[k];
                     if (M.kv_dev >= n_past) return;
                     size_t off = ((size_t)k * ctx + M.kv_dev) * kvdz;
-                    size_t cnt = (size_t)(n_past - M.kv_dev) * kvdz * 2;
-                    cu.htod_async(M.d_kc + (uint64_t)M.kv_dev * kvdz * 2, &kc_[off], cnt);
-                    cu.htod_async(M.d_vc + (uint64_t)M.kv_dev * kvdz * 2, &vc_[off], cnt);
+                    const size_t npos = (size_t)(n_past - M.kv_dev), cnt = npos * kvdz * 2;
+                    if (kvq8_) {   // quantize the fp16 host rows the same way k_kvstore_q8 does
+                        const int nkv = hp.n_kv, hdd = hp.hd;
+                        std::vector<int8_t> qk(npos * kvdz), qv(npos * kvdz);
+                        std::vector<float> sk(npos * nkv), sv(npos * nkv);
+                        for (int which = 0; which < 2; which++) {
+                            const uint16_t* src = which ? &vc_[off] : &kc_[off];
+                            int8_t* q = which ? qv.data() : qk.data(); float* sc = which ? sv.data() : sk.data();
+                            for (size_t p = 0; p < npos; p++)
+                                for (int h = 0; h < nkv; h++) {
+                                    const uint16_t* r = src + p * kvdz + (size_t)h * hdd; float mx = 0;
+                                    for (int i = 0; i < hdd; i++) mx = std::max(mx, std::fabs(h2f(r[i])));
+                                    float inv = mx > 0 ? 127.f / mx : 0.f;
+                                    sc[p * nkv + h] = mx / 127.f;
+                                    for (int i = 0; i < hdd; i++) q[p * kvdz + (size_t)h * hdd + i] = (int8_t)std::lrintf(h2f(r[i]) * inv);
+                                }
+                        }
+                        cu.htod(M.d_kc + (uint64_t)M.kv_dev * kvdz, qk.data(), qk.size());
+                        cu.htod(M.d_vc + (uint64_t)M.kv_dev * kvdz, qv.data(), qv.size());
+                        cu.htod(M.d_ks + (uint64_t)M.kv_dev * nkv * 4, sk.data(), sk.size() * 4);
+                        cu.htod(M.d_vs + (uint64_t)M.kv_dev * nkv * 4, sv.data(), sv.size() * 4);
+                    } else {
+                        cu.htod_async(M.d_kc + (uint64_t)M.kv_dev * kvdz * 2, &kc_[off], cnt);
+                        cu.htod_async(M.d_vc + (uint64_t)M.kv_dev * kvdz * 2, &vc_[off], cnt);
+                    }
                 };
                 if (n == 1 && !nc && !migrating_) {
                     // Decode: replay a cached CUDA graph for this whole run of VRAM layers.

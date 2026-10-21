@@ -10,7 +10,7 @@ class CudaTier {
 public:
     // GPU weight kinds: Q4 (scale, 4-bit), Q8 (scale, int8), Q4M (scale + min, 4-bit: exact for Q4_K)
     enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2 };
-    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, N_OPS };
+    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, N_OPS };
     bool init(std::string& info);   // safe to call when no NVIDIA GPU: returns false
     bool ok() const { return ok_; }
     void bind_thread();             // make context current on calling thread

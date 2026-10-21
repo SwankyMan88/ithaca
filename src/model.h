@@ -34,6 +34,7 @@ struct Layer {
     std::atomic<int> plan{TIER_DISK}, state{TIER_DISK};
     // VRAM-resident copies used when the whole layer runs on the GPU
     uint64_t d_an = 0, d_fn = 0, d_qn = 0, d_kn = 0, d_bq = 0, d_bk = 0, d_bv = 0, d_kc = 0, d_vc = 0, d_pan = 0, d_pfn = 0;
+    uint64_t d_ks = 0, d_vs = 0;   // int8 KV cache: f32 scale per (position, kv head)
     int kv_dev = 0;  // device KV cache valid for positions [0, kv_dev)
     int kv_cap = 0;  // positions the device KV buffers can hold (grows with the conversation)
     size_t bytes() const { return hi > lo ? (size_t)(hi - lo) : 0; }
@@ -95,7 +96,9 @@ private:
     bool alloc_dev_buffers();
     void gpu_layer(Layer& L, int n, unsigned nc = 0);
     bool ensure_kv(int need);
-    void* f_gqa_ = nullptr;   // decode attention generated for this model's head layout
+    void* f_gqa_ = nullptr;
+    bool kvq8_ = false;      // VRAM KV cache stored as int8 + scales (half the memory of fp16)
+    size_t kv_pos_bytes() const;   // device KV bytes per position per layer   // decode attention generated for this model's head layout
     std::mutex kv_m_;
     void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y);
     std::atomic<bool> tc_prefill_{false};

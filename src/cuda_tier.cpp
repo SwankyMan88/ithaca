@@ -386,7 +386,7 @@ bool CudaTier::init(std::string& info) {
     if (cuModuleGetFunction(&fn_[K_Q4_0], mod, "mv_q4") || cuModuleGetFunction(&fn_[K_Q8_0], mod, "mv_q8") || cuModuleGetFunction(&fn_[K_Q4M], mod, "mv_q4m")) {
         info = "kernel lookup failed"; return false;
     }
-    static const char* opn[N_OPS] = {"k_add", "k_bias", "k_silu", "k_silu_split", "k_f16", "k_copy2d", "k_rmsnorm", "k_rope", "k_attn", "k_kvstore", "k_attn_comb", "k_gelu", "k_gather", "k_scatter"};
+    static const char* opn[N_OPS] = {"k_add", "k_bias", "k_silu", "k_silu_split", "k_f16", "k_copy2d", "k_rmsnorm", "k_rope", "k_attn", "k_kvstore", "k_attn_comb", "k_gelu", "k_gather", "k_scatter", "k_kvstore_q8"};
     if (cuModuleGetFunction(&quant_, mod, "k_quant")) { info = "kernel lookup failed: k_quant"; return false; }
     for (int i = 0; i < N_OPS; i++)
         if (cuModuleGetFunction(&ops_[i], mod, opn[i])) { info = std::string("kernel lookup failed: ") + opn[i]; return false; }

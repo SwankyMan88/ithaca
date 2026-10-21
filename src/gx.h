@@ -68,7 +68,7 @@ public:
     bool linear_quant(uint64_t x, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t y);
     // Chat-engine prompt attention from the fp16 KV cache (causal, grouped heads, optional window / non-causal block).
     bool attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, int p0, int ldq, int kvd, int heads, int grp, int hd,
-                      float scale, int win, int nc);
+                      float scale, int win, int nc, uint64_t Ks = 0, uint64_t Vs = 0);   // Ks/Vs: int8 cache scales
     void gemm_nt(const GT& A, int M, int K, int lda, const GT& B, int N, int ldb, GT& C, int ldc, float alpha,
                  int batch, size_t sA, size_t sB, size_t sC, size_t offA = 0, size_t offB = 0, size_t offC = 0);
     void gemm_nn(const GT& A, int M, int K, int lda, const GT& B, int N, int ldb, GT& C, int ldc, float alpha,
@@ -127,7 +127,7 @@ private:
     bool q8_ = false;
     std::unordered_map<uint64_t, uint64_t> q8scale_;   // int8 weight ptr -> f32 row scales
     uint64_t qtmp_ = 0; size_t qtmp_cap_ = 0;
-    void *f_linq8_ = nullptr, *f_q8row_ = nullptr, *f_linh_ = nullptr, *f_linq8h_ = nullptr, *f_fa64_ = nullptr, *f_fa128_ = nullptr, *f_fa72_ = nullptr, *f_linq4_ = nullptr, *f_linq4m_ = nullptr, *f_fkv_[5] = {};
+    void *f_linq8_ = nullptr, *f_q8row_ = nullptr, *f_linh_ = nullptr, *f_linq8h_ = nullptr, *f_fa64_ = nullptr, *f_fa128_ = nullptr, *f_fa72_ = nullptr, *f_linq4_ = nullptr, *f_linq4m_ = nullptr, *f_fkv_[5] = {}, *f_fkq_[5] = {};
     bool half_ = false;
     uint64_t place(size_t bytes, bool& resident);
 };

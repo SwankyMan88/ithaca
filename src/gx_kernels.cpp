@@ -549,12 +549,23 @@ std::string gen_flash(const char* name, int D) {
 // Query row t sits at position P0 + t and sees keys [lo, hi]: hi = P0 + t (or P0 + NC - 1 for a non-causal
 // image block), lo = hi - WIN + 1 on sliding-window layers. Output dims [DV0, DV0 + DV): heads wider than 128
 // run in two launches so the accumulators fit in registers. grid = (ceil(T/128), heads), 256 threads.
-std::string gen_flash_kv(const char* name, int D, int DV) {
+// q8: the cache holds int8 values plus an f32 scale per (token, kv head) in separate arrays.
+std::string gen_flash_kv(const char* name, int D, int DV, bool q8 = false) {
     Out o;
+    // int8 cache: 4 values + the (token, kv head) scale -> 4 fp16 in %%a{lo},%%a{hi}
+    auto deq4 = [&](const char* base_bytes, const char* scales, int lo, int hi) {
+        o(" add.u64 %%rd28,%s,%%rd27; mov.b32 %%e0,0; @%%p5 ld.global.nc.b32 %%e0,[%%rd28];", base_bytes);
+        o(" mad.lo.u32 %%r71,%%r24,%%r72,%%r70; mul.wide.u32 %%rd29,%%r71,4; add.u64 %%rd29,%s,%%rd29; mov.f32 %%g4,0f00000000; @%%p5 ld.global.nc.f32 %%g4,[%%rd29];", scales);
+        for (int i = 0; i < 4; i++) o(" bfe.s32 %%e%d,%%e0,%d,8; cvt.rn.f32.s32 %%g%d,%%e%d; mul.f32 %%g%d,%%g%d,%%g4;", i + 1, i * 8, i, i + 1, i, i);
+        o(" cvt.rn.f16x2.f32 %%a%d,%%g1,%%g0; cvt.rn.f16x2.f32 %%a%d,%%g3,%%g2;", lo, hi);
+    };
+
     const int KC = (D + 15) / 16, DP = KC * 16, DT = DV / 8, NT = 256, G4 = D / 4, GV4 = DV / 4;
     o(".visible .entry %s(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pO, .param .u32 pT, .param .u32 pP0, .param .u32 pLdq,"
-      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0)", name);
+      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0%s)", name,
+      q8 ? ", .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV" : "");
     o("{");
+    o(" .reg .b32 %%e<8>; .reg .f32 %%g<6>;");
     o(" .reg .pred %%p<12>; .reg .b32 %%r<80>; .reg .b64 %%rd<32>; .reg .f32 %%f<32>; .reg .b16 %%h<8>;");
     o(" .reg .b32 %%q<%d>; .reg .f32 %%s<32>; .reg .f32 %%o<%d>; .reg .b32 %%a<4>; .reg .b32 %%b<2>; .reg .f32 %%m<2>; .reg .f32 %%l<2>;", KC * 4, DT * 4);
     o(" .shared .align 16 .b16 sK[%d]; .shared .align 16 .b16 sV[%d];", 64 * DP, 64 * DV);
@@ -563,7 +574,8 @@ std::string gen_flash_kv(const char* name, int D, int DV) {
     o(" ld.param.f32 %%f20,[pScale]; ld.param.u32 %%r52,[pWin]; ld.param.u32 %%r53,[pNC]; ld.param.u32 %%r54,[pDV0];");
     o(" mov.u32 %%r4,%%tid.x; and.b32 %%r5,%%r4,31; shr.u32 %%r6,%%r4,5; shr.u32 %%r7,%%r5,2; and.b32 %%r8,%%r5,3;");   // tid lane warp g t
     o(" mov.u32 %%r55,%%ctaid.x; shl.b32 %%r55,%%r55,7; shl.b32 %%r10,%%r6,4; add.u32 %%r9,%%r55,%%r10;");              // block q0, warp q0
-    o(" mov.u32 %%r11,%%ctaid.y; div.u32 %%r56,%%r11,%%r51; mul.lo.u32 %%r56,%%r56,%d; mul.lo.u32 %%r11,%%r11,%d;", D, D);   // kv col, q col
+    o(" mov.u32 %%r11,%%ctaid.y; div.u32 %%r56,%%r11,%%r51; mov.u32 %%r70,%%r56; mul.lo.u32 %%r56,%%r56,%d; mul.lo.u32 %%r11,%%r11,%d;", D, D);   // kv col, q col
+    if (q8) o(" ld.param.u64 %%rd25,[pKs]; ld.param.u64 %%rd26,[pVs]; ld.param.u32 %%r72,[pNKV];");
     o(" add.u32 %%r12,%%r9,%%r7; add.u32 %%r13,%%r12,8; setp.lt.u32 %%p1,%%r12,%%r1; setp.lt.u32 %%p2,%%r13,%%r1;");
     // key limits for rows g and g+8: hi (inclusive) and lo
     o(" setp.ne.u32 %%p8,%%r53,0; add.u32 %%r57,%%r2,%%r53; sub.u32 %%r57,%%r57,1;");                                 // NC block end
@@ -608,7 +620,8 @@ std::string gen_flash_kv(const char* name, int D, int DV) {
     o(" setp.ge.u32 %%p4,%%r21,%d; @%%p4 bra LDE;", 64 * G4);
     o(" div.u32 %%r22,%%r21,%d; rem.u32 %%r23,%%r21,%d; shl.b32 %%r23,%%r23,2; add.u32 %%r24,%%r20,%%r22; setp.lt.u32 %%p5,%%r24,%%r66;", G4, G4);
     o(" mad.lo.u32 %%r25,%%r24,%%r50,%%r56; add.u32 %%r25,%%r25,%%r23; mul.wide.u32 %%rd11,%%r25,2; add.u64 %%rd12,%%rd2,%%rd11;");
-    o(" mov.b32 %%a0,0; mov.b32 %%a1,0; @%%p5 ld.global.nc.v2.b32 {%%a0,%%a1},[%%rd12];");
+    if (q8) { o(" cvt.u64.u32 %%rd27,%%r25;"); deq4("%rd2", "%rd25", 0, 1); }
+    else o(" mov.b32 %%a0,0; mov.b32 %%a1,0; @%%p5 ld.global.nc.v2.b32 {%%a0,%%a1},[%%rd12];");
     o(" mad.lo.u32 %%r26,%%r22,%d,%%r23; mul.wide.u32 %%rd14,%%r26,2; add.u64 %%rd15,%%rd5,%%rd14; st.shared.v2.b32 [%%rd15],{%%a0,%%a1};", DP);
     o(" add.u32 %%r21,%%r21,%d; bra LD;", NT);
     o("LDE:");
@@ -617,7 +630,8 @@ std::string gen_flash_kv(const char* name, int D, int DV) {
     o(" setp.ge.u32 %%p4,%%r21,%d; @%%p4 bra LVE;", 64 * GV4);
     o(" div.u32 %%r22,%%r21,%d; rem.u32 %%r23,%%r21,%d; shl.b32 %%r23,%%r23,2; add.u32 %%r24,%%r20,%%r22; setp.lt.u32 %%p5,%%r24,%%r66;", GV4, GV4);
     o(" mad.lo.u32 %%r25,%%r24,%%r50,%%r56; add.u32 %%r25,%%r25,%%r54; add.u32 %%r25,%%r25,%%r23; mul.wide.u32 %%rd11,%%r25,2; add.u64 %%rd13,%%rd3,%%rd11;");
-    o(" mov.b32 %%a2,0; mov.b32 %%a3,0; @%%p5 ld.global.nc.v2.b32 {%%a2,%%a3},[%%rd13];");
+    if (q8) { o(" cvt.u64.u32 %%rd27,%%r25;"); deq4("%rd3", "%rd26", 2, 3); }
+    else o(" mov.b32 %%a2,0; mov.b32 %%a3,0; @%%p5 ld.global.nc.v2.b32 {%%a2,%%a3},[%%rd13];");
     o(" mad.lo.u32 %%r26,%%r22,%d,%%r23; mul.wide.u32 %%rd14,%%r26,2; add.u64 %%rd16,%%rd6,%%rd14; st.shared.v2.b32 [%%rd16],{%%a2,%%a3};", DV);
     o(" add.u32 %%r21,%%r21,%d; bra LV;", NT);
     o("LVE:");
@@ -733,7 +747,8 @@ const char* kRed =
 // Tensor-core GEMMs live in their own module (needs sm_80+); older GPUs keep the SIMT versions.
 std::string gx_ptx_tc() {
     return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_lin_fast("t_linq4", false, false, 1) + gen_lin_fast("t_linq4m", false, false, 2) + gen_flash("t_fa64", 64) + gen_flash("t_fa128", 128) + gen_flash("t_fa72", 72) +
-           gen_flash_kv("t_fkv64", 64, 64) + gen_flash_kv("t_fkv80", 80, 80) + gen_flash_kv("t_fkv96", 96, 96) + gen_flash_kv("t_fkv128", 128, 128) + gen_flash_kv("t_fkv256", 256, 128);
+           gen_flash_kv("t_fkv64", 64, 64) + gen_flash_kv("t_fkv80", 80, 80) + gen_flash_kv("t_fkv96", 96, 96) + gen_flash_kv("t_fkv128", 128, 128) + gen_flash_kv("t_fkv256", 256, 128) +
+           gen_flash_kv("t_fkq64", 64, 64, true) + gen_flash_kv("t_fkq80", 80, 80, true) + gen_flash_kv("t_fkq96", 96, 96, true) + gen_flash_kv("t_fkq128", 128, 128, true) + gen_flash_kv("t_fkq256", 256, 128, true);
 }
 
 std::string gx_ptx() {
