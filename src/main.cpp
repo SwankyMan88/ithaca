@@ -58,7 +58,7 @@ static std::string attach_draft(const std::wstring& path) {
     g_chat.set_draft(nullptr);
     g_draft.unload();
     if (!g_model.loaded() || !g_model.gpu_bytes()) return "needs the main model on the GPU";
-    LoadOpts o = g_opts; o.vram_mb = 1 << 20; o.ram_mb = 0;   // all remaining VRAM (minus a small margin), no RAM tier
+    LoadOpts o = g_opts; o.vram_mb = 1 << 20; o.ram_mb = 0;
     std::string err;
     // The draft's KV cache can be the biggest part; when VRAM is short, give it a shorter context.
     // Past that length the chat simply continues without drafting.
@@ -79,7 +79,8 @@ static std::string attach_draft(const std::wstring& path) {
         }
         g_draft.unload();
     }
-    return "not enough free VRAM for the draft model";
+    size_t fr = 0, tot = 0; Model::cuda().mem_info(fr, tot);
+    return "not enough free VRAM for the draft model (" + std::to_string(fr >> 20) + " MB free)";
 }
 
 // ---------- config ----------
@@ -168,14 +169,15 @@ static bool spec_enabled() {
     const J& v = j["spec_decode"];
     return v.t == J::BOOL ? v.b : true;
 }
-static std::wstring find_draft() {
+// Compatible draft models, best first (same family, then larger = better guesses).
+static std::vector<std::wstring> find_drafts() {
     std::wstring main = utf8_to_w(g_model.path_utf8);
     for (auto& c : main) if (c == L'/') c = L'\\';   // the file list uses backslashes
     uint64_t main_sz = 0;
     for (auto& f : model_files()) if (_wcsicmp(f.first.c_str(), main.c_str()) == 0) main_sz = f.second;
-    if (!main_sz) return L"";
+    if (!main_sz) return {};
     static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe"};
-    std::wstring best; int best_score = -1;
+    std::vector<std::pair<int, std::wstring>> found;
     const int nv = g_model.tok.n_vocab();
     for (auto& f : model_files()) {
         if (f.second * 6 > main_sz || f.second < (50u << 20) || _wcsicmp(f.first.c_str(), main.c_str()) == 0) continue;
@@ -194,9 +196,12 @@ static std::wstring find_draft() {
         for (int i = 0; i < n; i += 7) { checked++; match += t.text(i) == g_model.tok.text(i); }
         if (match < checked * 98 / 100) continue;
         int score = (a == g_model.hp.arch ? 1000000 : 0) + (int)(f.second >> 20);   // same family first, then the largest that is still small
-        if (score > best_score) { best_score = score; best = f.first; }
+        found.push_back({score, f.first});
     }
-    return best;
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<std::wstring> out;
+    for (auto& f : found) out.push_back(f.second);
+    return out;
 }
 static void start_draft(bool force = false) {   // force: the user just switched it on
     const int gen = ++g_load_gen;
@@ -206,10 +211,14 @@ static void start_draft(bool force = false) {   // force: the user just switched
         while (g_model.migrating() && gen == g_load_gen) Sleep(50);
         std::lock_guard<std::mutex> l(g_gen);
         if (gen != g_load_gen || !g_model.loaded()) return;
-        std::wstring d = find_draft();
-        if (d.empty()) { set_draft_state("no matching small model found"); return; }
-        std::string why = attach_draft(d), name = w_to_utf8(d.substr(d.find_last_of(L"\\/") + 1));
-        set_draft_state(why.empty() ? "on: " + name : "off: " + why);
+        std::vector<std::wstring> ds = find_drafts();
+        if (ds.empty()) { set_draft_state("no matching small model found"); return; }
+        std::string why;
+        for (auto& d : ds) {   // when the best draft doesn't fit next to the main model, a smaller one may
+            why = attach_draft(d);
+            if (why.empty()) { set_draft_state("on: " + w_to_utf8(d.substr(d.find_last_of(L"\\/") + 1))); return; }
+        }
+        set_draft_state("off: " + why);
     }).detach();
 }
 static void stop_draft(const char* why) {
