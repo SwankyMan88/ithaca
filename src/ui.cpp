@@ -477,6 +477,14 @@ async function writeMediaPrompt(it,el,history){
 function mediaNote(it,prompt){const k=it.kind=='audio'?'audio':it.kind;
   return `# What is happening (written by Ithaca, not the user)\nIthaca's built-in ${it.kind=='audio'?'speech':it.kind} engine is creating the ${k} right now from this ${it.kind=='audio'?'script':'prompt'}: "${prompt}". It will appear directly below your reply when it is ready.\nReply in 1-2 friendly sentences describing what you are making. Do NOT write code, tags, links, markdown images, or instructions for running anything.`}
 
+// Copies a generated image to the clipboard as PNG, so it can be pasted into another chat or app.
+window.copyImg=async src=>{
+  try{let b=await (await fetch(src)).blob();
+    if(b.type!='image/png'){const im=await createImageBitmap(b),c=document.createElement('canvas');c.width=im.width;c.height=im.height;c.getContext('2d').drawImage(im,0,0);b=await new Promise(r=>c.toBlob(r,'image/png'))}
+    window._clipImg=new File([b],'image.png',{type:'image/png'});   // in-app copy works even where the system clipboard is blocked
+    try{await navigator.clipboard.write([new ClipboardItem({'image/png':b})])}catch(e){}
+    toast('Image copied')}
+  catch(e){toast('Could not copy: '+e.message)}};
 window.viewImg=src=>{const d=document.createElement('div');d.className='lbox';
   d.innerHTML=`<img src="${esc(src)}"><div class="lbar"><a href="${esc(src)}" download>${ico('dl')}Save image</a><button>${ico('x')}Close</button></div>`;
   const close=()=>{d.remove();document.removeEventListener('keydown',k)},k=e=>{if(e.key=='Escape')close()};
@@ -566,7 +574,7 @@ function renderAI(m,live){
   const chips=(m.tools||[]).concat(m.mem||[]);
   if(chips.length)h+='<div>'+chips.map(o=>`<span class="memchip">${ico(o.i||'mem')}${esc(o.k)}${o.t?': '+esc(o.t.length>70?o.t.slice(0,70)+'…':o.t):''}</span>`).join('')+'</div>';
   const b=stripTags(body);h+=md(b);
-  if(m.media)h+=m.media.map(x=>x.url?(x.kind=='image'?`<div class="gwrap"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):'').join('');
+  if(m.media)h+=m.media.map(x=>x.url?(x.kind=='image'?`<div class="gwrap"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):'').join('');
   if(live&&!b&&!think&&!m.passes)h+='<span class="dots"><span></span><span></span><span></span></span>';
   if(m.error)h+=`<div class="err">${esc(m.error)}</div>`;
   return h}
@@ -1076,7 +1084,8 @@ $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.v
 function autosize(){const q=$('q');q.style.height='auto';q.style.height=Math.min(240,q.scrollHeight)+'px';if(!busy)$('send').disabled=!canSend()}
 $('attBtn').onclick=()=>$('fileIn').click();
 $('fileIn').onchange=e=>{addFiles([...e.target.files]);e.target.value=''};
-$('q').addEventListener('paste',e=>{const fs=[...(e.clipboardData||{}).files||[]];if(fs.length){e.preventDefault();addFiles(fs)}});
+$('q').addEventListener('paste',e=>{const cd=e.clipboardData||{},fs=[...cd.files||[]];if(fs.length){e.preventDefault();addFiles(fs);return}
+  if(window._clipImg&&!(cd.getData&&cd.getData('text'))){e.preventDefault();addFiles([window._clipImg])}});
 document.addEventListener('dragover',e=>{if(view!='chat'||!e.dataTransfer.types.includes('Files'))return;e.preventDefault();$('box').classList.add('drop')});
 document.addEventListener('dragleave',e=>{if(!e.relatedTarget)$('box').classList.remove('drop')});
 document.addEventListener('drop',e=>{if(view!='chat'||!e.dataTransfer.files.length)return;e.preventDefault();$('box').classList.remove('drop');addFiles([...e.dataTransfer.files])});

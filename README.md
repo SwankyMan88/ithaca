@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/render.gif" width="460" alt="An image rendering live inside Ithaca's chat">
+  <img src="docs/demo-chat-image.webp" alt="Asking Ithaca for a picture, watching it render, copying it into a new chat and asking what it shows">
 </p>
 
 # Ithaca
@@ -14,9 +14,19 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 - **Runs models bigger than your VRAM.** Layers that don't fit on the GPU go to RAM, and what doesn't fit there streams from the SSD. You can start chatting immediately while layers move up in the background.
 - **Reads images.** Paste or drop a picture into the chat (needs a vision model like Gemma 3).
 - **Reads files.** PDF, Word, PowerPoint, Excel, text and code. Short files go in whole; long ones are searched so the model gets the relevant passages and cites the page.
-- **Makes images, video and speech** from a normal chat message, with a live preview while the image renders.
+- **Makes images, video and speech** from a normal chat message, with a live preview while the image renders. Click an image to view it full size, or use the buttons on it to copy or save it.
 - **Remembers you.** A long-term memory the model can save to, search, edit and delete, which you can manage in Settings.
 - **Downloads models** from GPT4All's list or any Hugging Face GGUF repo, and benchmarks your PC so it can tell you how fast each model will run.
+
+## More demos
+
+**Chat with a PDF.** Attach a file and ask about it. Long files are searched, and the answer points to pages.
+
+<img src="docs/demo-files.webp" alt="Attaching a 24-page PDF and getting a checklist with page numbers">
+
+**Download models and check your PC.** Each model shows whether it fits in VRAM and roughly how fast it will run. The system page lists your hardware.
+
+<img src="docs/demo-models.webp" alt="Browsing downloadable models and the system page">
 
 ## Screenshots
 
