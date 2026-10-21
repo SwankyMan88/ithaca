@@ -175,13 +175,14 @@ static std::wstring find_draft() {
         if (std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) == std::end(ok_arch)) continue;
         Tokenizer t;
         if (!t.load(g, err)) continue;
-        // same tokenizer: vocab sizes within padding, and the token strings agree everywhere we sample
+        // Same vocabulary: sizes within a few percent and nearly every sampled token string identical.
+        // Families often share the base vocabulary but differ in a few special tokens at the end
+        // (Qwen2.5 vs Qwen3); that's fine, since a wrong guess is simply rejected by the main model.
         int dv = t.n_vocab(), n = std::min(nv, dv);
-        if (std::abs(nv - dv) > nv / 100 + 512) continue;
-        bool same = true;
-        for (int i = 0; i < n && same; i += 37) same = t.text(i) == g_model.tok.text(i);
-        for (int i = std::max(0, n - 300); i < n && same; i++) same = t.text(i) == g_model.tok.text(i);
-        if (!same) continue;
+        if (std::abs(nv - dv) > nv / 50 + 512) continue;
+        int checked = 0, match = 0;
+        for (int i = 0; i < n; i += 7) { checked++; match += t.text(i) == g_model.tok.text(i); }
+        if (match < checked * 98 / 100) continue;
         int score = (a == g_model.hp.arch ? 1000000 : 0) + (int)(f.second >> 20);   // same family first, then the largest that is still small
         if (score > best_score) { best_score = score; best = f.first; }
     }
