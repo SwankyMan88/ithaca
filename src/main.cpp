@@ -49,6 +49,8 @@ static LoadOpts g_opts;
 static std::vector<std::wstring> g_extra_dirs;
 static std::wstring g_cfg_path, g_exe_dir;
 
+static std::mutex g_draft_m;
+static std::string g_draft_state = "off";   // shown in the UI
 // Speculative decoding: loads `path` as the draft model into whatever VRAM the main model left over.
 // A draft only helps when it runs entirely on the GPU, so anything else is unloaded again.
 // Returns "" when the draft is active, otherwise the reason it isn't.
@@ -64,7 +66,17 @@ static std::string attach_draft(const std::wstring& path) {
         o.ctx = ctx;
         if (!g_draft.load(path, o, err)) return err;
         while (g_draft.migrating()) Sleep(20);
-        if (g_draft.fully_on_gpu()) { g_chat.set_draft(&g_draft); return ""; }
+        if (g_draft.fully_on_gpu()) {
+            g_chat.set_draft(&g_draft);
+            // the draft lives in VRAM the main model may need later: it steps aside when the chat grows
+            g_model.on_vram_short = [] {
+                if (!g_chat.draft()) return false;
+                g_chat.set_draft(nullptr); g_draft.unload();
+                std::lock_guard<std::mutex> l(g_draft_m); g_draft_state = "paused: the conversation needed its VRAM";
+                return true;
+            };
+            return "";
+        }
         g_draft.unload();
     }
     return "not enough free VRAM for the draft model";
@@ -143,8 +155,6 @@ static std::string models_json() {
 
 // ---------- automatic speculative decoding ----------
 // After a model loads, look for a much smaller model with the same tokenizer and run it as the draft.
-static std::mutex g_draft_m;
-static std::string g_draft_state = "off";   // shown in the UI
 static std::atomic<int> g_load_gen{0};
 static void set_draft_state(const std::string& s) { std::lock_guard<std::mutex> l(g_draft_m); g_draft_state = s; }
 static bool spec_enabled() {

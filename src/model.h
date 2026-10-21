@@ -35,6 +35,7 @@ struct Layer {
     // VRAM-resident copies used when the whole layer runs on the GPU
     uint64_t d_an = 0, d_fn = 0, d_qn = 0, d_kn = 0, d_bq = 0, d_bk = 0, d_bv = 0, d_kc = 0, d_vc = 0, d_pan = 0, d_pfn = 0;
     int kv_dev = 0;  // device KV cache valid for positions [0, kv_dev)
+    int kv_cap = 0;  // positions the device KV buffers can hold (grows with the conversation)
     size_t bytes() const { return hi > lo ? (size_t)(hi - lo) : 0; }
 };
 
@@ -76,6 +77,9 @@ public:
     bool migrating() const { return migrating_; }
     int64_t gpu_bytes() const { return gpu_bytes_; }
     bool fully_on_gpu() const { return dev_ok_ && all_gpu(); }
+    // Called when growing the KV cache runs out of VRAM; returns true if it freed something (e.g. a draft model).
+    std::function<bool()> on_vram_short;
+    int64_t kv_bytes_gpu() const;
     void bench_gpu();
 
     static CudaTier& cuda();
@@ -90,6 +94,8 @@ private:
     void ensure_buffers(int n);
     bool alloc_dev_buffers();
     void gpu_layer(Layer& L, int n, unsigned nc = 0);
+    bool ensure_kv(int need);
+    std::mutex kv_m_;
     void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y);
     std::atomic<bool> tc_prefill_{false};
     uint64_t dev_vec(const std::vector<float>& v);

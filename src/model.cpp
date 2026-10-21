@@ -294,9 +294,13 @@ void Model::tier_thread() {
             L.d_qn = dev_vec(L.q_norm); L.d_kn = dev_vec(L.k_norm);
             L.d_bq = dev_vec(L.bq); L.d_bk = dev_vec(L.bk); L.d_bv = dev_vec(L.bv);
             L.d_pan = dev_vec(L.post_attn_norm); L.d_pfn = dev_vec(L.post_ffn_norm);
-            L.d_kc = cuda().alloc((size_t)ctx * kvd * 2); L.d_vc = cuda().alloc((size_t)ctx * kvd * 2);
-            if (L.d_kc) dev_allocs_.push_back(L.d_kc);
-            if (L.d_vc) dev_allocs_.push_back(L.d_vc);
+            {   // the KV cache starts small and grows with the conversation (ensure_kv); the tier plan
+                // already budgets the full context, so growing never pushes this model out of VRAM
+                std::lock_guard<std::mutex> kl(kv_m_);
+                int cap = std::min(ctx, std::max(1024, (n_past + 256 + 511) / 512 * 512));   // room for one more batch
+                L.d_kc = cuda().alloc((size_t)cap * kvd * 2); L.d_vc = cuda().alloc((size_t)cap * kvd * 2);
+                L.kv_cap = cap;
+            }
             ok = L.d_an && L.d_fn && L.d_kc && L.d_vc;
             L.kv_dev = 0;
         }
@@ -351,7 +355,12 @@ void Model::unload() {
     for (uint64_t p : dev_allocs_) cuda().free(p);
     dev_allocs_.clear();
     dX_ = dXN_ = dQ_ = dK_ = dV_ = dATT_ = dF1_ = dF2_ = dT_ = dLOG_ = dSC_ = dCS_ = d_onorm_ = 0;
-    for (auto& L : layers_) for (Lin* l : L.lins()) fr(*l);
+    for (auto& L : layers_) {
+        for (Lin* l : L.lins()) fr(*l);
+        if (L.d_kc) cuda().free(L.d_kc);
+        if (L.d_vc) cuda().free(L.d_vc);
+        L.d_kc = L.d_vc = 0; L.kv_cap = 0;
+    }
     layers_.clear();
     out_.t = nullptr; out_state_ = TIER_DISK;
     if (dLOGA_) { cuda().free(dLOGA_); dLOGA_ = 0; } loga_rows_ = 0;
@@ -575,6 +584,46 @@ void Model::moe_gpu(Layer& L, int n) {
     }
 }
 
+// Grows every VRAM layer's KV buffers to hold `need` positions (doubling, capped at ctx).
+// If VRAM is short, on_vram_short gets a chance to free memory (the app drops the draft model).
+bool Model::ensure_kv(int need) {
+    if (!dev_ok_) return true;
+    std::lock_guard<std::mutex> kl(kv_m_);
+    const size_t kvd = (size_t)hp.n_kv * hp.hd;
+    bool grew = false;
+    for (auto& L : layers_) {
+        if (!L.d_kc || L.kv_cap >= need) continue;
+        int cap = std::min(ctx, std::max(need, L.kv_cap * 2));
+        cap = std::min(ctx, (cap + 255) / 256 * 256);
+        uint64_t nk = 0, nv = 0;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            nk = cuda().alloc((size_t)cap * kvd * 2); nv = nk ? cuda().alloc((size_t)cap * kvd * 2) : 0;
+            if (nk && nv) break;
+            if (nk) cuda().free(nk);
+            nk = nv = 0;
+            if (attempt || !on_vram_short || !on_vram_short()) return false;
+        }
+        cuda().dtod(nk, L.d_kc, (size_t)L.kv_cap * kvd * 2);
+        cuda().dtod(nv, L.d_vc, (size_t)L.kv_cap * kvd * 2);
+        cuda().sync();
+        cuda().free(L.d_kc); cuda().free(L.d_vc);
+        L.d_kc = nk; L.d_vc = nv; L.kv_cap = cap;
+        grew = true;
+    }
+    if (grew) {   // captured graphs hold the old KV pointers
+        cuda().graph_destroy(graph_); graph_ = nullptr;
+        for (auto& kv : seg_graphs_) cuda().graph_destroy(kv.second);
+        seg_graphs_.clear();
+    }
+    return true;
+}
+
+int64_t Model::kv_bytes_gpu() const {
+    int64_t b = 0;
+    for (auto& L : layers_) if (L.d_kc) b += (int64_t)L.kv_cap * hp.n_kv * hp.hd * 4;
+    return b;
+}
+
 void Model::rewind(int n) {
     if (n < n_past) n_past = n;
     for (auto& L : layers_) if (L.kv_dev > n) L.kv_dev = n;
@@ -691,6 +740,7 @@ const float* Model::eval(const int* toks, int n_all) {
     double ev0 = now_sec();
     EvT evt{evp, ev0};
     if (!loaded_ || n_all <= 0 || n_past + n_all > ctx) return nullptr;
+    if (!ensure_kv(n_past + n_all)) return nullptr;
     if (n_all == 1 && toks[0] >= 0 && dev_ok_ && !migrating_ && all_gpu()) {
         // Fully VRAM-resident decode: replay one CUDA graph for the whole forward pass.
         CudaTier& cu = cuda();
