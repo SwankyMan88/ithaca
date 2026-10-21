@@ -281,6 +281,16 @@ void Model::tier_thread() {
     bool any_gpu = out_plan_ == TIER_GPU;
     for (auto& L : layers_) any_gpu |= L.plan == TIER_GPU;
     if (any_gpu) dev_ok_ = alloc_dev_buffers();
+    f_gqa_ = nullptr;
+    {   // decode attention sized for this model's head layout (query heads per kv head, head dim)
+        const int G = hp.n_head / std::max(1, hp.n_kv), NT = (hp.hd + 31) / 32;
+        if (dev_ok_ && G >= 1 && G <= 8 && NT <= 8 && G * NT * 32 <= 1024 && !getenv("ITHACA_NO_GQA")) {
+            extern std::string gqa_attn_ptx(int, int);
+            std::string log;
+            if (void* mod = cuda().load_module(gqa_attn_ptx(G, NT), log)) f_gqa_ = cuda().function(mod, "k_attn_gqa");
+            else fprintf(stderr, "[gpu] decode attention JIT failed: %s\n", log.c_str());
+        }
+    }
     if (dev_ok_ && !getenv("ITHACA_NO_TC_PREFILL")) { std::string e; tc_prefill_ = (gx().ok() || gx().init(e)) && gx().tensor_cores(); }
     const size_t kvd = (size_t)hp.n_kv * hp.hd;
     for (size_t li = 0; li < layers_.size(); li++) {
@@ -669,8 +679,13 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     // Decode splits each head's keys over 16 CTAs (flash-decoding) so long chats keep the GPU busy.
     unsigned spl = n == 1 ? 16 : 1;
     double Ta = ppn ? (cu.sync(), now_sec()) : 0;
-    // Prompts: tensor-core flash attention straight from the KV cache; decode: the split-K kernel below.
-    if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc)))
+    // Prompts: tensor-core flash attention straight from the KV cache. Decode: one CTA per kv head reads the
+    // cache once for all query heads sharing it (GQA), split over 16 key ranges; else the per-head kernel.
+    if (n == 1 && f_gqa_) {
+        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win};
+        cu.launch_raw(f_gqa_, nkv, spl, 1, 256, 0, a);
+    }
+    else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc)))
         cu.launch(CudaTier::ATTN, nh, un * spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &scale, &spl, &dPM_, &dPL_, &dPO_, &win, &nc});
     if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
     static double t_attn = 0, t_all = 0; static int calls = 0;
@@ -718,7 +733,9 @@ void Model::bench_gpu() {
     timeit("rmsnorm", d * 8.0, [&] { cu.launch(CudaTier::RMSNORM, 1, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps}); });
     timeit("add", d * 12.0, [&] { cu.ew(CudaTier::ADD, d, {&dXN_, &dT_, &one}); });
     unsigned hd = hp.hd, nh = hp.n_head, kvd = hp.n_kv * hp.hd, grp = hp.n_head / hp.n_kv, ctxu = ctx; float sc = 0.1f;
-    for (unsigned pos : {64u, 1024u, 3000u}) {
+    ensure_kv(std::min(ctx, 7000));
+    for (unsigned pos : {64u, 1024u, 3000u, 6000u}) {
+        if ((int)pos >= ctx) break;
         char nm[32]; snprintf(nm, sizeof nm, "attn @%u", pos);
         cu.htod(dPOS_, &pos, 4);
         unsigned spl = 16;
@@ -727,6 +744,14 @@ void Model::bench_gpu() {
             cu.launch(CudaTier::ATTN, nh, spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &sc, &spl, &dPM_, &dPL_, &dPO_, &z0, &z0});
             cu.launch(CudaTier::ATTN_COMB, nh, 1, 128, {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
         });
+        if (f_gqa_) {
+            snprintf(nm, sizeof nm, "gqa @%u", pos);
+            unsigned z1 = 0;
+            timeit(nm, (double)pos * kvd * 4, [&] {
+                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1};
+                cu.launch_raw(f_gqa_, hp.n_kv, spl, 1, 256, 0, a);
+            });
+        }
     }
     if (out_.dptr.load()) timeit("mm output", cost(&out_), [&] { cu.matmul_dev(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, 1, out_.cols, out_.rows, dLOG_); });
 }

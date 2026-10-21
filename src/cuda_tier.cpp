@@ -336,14 +336,15 @@ template <class T> static bool load_sym(HMODULE h, T& fp, const char* n) {
 
 // Set ITHACA_PROF=1 to time every kernel (synchronizes after each launch, slows things down).
 static bool g_prof = getenv("ITHACA_PROF") != nullptr;
-static double g_pt[16]; static long g_pc[16]; static long g_ptot;
+static double g_pt[32]; static long g_pc[32]; static long g_ptot;
 static void prof_end(int slot, double t0) {
     cuStreamSynchronize(nullptr); cuCtxSynchronize();
     g_pt[slot] += now_sec() - t0; g_pc[slot]++;
-    if (++g_ptot % 20000 == 0) {
-        static const char* nm[16] = {"add", "bias", "silu", "silu_split", "f16", "copy2d", "rmsnorm", "rope", "attn", "mm_q4", "mm_q8"};
+    if (++g_ptot % 4000 == 0) {
+        static const char* nm[32] = {"add", "bias", "silu", "silu_split", "f16", "copy2d", "rmsnorm", "rope", "attn", "kvstore", "attn_comb", "gelu", "gather", "scatter", "attn_gqa",
+                                     "", "", "", "", "", "mm_q4", "mm_q8", "mm_q4m"};
         fprintf(stderr, "[prof]");
-        for (int i = 0; i < 11; i++) if (g_pc[i]) fprintf(stderr, " %s %.1fus x%ld |", nm[i], g_pt[i] / g_pc[i] * 1e6, g_pc[i]);
+        for (int i = 0; i < 32; i++) if (g_pc[i]) fprintf(stderr, " %s %.1fus x%ld |", nm[i], g_pt[i] / g_pc[i] * 1e6, g_pc[i]);
         fprintf(stderr, "\n");
     }
 }
@@ -548,7 +549,7 @@ bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int 
     uint64_t Q = W + qoff;
     void* args[9] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &un};
     bool ok = cuLaunchKernel(fn_[kind], (r + 8 * kRows - 1) / (8 * kRows), (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
-    if (g_prof) prof_end(9 + kind, t0);
+    if (g_prof) prof_end(20 + kind, t0);
     return ok;
 }
 

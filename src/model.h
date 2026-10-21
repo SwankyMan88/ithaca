@@ -95,6 +95,7 @@ private:
     bool alloc_dev_buffers();
     void gpu_layer(Layer& L, int n, unsigned nc = 0);
     bool ensure_kv(int need);
+    void* f_gqa_ = nullptr;   // decode attention generated for this model's head layout
     std::mutex kv_m_;
     void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y);
     std::atomic<bool> tc_prefill_{false};

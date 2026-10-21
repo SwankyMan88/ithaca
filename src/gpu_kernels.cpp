@@ -150,6 +150,82 @@ std::string gen_attn() {
          "DONE:\n ret;\n}\n";
     return s;
 }
+
+// Decode attention for grouped-query models: grid = (n_kv_heads, splits), 256 threads (8 warps).
+// A CTA reads each cached key/value of its kv head once and serves all G query heads that share it,
+// with an online softmax in registers (no score buffer). Each split writes (max, sum, out) partials for
+// k_attn_comb. Generated per model for its exact G (query heads per kv head) and NT = ceil(head_dim / 32),
+// so the accumulators stay in registers.
+std::string gen_attn_gqa(int G, int NT) {
+    std::string s;
+    char b[300];
+    auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); s += b; s += "\n"; };
+    s += ".visible .entry k_attn_gqa(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pPM, .param .u64 pPL, .param .u64 pPO,"
+         " .param .u32 pHD, .param .u32 pKVD, .param .u32 pGRP, .param .u64 pPOS, .param .f32 pSCALE, .param .u32 pSPL, .param .u32 pWIN)\n{\n"
+         " .reg .pred %p<8>; .reg .pred %ps<8>; .reg .b32 %r<48>; .reg .f32 %f<24>; .reg .b64 %rd<24>; .reg .b16 %h;\n";
+    L(" .reg .f32 %%q<%d>; .reg .f32 %%o<%d>; .reg .f32 %%m<%d>; .reg .f32 %%l<%d>; .reg .f32 %%k<%d>; .reg .f32 %%v<%d>;", G * NT, G * NT, G, G, NT, NT);
+    L(" .shared .align 4 .f32 sO[%d]; .shared .align 4 .f32 sM[%d]; .shared .align 4 .f32 sL[%d];", 8 * G * NT * 32, 8 * G, 8 * G);
+    s += " ld.param.u64 %rd1,[pQ]; ld.param.u64 %rd2,[pK]; ld.param.u64 %rd3,[pV]; ld.param.u64 %rd4,[pPM]; ld.param.u64 %rd5,[pPL]; ld.param.u64 %rd6,[pPO];\n"
+         " ld.param.u32 %r1,[pHD]; ld.param.u32 %r2,[pKVD]; ld.param.u64 %rd7,[pPOS]; ld.param.f32 %f1,[pSCALE];\n"
+         " ld.param.u32 %r4,[pSPL]; ld.param.u32 %r5,[pWIN];\n"
+         " mov.u32 %r6,%ctaid.x; mov.u32 %r7,%ctaid.y; mov.u32 %r8,%tid.x; shr.u32 %r9,%r8,5; and.b32 %r10,%r8,31;\n"
+         " ld.global.u32 %r11,[%rd7]; add.u32 %r11,%r11,1;\n"
+         " mov.u32 %r12,0; setp.ne.u32 %p1,%r5,0; @%p1 setp.gt.u32 %p1,%r11,%r5; @%p1 sub.u32 %r12,%r11,%r5;\n"
+         " sub.u32 %r13,%r11,%r12; add.u32 %r13,%r13,%r4; sub.u32 %r13,%r13,1; div.u32 %r13,%r13,%r4;\n"
+         " mad.lo.u32 %r14,%r7,%r13,%r12; add.u32 %r15,%r14,%r13; min.u32 %r15,%r15,%r11;\n"
+         " mul.f32 %f1,%f1,0f3FB8AA3B;\n";
+    L(" mul.lo.u32 %%r16,%%r6,%d; mul.lo.u32 %%r17,%%r6,%%r1;", G);
+    for (int t = 0; t < NT; t++) L(" add.u32 %%r%d,%%r10,%d; setp.lt.u32 %%ps%d,%%r%d,%%r1;", 20 + t, 32 * t, t, 20 + t);
+    for (int g = 0; g < G; g++) {
+        L(" add.u32 %%r18,%%r16,%d; mul.lo.u32 %%r18,%%r18,%%r1; mov.f32 %%m%d,0fF149F2CA; mov.f32 %%l%d,0f00000000;", g, g, g);
+        for (int t = 0; t < NT; t++)
+            L(" add.u32 %%r19,%%r18,%%r%d; mul.wide.u32 %%rd8,%%r19,4; add.u64 %%rd8,%%rd1,%%rd8; mov.f32 %%q%d,0f00000000; @%%ps%d ld.global.f32 %%q%d,[%%rd8]; mul.f32 %%q%d,%%q%d,%%f1; mov.f32 %%o%d,0f00000000;",
+              20 + t, g * NT + t, t, g * NT + t, g * NT + t, g * NT + t, g * NT + t);
+    }
+    s += " add.u32 %r30,%r14,%r9;\n"
+         "LJ:\n setp.ge.u32 %p3,%r30,%r15; @%p3 bra EJ;\n"
+         " mad.lo.u32 %r31,%r30,%r2,%r17;\n";
+    for (int t = 0; t < NT; t++)
+        L(" add.u32 %%r32,%%r31,%%r%d; mul.wide.u32 %%rd9,%%r32,2; add.u64 %%rd10,%%rd2,%%rd9; add.u64 %%rd11,%%rd3,%%rd9;"
+          " mov.f32 %%k%d,0f00000000; mov.f32 %%v%d,0f00000000; @%%ps%d ld.global.nc.b16 %%h,[%%rd10]; @%%ps%d cvt.f32.f16 %%k%d,%%h; @%%ps%d ld.global.nc.b16 %%h,[%%rd11]; @%%ps%d cvt.f32.f16 %%v%d,%%h;",
+          20 + t, t, t, t, t, t, t, t, t);
+    for (int g = 0; g < G; g++) {
+        L(" mul.f32 %%f2,%%q%d,%%k0;", g * NT);
+        for (int t = 1; t < NT; t++) L(" fma.rn.f32 %%f2,%%q%d,%%k%d,%%f2;", g * NT + t, t);
+        for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f3,%%f2,%d,31,0xffffffff; add.f32 %%f2,%%f2,%%f3;", o);
+        L(" max.f32 %%f4,%%m%d,%%f2; sub.f32 %%f5,%%m%d,%%f4; ex2.approx.f32 %%f5,%%f5; sub.f32 %%f6,%%f2,%%f4; ex2.approx.f32 %%f6,%%f6;", g, g);
+        L(" fma.rn.f32 %%l%d,%%l%d,%%f5,%%f6; mov.f32 %%m%d,%%f4;", g, g, g);
+        for (int t = 0; t < NT; t++) L(" mul.f32 %%o%d,%%o%d,%%f5; fma.rn.f32 %%o%d,%%f6,%%v%d,%%o%d;", g * NT + t, g * NT + t, g * NT + t, t, g * NT + t);
+    }
+    s += " add.u32 %r30,%r30,8; bra LJ;\nEJ:\n";
+    s += " mov.u64 %rd12,sO; mov.u64 %rd13,sM; mov.u64 %rd14,sL; setp.eq.u32 %p4,%r10,0;\n";
+    for (int g = 0; g < G; g++) {
+        L(" mov.u32 %%r33,%d; mad.lo.u32 %%r33,%%r9,%d,%%r33; mul.lo.u32 %%r33,%%r33,%%r1;", g, G);
+        for (int t = 0; t < NT; t++)
+            L(" add.u32 %%r34,%%r33,%%r%d; mul.wide.u32 %%rd15,%%r34,4; add.u64 %%rd15,%%rd12,%%rd15; @%%ps%d st.shared.f32 [%%rd15],%%o%d;", 20 + t, t, g * NT + t);
+        L(" mov.u32 %%r35,%d; mad.lo.u32 %%r35,%%r9,%d,%%r35; mul.wide.u32 %%rd16,%%r35,4;"
+          " add.u64 %%rd17,%%rd13,%%rd16; @%%p4 st.shared.f32 [%%rd17],%%m%d; add.u64 %%rd18,%%rd14,%%rd16; @%%p4 st.shared.f32 [%%rd18],%%l%d;", g, G, g, g);
+    }
+    s += " bar.sync 0;\n";
+    L(" mul.lo.u32 %%r36,%%r1,%d; mov.u32 %%r37,%%r8;", G);
+    s += "LC:\n setp.ge.u32 %p5,%r37,%r36; @%p5 bra DONE;\n"
+         " div.u32 %r38,%r37,%r1; rem.u32 %r39,%r37,%r1;\n"
+         " mov.f32 %f7,0fF149F2CA;\n";
+    for (int w = 0; w < 8; w++) L(" mov.u32 %%r40,%d; add.u32 %%r40,%%r40,%%r38; mul.wide.u32 %%rd19,%%r40,4; add.u64 %%rd19,%%rd13,%%rd19; ld.shared.f32 %%f8,[%%rd19]; max.f32 %%f7,%%f7,%%f8;", w * G);
+    s += " mov.f32 %f9,0f00000000; mov.f32 %f10,0f00000000;\n";
+    for (int w = 0; w < 8; w++) {
+        L(" mov.u32 %%r40,%d; add.u32 %%r40,%%r40,%%r38; mul.wide.u32 %%rd19,%%r40,4; add.u64 %%rd20,%%rd13,%%rd19; ld.shared.f32 %%f8,[%%rd20];", w * G);
+        s += " sub.f32 %f11,%f8,%f7; ex2.approx.f32 %f11,%f11; add.u64 %rd21,%rd14,%rd19; ld.shared.f32 %f12,[%rd21]; fma.rn.f32 %f9,%f12,%f11,%f9;\n";
+        L(" mov.u32 %%r41,%d; add.u32 %%r41,%%r41,%%r38; mad.lo.u32 %%r41,%%r41,%%r1,%%r39; mul.wide.u32 %%rd22,%%r41,4; add.u64 %%rd22,%%rd12,%%rd22; ld.shared.f32 %%f13,[%%rd22]; fma.rn.f32 %%f10,%%f13,%%f11,%%f10;", w * G);
+    }
+    s += " add.u32 %r42,%r16,%r38; mad.lo.u32 %r43,%r42,%r4,%r7;\n"
+         " mad.lo.u32 %r44,%r43,%r1,%r39; mul.wide.u32 %rd23,%r44,4; add.u64 %rd23,%rd6,%rd23; st.global.f32 [%rd23],%f10;\n"
+         " setp.ne.u32 %p6,%r39,0; @%p6 bra NX;\n"
+         " mul.f32 %f14,%f7,0f3F317218; mul.wide.u32 %rd23,%r43,4; add.u64 %rd8,%rd4,%rd23; st.global.f32 [%rd8],%f14; add.u64 %rd9,%rd5,%rd23; st.global.f32 [%rd9],%f9;\n"
+         "NX:\n add.u32 %r37,%r37,256; bra LC;\n"
+         "DONE:\n ret;\n}\n";
+    return s;
+}
 }  // namespace
 
 std::string gpu_ops_ptx() {
@@ -274,3 +350,6 @@ std::string gpu_ops_ptx() {
     s += gen_attn();
     return s;
 }
+
+// Per-model decode attention module (see gen_attn_gqa).
+std::string gqa_attn_ptx(int G, int NT) { return ".version 6.0\n.target sm_61\n.address_size 64\n" + gen_attn_gqa(G, NT); }
