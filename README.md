@@ -43,7 +43,7 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 3. Click **Models** in the sidebar and download one, or point it at a folder of `.gguf` files you already have. It also finds models from GPT4All and LM Studio on its own.
 4. Load the model and start typing.
 
-Settings, chats and memories are kept next to the exe, so the folder is portable.
+Settings, chats and memories are kept next to the exe, so the folder is portable. To stop Ithaca, use **Quit** in the sidebar or close its console window; nothing keeps running and all memory is freed. Starting it again while it runs just opens the existing window.
 
 ## Models
 
@@ -72,8 +72,12 @@ Measured on an RTX 3060 12 GB with 16 GB RAM and a SATA SSD.
 | Granite 3.1 MoE 3B Q4_K_M | 211 tok/s | 700 tok/s |
 | Gemma 3 4B Q4_K_M | 66 tok/s | 1,060 tok/s |
 | Granite 4.1 8B Q4_0 | 45 tok/s | 460 tok/s |
-| Qwen3 14B Q4_0 | 32 tok/s | |
+| Qwen3 14B Q4_0 | 28 tok/s | 200–260 tok/s |
+| Qwen3 14B Q4_0, code, with Qwen3 0.6B as draft | 44 tok/s | |
+| Qwen3 14B Q4_0, after a 6,900-token prompt | 25 tok/s | |
 
+- **Speculative decoding:** if a small model with the same vocabulary is installed (for example Qwen3 0.6B next to Qwen3 14B), Ithaca uses it automatically to draft tokens that the main model checks. It mostly helps code and structured text, pauses itself when it doesn't help, and only runs when there is spare VRAM. It can be turned off in Settings → Model & hardware.
+- **Long chats stay fast:** the conversation cache is stored as 8-bit in VRAM and only grows as the chat does.
 - Loading an 8B model onto the GPU takes about 1.5 s once the file is in the OS cache.
 - Reading an image takes about 0.7 s.
 - A 1024 px SDXL image at 20 steps takes about a minute.
