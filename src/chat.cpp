@@ -185,7 +185,111 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         if (p.size() >= 8 && p.compare(p.size() - 8, 8, "<think>\n") == 0) on_text("<think>\n");
     }
     std::vector<int> recent(cache_.end() - std::min<size_t>(cache_.size(), 64), cache_.end());
-    for (int i = 0; i < budget; i++) {
+    // Emits one sampled token; false = stop (end token, budget, client gone).
+    bool done = false;
+    auto emit = [&](int id) -> bool {
+        if (m_.tok.is_stop(id) || st.gen_tokens >= budget) { done = true; return false; }
+        pending += m_.tok.piece(id);
+        size_t ok = pending.size();
+        for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {
+            unsigned char c = pending[pending.size() - back];
+            if ((c & 0xC0) == 0x80) continue;
+            int need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            if ((int)back < need) ok = pending.size() - back;
+            break;
+        }
+        st.gen_tokens++;
+        recent.push_back(id); if (recent.size() > 64) recent.erase(recent.begin());
+        if (ok > 0) {
+            if (!on_text(pending.substr(0, ok))) { pending.clear(); done = true; return false; }
+            pending.erase(0, ok);
+        }
+        return true;
+    };
+    if (draft_ && draft_->loaded()) {
+        const int V = m_.hp.n_vocab, DV = draft_->hp.n_vocab;
+        int next = sample(logits, o, recent);   // emitted, not yet in the main model's cache
+        if (emit(next)) {
+            // Self-tuning: K follows the recent acceptance rate, and drafting pauses whenever it measures
+            // slower than plain decoding (prose often is; code and repetitive text usually aren't).
+            double acc = 0.6, spec_tps = 0, plain_tps = 0;
+            int plain_left = 0;
+            while (!done) {
+                if (plain_left > 0) {   // plain decoding stretch, also measures the baseline speed
+                    double tp = now_sec();
+                    cache_.push_back(next);
+                    const float* lg = m_.eval(&next, 1);
+                    if (!lg) { done = true; break; }
+                    int id = sample(lg, o, recent);
+                    if (!emit(id)) break;
+                    next = id;
+                    double r = 1.0 / std::max(1e-4, now_sec() - tp);
+                    plain_tps = plain_tps ? 0.8 * plain_tps + 0.2 * r : r;
+                    plain_left--;
+                    if (m_.n_past + 10 >= m_.ctx) break;
+                    continue;
+                }
+                double ts = now_sec();
+                std::vector<int> hist = cache_; hist.push_back(next);
+                const int K = std::max(2, std::min(draft_k + 2, (int)std::lround(1 + 6 * acc)));
+                if (m_.n_past + K + 2 >= m_.ctx || draft_->n_past + K + 2 >= draft_->ctx) break;
+                // bring the draft up to the same history, then let it guess K tokens greedily
+                size_t c = 0;
+                while (c < dcache_.size() && c < hist.size() && dcache_[c] == hist[c]) c++;
+                if (c == hist.size()) c--;
+                draft_->rewind((int)c); dcache_.assign(hist.begin(), hist.begin() + c);
+                double ta = now_sec();
+                const float* dl = draft_->eval(hist.data() + c, (int)(hist.size() - c));
+                if (!dl) break;
+                dcache_ = hist;
+                std::vector<int> d;
+                for (int k = 0; k < K; k++) {
+                    int t = (int)(std::max_element(dl, dl + DV) - dl);
+                    if (t >= V || m_.tok.is_stop(t)) break;
+                    d.push_back(t);
+                    if (k + 1 < K) { dl = draft_->eval(&t, 1); if (!dl) break; dcache_.push_back(t); }
+                }
+                // the main model scores [next, d...] in one pass
+                std::vector<int> batch(1, next); batch.insert(batch.end(), d.begin(), d.end());
+                const int base = m_.n_past;
+                double tb = now_sec();
+                const float* L = m_.eval_all(batch.data(), (int)batch.size());
+                static double sd = 0, sv = 0; static int steps = 0;
+                sd += tb - ta; sv += now_sec() - tb;
+                if (getenv("ITHACA_SPECPROF") && ++steps % 20 == 0) fprintf(stderr, "[spec] draft %.1f ms, verify %.1f ms per step\n", sd / steps * 1e3, sv / steps * 1e3);
+                if (!L) { done = true; break; }
+                st.drafted += (int)d.size();
+                size_t j = 0; int s = -1;
+                for (; j <= d.size(); j++) {
+                    s = sample(L + j * (size_t)V, o, recent);
+                    if (j < d.size() && s == d[j]) { st.accepted++; if (!emit(s)) break; continue; }
+                    break;
+                }
+                // keep [next, accepted drafts] in the cache; s becomes the new pending token
+                m_.rewind(base + 1 + (int)std::min(j, d.size()));
+                cache_ = hist; cache_.insert(cache_.end(), d.begin(), d.begin() + std::min(j, d.size()));
+                if (done) break;
+                if (!emit(s)) break;
+                next = s;
+                acc = 0.7 * acc + 0.3 * (d.empty() ? 0.0 : (double)std::min(j, d.size()) / d.size());
+                double r = (1 + std::min(j, d.size())) / std::max(1e-4, now_sec() - ts);
+                spec_tps = spec_tps ? 0.7 * spec_tps + 0.3 * r : r;
+                if (plain_tps && spec_tps < plain_tps * 0.97) { plain_left = 24; spec_tps = 0; }   // retry drafting later
+                else if (!plain_tps && st.gen_tokens > 12) plain_left = 8;                         // measure the baseline once
+            }
+            if (!done && !(m_.n_past >= m_.ctx)) {   // context nearly full: finish without drafting
+                cache_.push_back(next);
+                logits = m_.eval(&next, 1);
+                for (; logits && !done && m_.n_past < m_.ctx;) {
+                    int id = sample(logits, o, recent);
+                    if (!emit(id)) break;
+                    cache_.push_back(id);
+                    logits = m_.eval(&id, 1);
+                }
+            }
+        }
+    }
+    else for (int i = 0; i < budget; i++) {
         int id = sample(logits, o, recent);
         if (m_.tok.is_stop(id)) break;
         pending += m_.tok.piece(id);

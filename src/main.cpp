@@ -13,7 +13,7 @@ extern std::wstring g_store_dir;
 bool handle_store(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out);
 bool handle_hub(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out);
 
-static Model g_model;
+static Model g_model, g_draft;   // g_draft: small model for speculative decoding
 static Vision g_vision;
 static Chat g_chat(g_model, &g_vision);
 static bool g_has_vision = false;   // an mmproj for the loaded model sits next to it
@@ -48,6 +48,27 @@ static std::mutex g_stats_m;
 static LoadOpts g_opts;
 static std::vector<std::wstring> g_extra_dirs;
 static std::wstring g_cfg_path, g_exe_dir;
+
+// Speculative decoding: loads `path` as the draft model into whatever VRAM the main model left over.
+// A draft only helps when it runs entirely on the GPU, so anything else is unloaded again.
+// Returns "" when the draft is active, otherwise the reason it isn't.
+static std::string attach_draft(const std::wstring& path) {
+    g_chat.set_draft(nullptr);
+    g_draft.unload();
+    if (!g_model.loaded() || !g_model.gpu_bytes()) return "needs the main model on the GPU";
+    LoadOpts o = g_opts; o.vram_mb = 1 << 20; o.ram_mb = 0;   // all remaining VRAM (minus a small margin), no RAM tier
+    std::string err;
+    // The draft's KV cache can be the biggest part; when VRAM is short, give it a shorter context.
+    // Past that length the chat simply continues without drafting.
+    for (int ctx = std::max(1024, o.ctx); ctx >= 1024; ctx /= 2) {
+        o.ctx = ctx;
+        if (!g_draft.load(path, o, err)) return err;
+        while (g_draft.migrating()) Sleep(20);
+        if (g_draft.fully_on_gpu()) { g_chat.set_draft(&g_draft); return ""; }
+        g_draft.unload();
+    }
+    return "not enough free VRAM for the draft model";
+}
 
 // ---------- config ----------
 static void save_cfg() {
@@ -94,7 +115,7 @@ static void scan(const std::wstring& dir, int depth, std::vector<std::pair<std::
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
-static std::string models_json() {
+static std::vector<std::pair<std::wstring, uint64_t>> model_files() {
     std::vector<std::wstring> dirs = {g_exe_dir + L"\\models"};
     wchar_t buf[MAX_PATH];
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) dirs.push_back(std::wstring(buf) + L"\\nomic.ai\\GPT4All");
@@ -107,6 +128,10 @@ static std::string models_json() {
     for (auto& d : dirs) scan(d, d.find(L"Downloads") != std::wstring::npos ? 4 : 0, found);
     std::sort(found.begin(), found.end());
     found.erase(std::unique(found.begin(), found.end()), found.end());
+    return found;
+}
+static std::string models_json() {
+    auto found = model_files();
     std::string s = "[";
     for (size_t i = 0; i < found.size(); i++) {
         std::wstring name = found[i].first.substr(found[i].first.find_last_of(L'\\') + 1);
@@ -116,13 +141,82 @@ static std::string models_json() {
     return s + "]";
 }
 
+// ---------- automatic speculative decoding ----------
+// After a model loads, look for a much smaller model with the same tokenizer and run it as the draft.
+static std::mutex g_draft_m;
+static std::string g_draft_state = "off";   // shown in the UI
+static std::atomic<int> g_load_gen{0};
+static void set_draft_state(const std::string& s) { std::lock_guard<std::mutex> l(g_draft_m); g_draft_state = s; }
+static bool spec_enabled() {
+    std::wstring p = g_store_dir + L"\\prefs.json";
+    FILE* f = _wfopen(p.c_str(), L"rb");
+    if (!f) return true;
+    std::string t; char b[4096]; size_t r;
+    while ((r = fread(b, 1, sizeof b, f)) > 0) t.append(b, r);
+    fclose(f);
+    J j; json_parse(t, j);
+    const J& v = j["spec_decode"];
+    return v.t == J::BOOL ? v.b : true;
+}
+static std::wstring find_draft() {
+    std::wstring main = utf8_to_w(g_model.path_utf8);
+    for (auto& c : main) if (c == L'/') c = L'\\';   // the file list uses backslashes
+    uint64_t main_sz = 0;
+    for (auto& f : model_files()) if (_wcsicmp(f.first.c_str(), main.c_str()) == 0) main_sz = f.second;
+    if (!main_sz) return L"";
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe"};
+    std::wstring best; int best_score = -1;
+    const int nv = g_model.tok.n_vocab();
+    for (auto& f : model_files()) {
+        if (f.second * 6 > main_sz || f.second < (50u << 20) || _wcsicmp(f.first.c_str(), main.c_str()) == 0) continue;
+        GGUF g; std::string err;
+        if (!g.open(f.first, err)) continue;
+        std::string a = g.gets("general.architecture");
+        if (std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) == std::end(ok_arch)) continue;
+        Tokenizer t;
+        if (!t.load(g, err)) continue;
+        // same tokenizer: vocab sizes within padding, and the token strings agree everywhere we sample
+        int dv = t.n_vocab(), n = std::min(nv, dv);
+        if (std::abs(nv - dv) > nv / 100 + 512) continue;
+        bool same = true;
+        for (int i = 0; i < n && same; i += 37) same = t.text(i) == g_model.tok.text(i);
+        for (int i = std::max(0, n - 300); i < n && same; i++) same = t.text(i) == g_model.tok.text(i);
+        if (!same) continue;
+        int score = (a == g_model.hp.arch ? 1000000 : 0) + (int)(f.second >> 20);   // same family first, then the largest that is still small
+        if (score > best_score) { best_score = score; best = f.first; }
+    }
+    return best;
+}
+static void start_draft(bool force = false) {   // force: the user just switched it on
+    const int gen = ++g_load_gen;
+    if (!force && !spec_enabled()) { set_draft_state("off"); return; }
+    set_draft_state("looking for a draft model");
+    std::thread([gen] {
+        while (g_model.migrating() && gen == g_load_gen) Sleep(50);
+        std::lock_guard<std::mutex> l(g_gen);
+        if (gen != g_load_gen || !g_model.loaded()) return;
+        std::wstring d = find_draft();
+        if (d.empty()) { set_draft_state("no matching small model found"); return; }
+        std::string why = attach_draft(d), name = w_to_utf8(d.substr(d.find_last_of(L"\\/") + 1));
+        set_draft_state(why.empty() ? "on: " + name : "off: " + why);
+    }).detach();
+}
+static void stop_draft(const char* why) {
+    ++g_load_gen;
+    g_chat.set_draft(nullptr);
+    g_draft.unload();
+    set_draft_state(why);
+}
+
 static bool do_load(const std::string& path, std::string& err) {
     std::lock_guard<std::mutex> l(g_gen);
+    stop_draft("off");
     g_chat.reset();
     g_vision.unload();
     if (!g_model.load(utf8_to_w(path), g_opts, err)) return false;
     g_has_vision = !find_mmproj(utf8_to_w(path), g_model.hp.n_embd).empty();
     save_cfg();
+    start_draft();
     return true;
 }
 
@@ -135,6 +229,7 @@ void chat_model_release() {
     std::lock_guard<std::mutex> l(g_gen);
     if (!g_model.loaded() || g_model.gpu_bytes() == 0) return;
     g_released_path = g_model.path_utf8;
+    stop_draft("paused while media is generated");
     g_chat.reset();
     g_model.unload();
 }
@@ -144,7 +239,7 @@ void chat_model_restore() {
     std::string p = g_released_path, err;
     g_released_path.clear();
     std::lock_guard<std::mutex> l(g_gen);
-    if (!g_model.loaded()) g_model.load(utf8_to_w(p), g_opts, err);   // opens instantly; layers return to VRAM in the background
+    if (!g_model.loaded() && g_model.load(utf8_to_w(p), g_opts, err)) start_draft();   // opens instantly; layers return to VRAM in the background
 }
 
 // ---------- HTTP ----------
@@ -211,7 +306,7 @@ static void handle(SOCKET s) {
                   ",\"model\":" + json_esc(g_model.path_utf8) + ",\"name\":" + json_esc(g_model.hp.name) +
                   ",\"opts\":{\"threads\":" + std::to_string(g_opts.threads) + ",\"ctx\":" + std::to_string(g_opts.ctx) +
                   ",\"vram_mb\":" + std::to_string(g_opts.vram_mb) + ",\"ram_mb\":" + std::to_string(g_opts.ram_mb) +
-                  "},\"hw_threads\":" + std::to_string(std::thread::hardware_concurrency()) + ",\"vision\":" + (g_has_vision ? "true" : "false") + "}";
+                  "},\"hw_threads\":" + std::to_string(std::thread::hardware_concurrency()) + ",\"vision\":" + (g_has_vision ? "true" : "false") + ",\"draft\":" + [] { std::lock_guard<std::mutex> l(g_draft_m); return json_esc(g_draft_state); }() + "}";
         }
         respond(s, 200, "application/json", st);
     }
@@ -223,6 +318,12 @@ static void handle(SOCKET s) {
         int n = 0, ctx = 0;
         if (g_model.loaded()) { n = (int)g_model.tok.encode(g_chat.render(msgs), true).size(); ctx = g_model.ctx; }
         respond(s, 200, "application/json", "{\"tokens\":" + std::to_string(n) + ",\"ctx\":" + std::to_string(ctx) + "}");
+    }
+    else if (path == "/api/spec" && method == "POST") {   // {on}: speculative decoding on/off (the UI saves the pref)
+        J j; json_parse(body, j);
+        if (j["on"].t == J::BOOL && j["on"].b) { if (g_model.loaded()) start_draft(true); }
+        else { std::lock_guard<std::mutex> l(g_gen); stop_draft("off"); }
+        respond(s, 200, "application/json", "{}");
     }
     else if (path == "/api/doc/extract" && method == "POST") {   // {name, data: base64} -> extracted text
         extern std::string doc_extract_json(const std::string&, const std::string&);
@@ -316,7 +417,7 @@ int main() {
     g_store_dir = g_exe_dir;
     std::string last = load_cfg();
 
-    std::string model, prompt, image;
+    std::string model, prompt, image, draft;
     int n = 128, port = 7860; bool browser = true, wait = false, gpubench = false; float temp = 0.f;
     for (size_t i = 1; i < args.size(); i++) {
         auto nx = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : ""; };
@@ -324,6 +425,8 @@ int main() {
         if (k == "--model" || k == "-m") model = nx();
         else if (k == "--prompt" || k == "-p") prompt = nx();
         else if (k == "--image") image = nx();
+        else if (k == "--draft") draft = nx();
+        else if (k == "--draft-k") g_chat.draft_k = atoi(nx().c_str());
         else if (k == "-n") n = atoi(nx().c_str());
         else if (k == "--threads" || k == "-t") g_opts.threads = atoi(nx().c_str());
         else if (k == "--ctx" || k == "-c") g_opts.ctx = atoi(nx().c_str());
@@ -387,10 +490,26 @@ int main() {
         std::string err;
         double t0 = now_sec();
         if (!g_model.load(utf8_to_w(model.empty() ? last : model), g_opts, err)) { printf("load failed: %s\n", err.c_str()); return 1; }
+        if (!draft.empty()) {
+            while (g_model.migrating()) Sleep(20);
+            std::string why = attach_draft(utf8_to_w(draft));
+            printf("[draft: %s]\n", why.empty() ? "on" : why.c_str());
+        }
         printf("[%s | %s | %d layers | %s | opened in %.0f ms]\n", g_model.hp.name.c_str(), g_model.hp.arch.c_str(),
                g_model.hp.n_layer, g_model.gpu_info.c_str(), (now_sec() - t0) * 1000);
         if (wait) { while (g_model.migrating()) Sleep(50); printf("[tiers settled after %.1f s]\n", now_sec() - t0); }
         if (gpubench) { g_model.bench_gpu(); g_model.unload(); return 0; }
+        if (getenv("ITHACA_EVALBENCH")) {   // batch-of-n forward cost vs single-token decode
+            std::vector<int> t = g_model.tok.encode("The quick brown fox jumps over the lazy dog and keeps running", true);
+            g_model.eval(t.data(), (int)t.size());
+            int base = g_model.n_past;
+            for (int n : {1, 2, 4, 6, 8}) {
+                double t0 = now_sec();
+                for (int it = 0; it < 10; it++) { g_model.rewind(base); if (n == 1) g_model.eval(t.data(), 1); else g_model.eval_all(t.data(), n); }
+                printf("  n=%d  %.1f ms per forward\n", n, (now_sec() - t0) / 10 * 1e3);
+            }
+            return 0;
+        }
         GenOpts o; o.max_tokens = n; o.temp = temp;
         Msg um{"user", prompt, {}};
         if (!image.empty()) {
@@ -401,6 +520,7 @@ int main() {
         GenStats st = g_chat.generate({um}, o, [](const std::string& t) { fwrite(t.data(), 1, t.size(), stdout); fflush(stdout); return true; });
         if (g_chat.image_ms > 0) printf("\n[image encoded in %.0f ms]", g_chat.image_ms);
         if (!st.error.empty()) printf("\nerror: %s\n", st.error.c_str());
+        if (st.drafted) printf("\n[draft: %d of %d guesses accepted (%.0f%%)]", st.accepted, st.drafted, 100.0 * st.accepted / st.drafted);
         printf("\n\n[prompt %d tok @ %.1f tok/s | gen %d tok @ %.2f tok/s]\n%s\n", st.prompt_tokens, st.prefill_tps, st.gen_tokens, st.gen_tps,
                g_model.tier_json().c_str());
         g_model.unload();

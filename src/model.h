@@ -59,6 +59,8 @@ public:
     // Feed tokens after the current n_past; returns logits for the last one.
     // A negative id -1-k means "row k of ext_embd" (image embeddings); a run of them attends bidirectionally.
     const float* eval(const int* toks, int n);
+    // Same, but returns logits for every one of the n positions (n * n_vocab floats). Used to verify drafts.
+    const float* eval_all(const int* toks, int n) { all_logits_ = true; const float* r = eval(toks, n); all_logits_ = false; return r; }
     std::vector<float> ext_embd;
     void rewind(int n);
     int n_past = 0;
@@ -73,6 +75,7 @@ public:
     int threads() const { return pool_.size(); }
     bool migrating() const { return migrating_; }
     int64_t gpu_bytes() const { return gpu_bytes_; }
+    bool fully_on_gpu() const { return dev_ok_ && all_gpu(); }
     void bench_gpu();
 
     static CudaTier& cuda();
@@ -105,7 +108,8 @@ private:
     std::atomic<int> out_state_{TIER_DISK};
     int out_plan_ = TIER_DISK;
     std::vector<float> inv_freq_, inv_freq_swa_;
-    bool moe_ = false;
+    bool moe_ = false, all_logits_ = false;
+    uint64_t dLOGA_ = 0; int loga_rows_ = 0;
     std::vector<float> moe_x_, router_;
     std::vector<uint16_t> kc_, vc_;
 
@@ -121,7 +125,7 @@ private:
     double load_sec_ = 0;
     // device activations (whole-layer GPU path)
     std::atomic<bool> dev_ok_{false};
-    int gpu_batch_ = 256;
+    int gpu_batch_ = 256, sc_rows_ = 256;   // sc_rows_: token rows of the attention score buffer
     uint64_t dCS2_ = 0, dR_ = 0, dG_ = 0, dIdx_ = 0, dWt_ = 0;
     uint64_t dPM_ = 0, dPL_ = 0, dPO_ = 0, dPOS_ = 0, dX_ = 0, dXN_ = 0, dQ_ = 0, dK_ = 0, dV_ = 0, dATT_ = 0, dF1_ = 0, dF2_ = 0, dT_ = 0, dLOG_ = 0, dSC_ = 0, dCS_ = 0, d_onorm_ = 0;
     std::vector<uint64_t> dev_allocs_;

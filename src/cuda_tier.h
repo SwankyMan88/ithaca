@@ -64,8 +64,9 @@ private:
     void* ftopk_ = nullptr; void* fwsum_ = nullptr;
     void* cv_[11] = {};
     void* up_ = nullptr;                 // upload stream
-    void* pin_[2] = {}; void* ev_[2] = {};
-    uint64_t raw_[2] = {};
+    static const int kSlots = 6;           // read-ahead depth of the weight loader
+    void* pin_[kSlots] = {}; void* ev_[kSlots] = {};
+    uint64_t raw_[kSlots] = {};
     void* ops_[N_OPS] = {};
     void* st_ = nullptr;
     bool has_graphs_ = false;

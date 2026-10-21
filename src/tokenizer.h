@@ -11,6 +11,7 @@ public:
     int bos = -1, eos = -1;
     bool add_bos = false;
     int n_vocab() const { return (int)tokens_.size(); }
+    const std::string& text(int id) const { static std::string e; return id >= 0 && id < (int)tokens_.size() ? tokens_[id] : e; }
 private:
     void encode_text(const std::string& s, std::vector<int>& out) const;
     void bpe_word(const std::string& w, std::vector<int>& out) const;

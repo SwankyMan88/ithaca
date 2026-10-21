@@ -2,6 +2,7 @@
 #include "common.h"
 #include <cstdio>
 #include <algorithm>
+#include <future>
 
 std::string gpu_ops_ptx();
 
@@ -46,60 +47,74 @@ static CUresult(CUAPI* cuLaunchKernel)(void*, unsigned, unsigned, unsigned, unsi
 // Kernels are generated as PTX text here and JIT-compiled by the driver.
 // GPU weight layout (repacked at upload): [f32 scale per block][pad][quants, 16 B (Q4) or 32 B (Q8) per block].
 // Activations are quantized to int8 blocks on the GPU first (k_quant), then rows are dotted with dp4a.
-// 8 warps per CTA, one warp per output row, 4 tokens per CTA so prompt processing reuses each weight load.
-static const int kTokTile = 4;
+// 8 warps per CTA, one warp per output row, 8 tokens per CTA so small batches reuse each weight load.
+static const int kTokTile = 8;   // tokens per CTA: draft checks (<= 8 tokens) read each weight once
+static const int kRows = 4;   // output rows per warp: each activation block loaded once serves all of them
 static std::string gen_kernel(const char* name, int mode) {
     const bool q4 = mode != 0, qm = mode == 2;
+    const int NW = q4 ? 4 : 8;   // weight registers per row block (packed nibbles are unpacked in place below)
     std::string k;
-    char b[320];
+    char b[400];
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
     L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
       " .param .u32 pC, .param .u32 pR, .param .u32 pN)", name);
-    k += "{\n .reg .pred %p<4>; .reg .pred %pt<4>; .reg .b32 %r<40>; .reg .b32 %w<8>; .reg .b32 %x<8>; .reg .f32 %f<16>; .reg .f32 %a<4>; .reg .b64 %rd<24>;\n";
+    L("{\n .reg .pred %%p<8>; .reg .pred %%pt<8>; .reg .pred %%pr<%d>; .reg .b32 %%r<96>; .reg .b32 %%w<%d>; .reg .b32 %%x<8>; .reg .f32 %%f<16>;"
+      " .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .b64 %%rd<24>;", kRows, kRows * 8, kRows, kRows, kTokTile * kRows);
     k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
     k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR]; ld.param.u32 %r3,[pN];\n";
-    k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";            // warp, lane
-    k += " mov.u32 %r7,%ctaid.x; shl.b32 %r7,%r7,3; add.u32 %r7,%r7,%r5;\n";          // row
+    k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";                         // warp, lane
+    L(" mov.u32 %%r7,%%ctaid.x; mul.lo.u32 %%r7,%%r7,%d; mad.lo.u32 %%r7,%%r5,%d,%%r7;", 8 * kRows, kRows);   // first row of this warp
     k += " setp.ge.u32 %p1,%r7,%r2; @%p1 bra DONE;\n";
-    k += " mov.u32 %r8,%ctaid.y; shl.b32 %r8,%r8,2;\n";                                // first token of tile
-    k += " shr.u32 %r9,%r1,5; mul.lo.u32 %r10,%r7,%r9;\n";                             // nb, row*nb
-
+    k += " mov.u32 %r8,%ctaid.y; shl.b32 %r8,%r8,3;\n";                                             // first token of tile
+    k += " shr.u32 %r9,%r1,5;\n";                                                                    // nb
+    for (int j = 0; j < kRows; j++)
+        L(" add.u32 %%r%d,%%r7,%d; setp.lt.u32 %%pr%d,%%r%d,%%r2; mul.lo.u32 %%r%d,%%r%d,%%r9;", 60 + j, j, j, 60 + j, 64 + j, 60 + j);   // row j, row*nb
     for (int t = 0; t < kTokTile; t++) {
-        L(" add.u32 %%r%d,%%r8,%d; setp.lt.u32 %%pt%d,%%r%d,%%r3; mov.f32 %%a%d,0f00000000;", 20 + t, t, t, 20 + t, t);
-        L(" mul.lo.u32 %%r%d,%%r%d,%%r9;", 24 + t, 20 + t);                               // token*nb
+        L(" add.u32 %%r%d,%%r8,%d; setp.lt.u32 %%pt%d,%%r%d,%%r3; mul.lo.u32 %%r%d,%%r%d,%%r9;", 40 + t, t, t, 40 + t, 50 + t, 40 + t);
+        for (int j = 0; j < kRows; j++) L(" mov.f32 %%a%d,0f00000000;", t * kRows + j);
     }
     k += " mov.u32 %r11,%r6;\n";
     k += "LOOP:\n setp.ge.u32 %p2,%r11,%r9; @%p2 bra END;\n";
-    k += " add.u32 %r12,%r10,%r11;\n";
-    if (qm) k += " mul.wide.u32 %rd7,%r12,8; add.u64 %rd7,%rd1,%rd7; ld.global.nc.v2.f32 {%f1,%f9},[%rd7];\n";   // (scale, min) pairs
-    else k += " mul.wide.u32 %rd7,%r12,4; add.u64 %rd7,%rd1,%rd7; ld.global.nc.f32 %f1,[%rd7];\n";
-    if (q4) k += " mul.wide.u32 %rd8,%r12,16; add.u64 %rd8,%rd2,%rd8; ld.global.nc.v4.u32 {%w0,%w1,%w2,%w3},[%rd8];\n";
-    else k += " mul.wide.u32 %rd8,%r12,32; add.u64 %rd8,%rd2,%rd8; ld.global.nc.v4.u32 {%w0,%w1,%w2,%w3},[%rd8]; ld.global.nc.v4.u32 {%w4,%w5,%w6,%w7},[%rd8+16];\n";
-    if (q4) {  // unpack nibbles once per weight block: w0-3 = low (elements 0..15), w4-7 = high (16..31)
-        for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", 4 + i, i, 4 + i, 4 + i, i, i);
+    for (int j = 0; j < kRows; j++) {
+        const int w0 = j * 8;
+        L(" add.u32 %%r12,%%r%d,%%r11; mov.f32 %%sc%d,0f00000000; mov.f32 %%mn%d,0f00000000;", 64 + j, j, j);
+        for (int i = 0; i < 8; i++) L(" mov.b32 %%w%d,0;", w0 + i);
+        if (qm) L(" mul.wide.u32 %%rd7,%%r12,8; add.u64 %%rd7,%%rd1,%%rd7; @%%pr%d ld.global.nc.v2.f32 {%%sc%d,%%mn%d},[%%rd7];", j, j, j);
+        else L(" mul.wide.u32 %%rd7,%%r12,4; add.u64 %%rd7,%%rd1,%%rd7; @%%pr%d ld.global.nc.f32 %%sc%d,[%%rd7];", j, j);
+        if (q4) L(" mul.wide.u32 %%rd8,%%r12,16; add.u64 %%rd8,%%rd2,%%rd8; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8];", j, w0, w0 + 1, w0 + 2, w0 + 3);
+        else L(" mul.wide.u32 %%rd8,%%r12,32; add.u64 %%rd8,%%rd2,%%rd8; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8]; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8+16];",
+               j, w0, w0 + 1, w0 + 2, w0 + 3, j, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
+        if (q4)   // nibbles: w0-3 = low (elements 0..15), w4-7 = high (16..31)
+            for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", w0 + 4 + i, w0 + i, w0 + 4 + i, w0 + 4 + i, w0 + i, w0 + i);
     }
+    (void)NW;
     for (int t = 0; t < kTokTile; t++) {
         L(" @!%%pt%d bra SKIP%d;", t, t);
-        L(" add.u32 %%r13,%%r%d,%%r11;", 24 + t);                                         // x block index
+        L(" add.u32 %%r13,%%r%d,%%r11;", 50 + t);
         k += " mul.wide.u32 %rd9,%r13,32; add.u64 %rd9,%rd3,%rd9; ld.global.v4.u32 {%x0,%x1,%x2,%x3},[%rd9]; ld.global.v4.u32 {%x4,%x5,%x6,%x7},[%rd9+16];\n";
         k += " mul.wide.u32 %rd10,%r13,4; add.u64 %rd11,%rd4,%rd10; ld.global.f32 %f2,[%rd11]; add.u64 %rd12,%rd5,%rd10; ld.global.s32 %r14,[%rd12];\n";
-        k += " mov.u32 %r15,0;\n";
-        for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", i, i);
-        if (qm) L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%f1; cvt.rn.f32.s32 %%f10,%%r14; mul.f32 %%f10,%%f10,%%f9; sub.f32 %%f3,%%f3,%%f10; fma.rn.f32 %%a%d,%%f3,%%f2,%%a%d;", t, t);
-        else {
-            if (q4) k += " mad.lo.s32 %r15,%r14,-8,%r15;\n";
-            L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%f2; fma.rn.f32 %%a%d,%%f3,%%f1,%%a%d;", t, t);
+        if (qm) k += " cvt.rn.f32.s32 %f10,%r14;\n";
+        for (int j = 0; j < kRows; j++) {
+            const int w0 = j * 8, acc = t * kRows + j;
+            k += " mov.u32 %r15,0;\n";
+            for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", w0 + i, i);
+            if (qm) L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%sc%d; mul.f32 %%f4,%%f10,%%mn%d; sub.f32 %%f3,%%f3,%%f4; fma.rn.f32 %%a%d,%%f3,%%f2,%%a%d;", j, j, acc, acc);
+            else {
+                if (q4) k += " mad.lo.s32 %r15,%r14,-8,%r15;\n";
+                L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%f2; fma.rn.f32 %%a%d,%%f3,%%sc%d,%%a%d;", acc, j, acc);
+            }
         }
         L("SKIP%d:", t);
     }
     k += " add.u32 %r11,%r11,32; bra LOOP;\nEND:\n";
-    for (int t = 0; t < kTokTile; t++) {
-        for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f8,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f8;", t, o, t, t);
-    }
+    for (int t = 0; t < kTokTile; t++)
+        for (int j = 0; j < kRows; j++)
+            for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f8,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f8;", t * kRows + j, o, t * kRows + j, t * kRows + j);
     k += " setp.ne.u32 %p3,%r6,0; @%p3 bra DONE;\n";
     for (int t = 0; t < kTokTile; t++)
-        L(" @%%pt%d mad.lo.u32 %%r16,%%r%d,%%r2,%%r7; @%%pt%d mul.wide.u32 %%rd13,%%r16,4; @%%pt%d add.u64 %%rd13,%%rd6,%%rd13; @%%pt%d st.global.f32 [%%rd13],%%a%d;",
-          t, 20 + t, t, t, t, t);
+        for (int j = 0; j < kRows; j++)
+            L(" and.pred %%p4,%%pt%d,%%pr%d; @%%p4 mad.lo.u32 %%r16,%%r%d,%%r2,%%r%d; @%%p4 mul.wide.u32 %%rd13,%%r16,4; @%%p4 add.u64 %%rd13,%%rd6,%%rd13; @%%p4 st.global.f32 [%%rd13],%%a%d;",
+              t, j, 40 + t, 60 + j, t * kRows + j);
     k += "DONE:\n ret;\n}\n";
     return k;
 }
@@ -419,7 +434,7 @@ bool CudaTier::htod_async(uint64_t dst, const void* src, size_t bytes) {
 }
 
 bool CudaTier::begin_capture() {
-    if (!has_graphs_ || g_prof) return false;
+    if (!has_graphs_ || g_prof || getenv("ITHACA_NO_GRAPH")) return false;
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     return cuStreamBeginCapture(st_, 2 /*relaxed*/) == 0;
@@ -532,7 +547,7 @@ bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int 
     if (cuLaunchKernel(quant_, c / 32, un, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
     uint64_t Q = W + qoff;
     void* args[9] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &un};
-    bool ok = cuLaunchKernel(fn_[kind], (r + 7) / 8, (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
+    bool ok = cuLaunchKernel(fn_[kind], (r + 8 * kRows - 1) / (8 * kRows), (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
     if (g_prof) prof_end(9 + kind, t0);
     return ok;
 }
@@ -595,7 +610,7 @@ uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtyp
     const int mode = cv_mode(gtype);
     if (!ok_ || mode < 0 || !cv_[mode] || cols % 32) return 0;
     static const int usrc[11] = {18, 34, 144, 210, 176, 64, 64, 128, 20, 22, 24}, ublk[11] = {1, 1, 8, 8, 8, 1, 1, 1, 1, 1, 1};
-    const size_t kChunk = 32u << 20;
+    const size_t kChunk = 8u << 20;
     const size_t nblk = (size_t)rows * (cols / 32), units = nblk / ublk[mode];
     if (units * usrc[mode] != nbytes) return 0;
     const bool q4m = mode == 2 || mode == 8;
@@ -606,37 +621,56 @@ uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtyp
     {
         std::lock_guard<std::recursive_mutex> l(m_);
         cuCtxSetCurrent(ctx_);
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < kSlots; i++) {
             if (!pin_[i] && cuMemHostAlloc(&pin_[i], kChunk, 0)) pin_[i] = nullptr;
             if (!ev_[i]) cuEventCreate(&ev_[i], 2);
             if (!raw_[i] && cuMemAlloc(&raw_[i], kChunk)) raw_[i] = 0;
+            if (!pin_[i] || !raw_[i]) { cuMemFree(dst); return 0; }
         }
-        if (!pin_[0] || !pin_[1] || !raw_[0] || !raw_[1] || !up_) { cuMemFree(dst); return 0; }
+        if (!up_) { cuMemFree(dst); return 0; }
     }
     uint64_t S = dst, Q = dst + qoff, M = dst + nblk * 4;
-    const size_t per = kChunk / usrc[mode];
-    bool ok = true;
-    int i = 0;
-    for (size_t u0 = 0; u0 < units && ok; u0 += per, i ^= 1) {
-        size_t nu = std::min(per, units - u0), bytes = nu * usrc[mode];
-        { std::lock_guard<std::recursive_mutex> l(m_); cuCtxSetCurrent(ctx_); cuEventSynchronize(ev_[i]); }   // buffer i free again
-        // positioned read straight into pinned memory (served from the OS cache when warm)
+    // Pipeline: up to kSlots chunk reads in flight (queue depth for SSDs, parallel copies out of the
+    // OS cache when warm) while earlier chunks upload and convert on the GPU.
+    const size_t per = kChunk / usrc[mode], nchunks = (units + per - 1) / per;
+    auto read_chunk = [this, file, off, per, units, mode](size_t c, int slot) -> bool {
+        size_t u0 = c * per, bytes = std::min(per, units - u0) * usrc[mode], done = 0;
         uint64_t pos = off + u0 * usrc[mode];
-        size_t done = 0;
         while (done < bytes) {
             OVERLAPPED ov{}; ov.Offset = (DWORD)(pos + done); ov.OffsetHigh = (DWORD)((pos + done) >> 32);
-            DWORD want = (DWORD)std::min<size_t>(bytes - done, 16u << 20), got = 0;
-            if (!ReadFile((HANDLE)file, (char*)pin_[i] + done, want, &got, &ov) || !got) { ok = false; break; }
+            DWORD got = 0;
+            if (!ReadFile((HANDLE)file, (char*)pin_[slot] + done, (DWORD)(bytes - done), &got, &ov) || !got) return false;
             done += got;
         }
-        if (!ok) break;
-        std::lock_guard<std::recursive_mutex> l(m_);
-        cuCtxSetCurrent(ctx_);
-        unsigned N = (unsigned)(nu * ublk[mode]), B0 = (unsigned)(u0 * ublk[mode]);
-        void* a[6] = {&raw_[i], &S, &Q, &M, &N, &B0};
-        ok = cuMemcpyHtoDAsync(raw_[i], pin_[i], bytes, up_) == 0 && cuEventRecord(ev_[i], up_) == 0 &&
-             cuLaunchKernel(cv_[mode], (N + 7) / 8, 1, 1, 256, 1, 1, 0, up_, a, nullptr) == 0;
+        return true;
+    };
+    std::future<bool> rd[kSlots];
+    for (size_t c = 0; c < nchunks && c < (size_t)kSlots; c++) {
+        { std::lock_guard<std::recursive_mutex> l(m_); cuCtxSetCurrent(ctx_); cuEventSynchronize(ev_[c]); }
+        rd[c] = std::async(std::launch::async, read_chunk, c, (int)c);
     }
+    bool ok = true;
+    for (size_t c = 0; c < nchunks; c++) {
+        const int i = (int)(c % kSlots);
+        ok = rd[i].get() && ok;
+        if (!ok) continue;   // drain the remaining reads before bailing out
+        size_t u0 = c * per, nu = std::min(per, units - u0), bytes = nu * usrc[mode];
+        {
+            std::lock_guard<std::recursive_mutex> l(m_);
+            cuCtxSetCurrent(ctx_);
+            unsigned N = (unsigned)(nu * ublk[mode]), B0 = (unsigned)(u0 * ublk[mode]);
+            void* a[6] = {&raw_[i], &S, &Q, &M, &N, &B0};
+            ok = cuMemcpyHtoDAsync(raw_[i], pin_[i], bytes, up_) == 0 && cuEventRecord(ev_[i], up_) == 0 &&
+                 cuLaunchKernel(cv_[mode], (N + 7) / 8, 1, 1, 256, 1, 1, 0, up_, a, nullptr) == 0;
+        }
+        size_t nx = c + kSlots;
+        if (ok && nx < nchunks) {
+            // the slot's pinned buffer is free once its copy finished; the GPU side keeps going meanwhile
+            { std::lock_guard<std::recursive_mutex> l(m_); cuCtxSetCurrent(ctx_); cuEventSynchronize(ev_[i]); }
+            rd[i] = std::async(std::launch::async, read_chunk, nx, i);
+        }
+    }
+    for (auto& f : rd) if (f.valid()) f.wait();
     {
         std::lock_guard<std::recursive_mutex> l(m_);
         cuCtxSetCurrent(ctx_);

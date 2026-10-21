@@ -165,9 +165,16 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     if (o.vram_mb != 0 && cuda().ok() && cuda().mem_info(vfree, vtotal)) {
         int64_t reserve = 768ll << 20;  // leave headroom for other apps (Blender, the desktop)
         vram_budget = o.vram_mb < 0 ? (int64_t)vfree - reserve : std::min<int64_t>(o.vram_mb << 20, (int64_t)vfree - (256ll << 20));
-        gpu_batch_ = (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
+        // With tensor-core flash attention, prompt batches never materialize a score matrix, so the
+        // score buffer only needs one token's worth (decode) and batches can stay large.
+        std::string ge;
+        const bool flash = !getenv("ITHACA_NO_FLASH") && !getenv("ITHACA_NO_TC_PREFILL") && (gx().ok() || gx().init(ge)) && gx().tensor_cores() &&
+                           (hp.hd == 64 || hp.hd == 80 || hp.hd == 96 || hp.hd == 128 || hp.hd == 256);
+        gpu_batch_ = flash ? 256 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
+        sc_rows_ = flash ? 1 : gpu_batch_;
         int64_t act = (int64_t)gpu_batch_ * 4 * ((int64_t)hp.n_embd * 2 + hp.n_head * hp.hd * 2 + kvd * 2 + hp.n_ff * 3 +
-                      std::max<int64_t>({hp.n_embd, hp.n_head * hp.hd + 2 * (int64_t)kvd, 2ll * hp.n_ff}) + (int64_t)hp.n_head * ctx + hp.n_rot) + hp.n_vocab * 4ll;
+                      std::max<int64_t>({hp.n_embd, hp.n_head * hp.hd + 2 * (int64_t)kvd, 2ll * hp.n_ff}) + hp.n_rot) +
+                      (int64_t)sc_rows_ * hp.n_head * ctx * 4 + hp.n_vocab * 4ll;
         vram_budget -= act + (64ll << 20);
     }
     MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms);
@@ -214,7 +221,7 @@ static void prefetch_range(const void* p, size_t n) {
 void Model::tier_thread() {
     cuda().bind_thread();
     // Separate read handle: big positioned reads into pinned memory beat page-faulting the mapping.
-    HANDLE fh = CreateFileW(utf8_to_w(path_utf8).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, 0);
+    HANDLE fh = CreateFileW(utf8_to_w(path_utf8).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);   // no SEQUENTIAL_SCAN: it evicts the file from the cache right behind the reader
     struct FH { HANDLE h; ~FH() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } fh_guard{fh};
     auto upload = [&](Lin& l) -> bool {
         if (!l.t) return true;
@@ -347,6 +354,7 @@ void Model::unload() {
     for (auto& L : layers_) for (Lin* l : L.lins()) fr(*l);
     layers_.clear();
     out_.t = nullptr; out_state_ = TIER_DISK;
+    if (dLOGA_) { cuda().free(dLOGA_); dLOGA_ = 0; } loga_rows_ = 0;
     kc_.clear(); kc_.shrink_to_fit(); vc_.clear(); vc_.shrink_to_fit();
     x_.clear(); xn_.clear(); q_.clear(); k_.clear(); v_.clear(); att_.clear(); ff1_.clear(); ff2_.clear(); tmp_.clear();
     bufn_ = 0; gpu_bytes_ = 0; ram_bytes_ = 0; n_past = 0;
@@ -438,7 +446,7 @@ bool Model::alloc_dev_buffers() {
     struct { uint64_t* p; size_t n; } bufs[] = {
         {&dX_, B * d}, {&dXN_, B * d}, {&dQ_, B * qd}, {&dK_, B * kvd}, {&dV_, B * kvd}, {&dATT_, B * qd},
         {&dF1_, B * ff}, {&dF2_, B * ff}, {&dT_, B * tmax}, {&dLOG_, (size_t)hp.n_vocab},
-        {&dSC_, B * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
+        {&dSC_, (size_t)sc_rows_ * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
         {&dR_, B * (size_t)std::max(1, hp.n_expert)}, {&dG_, B * d}, {&dIdx_, B * (size_t)std::max(1, hp.n_expert_used)}, {&dWt_, B * (size_t)std::max(1, hp.n_expert_used)},
         {&dPM_, (size_t)hp.n_head * 16}, {&dPL_, (size_t)hp.n_head * 16}, {&dPO_, (size_t)hp.n_head * 16 * hp.hd}};
     for (auto& b : bufs) {
@@ -676,7 +684,12 @@ void Model::bench_gpu() {
 
 static inline float silu(float x) { return x / (1.0f + std::exp(-x)); }
 
+static double g_ev[4]; static int g_evn;
 const float* Model::eval(const int* toks, int n_all) {
+    struct EvT { bool on; double t0; ~EvT() { if (on && ++g_evn % 20 == 0) fprintf(stderr, "[eval_all] layers %.1f head %.1f total %.1f ms\n", g_ev[0] / g_evn * 1e3, g_ev[1] / g_evn * 1e3, g_ev[2] / g_evn * 1e3); } };
+    const bool evp = all_logits_ && getenv("ITHACA_SPECPROF");
+    double ev0 = now_sec();
+    EvT evt{evp, ev0};
     if (!loaded_ || n_all <= 0 || n_past + n_all > ctx) return nullptr;
     if (n_all == 1 && toks[0] >= 0 && dev_ok_ && !migrating_ && all_gpu()) {
         // Fully VRAM-resident decode: replay one CUDA graph for the whole forward pass.
@@ -860,8 +873,25 @@ const float* Model::eval(const int* toks, int n_all) {
         if (c0 + n >= n_all && dev_ok_ && out_state_ == TIER_GPU && out_.dptr.load()) {
             CudaTier& cu = cuda();
             if (!on_dev) { cu.htod_async(dX_, x_.data(), (size_t)n * d * 4); on_dev = true; }
-            uint64_t last = dX_ + (uint64_t)(n - 1) * d * 4;
             unsigned ud = d; float eps = hp.eps;
+            if (evp) { cuda().sync(); g_ev[0] += now_sec() - ev0; }
+            double evh = now_sec();
+            if (all_logits_ && n > 1) {   // every position (draft verification)
+                if (n > loga_rows_) {
+                    if (dLOGA_) cu.free(dLOGA_);
+                    loga_rows_ = std::max(n, 16); dLOGA_ = cu.alloc((size_t)loga_rows_ * hp.n_vocab * 4);
+                }
+                unsigned un = n;
+                cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &d_onorm_, &dXN_, &ud, &eps});
+                mmq(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, n, out_.cols, out_.rows, dLOGA_);
+                logits_.resize((size_t)n * hp.n_vocab);
+                cu.dtoh(logits_.data(), dLOGA_, logits_.size() * 4);
+                if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
+                n_past += n;
+                if (evp) { g_ev[1] += now_sec() - evh; g_ev[2] += now_sec() - ev0; }
+                continue;
+            }
+            uint64_t last = dX_ + (uint64_t)(n - 1) * d * 4;
             cu.launch(CudaTier::RMSNORM, 1, 1, 256, {&last, &d_onorm_, &dXN_, &ud, &eps});
             cu.matmul_dev(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, 1, out_.cols, out_.rows, dLOG_);
             cu.dtoh(logits_.data(), dLOG_, (size_t)hp.n_vocab * 4);
@@ -872,8 +902,10 @@ const float* Model::eval(const int* toks, int n_all) {
         if (on_dev) { cuda().dtoh(x_.data(), dX_, (size_t)n * d * 4); on_dev = false; }
         n_past += n;
         if (c0 + n >= n_all) {
-            rmsnorm(&x_[(size_t)(n - 1) * d], out_norm_.data(), xn_.data(), 1, d);
-            matmul(out_, xn_.data(), 1, logits_.data());
+            const int rows = all_logits_ ? n : 1;
+            logits_.resize((size_t)rows * hp.n_vocab);
+            rmsnorm(&x_[(size_t)(n - rows) * d], out_norm_.data(), xn_.data(), rows, d);
+            matmul(out_, xn_.data(), rows, logits_.data());
             if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
         }
     }
@@ -925,6 +957,20 @@ int quant_selftest(const std::wstring& path) {
         }
         double e = std::sqrt(num / std::max(den, 1e-30));
         printf("  %-6s %-28s rel.err %.5f  %s\n", gtype_name(t.type), t.name.c_str(), e, e < 0.02 ? "OK" : "BAD");
+        if (getenv("ITHACA_MMBENCH")) {   // full-size tensor, time n = 1..8 tokens
+            int R = (int)t.ne[1]; size_t nb2 = gtype_row_bytes(t.type, cols) * R; int k2; uint64_t q2;
+            uint64_t W2 = cu.load_weight(fh, (uint64_t)(t.data - g.base), nb2, t.type, R, cols, k2, q2);
+            uint64_t X = cu.alloc((size_t)8 * cols * 4), Y = cu.alloc((size_t)8 * R * 4);
+            for (int n : {1, 2, 4, 6, 8}) {
+                cu.matmul_dev(W2, q2, k2, X, n, cols, R, Y); cu.sync();
+                double t0 = now_sec();
+                for (int it = 0; it < 50; it++) cu.matmul_dev(W2, q2, k2, X, n, cols, R, Y);
+                cu.sync();
+                double us = (now_sec() - t0) / 50 * 1e6;
+                printf("      n=%d  %7.1f us  (%.0f GB/s of weights)\n", n, us, CudaTier::gpu_bytes(t.type, R, cols) / (us * 1e3));
+            }
+            cu.free(X); cu.free(Y); cu.free(W2);
+        }
         cu.free(W);
     }
     CloseHandle(fh);

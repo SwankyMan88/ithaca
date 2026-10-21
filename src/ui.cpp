@@ -317,7 +317,7 @@ const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',body:JSON.stringify(b)});return r.json()}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
 
-let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',think_passes:4};
+let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',think_passes:4,spec_decode:true};
 let memories=[],chats=[],chat=null,busy=false,hard=false,status={},abortCtl=null;
 
 /* ---------- markdown ---------- */
@@ -727,8 +727,12 @@ $('compact').onclick=async()=>{
   setBusy(false);render()};
 
 /* ---------- status / tier ring ---------- */
+function drawSpec(){const e=$('specState');if(!e)return;const d=status.draft||'off';
+  e.textContent=d.startsWith('on: ')?'Draft model in use: '+d.slice(4):d=='off'?'Off.':d.charAt(0).toUpperCase()+d.slice(1)+'.';
+  if(d.startsWith('no matching'))e.textContent+=' Download a small model from the same family (for example Qwen3 0.6B for Qwen3 models) to enable it.'}
 async function refreshStatus(){
   try{status=await api('/api/status')}catch(e){return}
+  drawSpec();
   $('modelName').textContent=status.loaded?status.name:'No model loaded';
   const svg=$('ringSvg');
   if(!status.loaded){svg.innerHTML='<circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="4"/>';$('ringText').textContent='no model loaded';$('ringTip').innerHTML=esc(status.gpu||'');return}
@@ -747,7 +751,8 @@ async function refreshStatus(){
 function savePrefs(){api('/api/prefs',prefs);document.documentElement.dataset.theme=prefs.theme=='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):prefs.theme}
 function sw(key,title,desc){return `<div class="switch"><div><b>${title}</b><span>${desc}</span></div><button class="sw${prefs[key]?' on':''}" data-sw="${key}"></button></div>`}
 function bindPane(){
-  $('pane').querySelectorAll('[data-sw]').forEach(b=>b.onclick=()=>{prefs[b.dataset.sw]=!prefs[b.dataset.sw];b.classList.toggle('on');savePrefs();if(b.dataset.sw=='run_code')render()});
+  $('pane').querySelectorAll('[data-sw]').forEach(b=>b.onclick=()=>{prefs[b.dataset.sw]=!prefs[b.dataset.sw];b.classList.toggle('on');savePrefs();if(b.dataset.sw=='run_code')render();
+    if(b.dataset.sw=='spec_decode'){api('/api/spec',{on:prefs.spec_decode});setTimeout(drawSpec,300)}});
   $('pane').querySelectorAll('[data-pref]').forEach(e=>e.onchange=()=>{const k=e.dataset.pref;prefs[k]=e.type=='number'?+e.value:e.value;savePrefs()})}
 const TABS={
 general:()=>`<h2>General</h2><p class="sub">How Ithaca talks to you.</p>
@@ -766,7 +771,9 @@ model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Itha
  <div class="field"><label>Context window (tokens)</label><input id="mCtx" type="number" step="1024" value="${status.opts?status.opts.ctx:4096}"><small>How much the model can keep in mind</small></div>
  <div class="field"><label>VRAM budget (MB)</label><input id="mVram" type="number" value="${status.opts?status.opts.vram_mb:-1}"><small>-1 = auto (leaves ~768 MB free), 0 = CPU only</small></div>
  <div class="field"><label>RAM budget (MB)</label><input id="mRam" type="number" value="${status.opts?status.opts.ram_mb:-1}"><small>-1 = auto (leaves ~2.5 GB free)</small></div></div>
- <button class="btn pri" id="mLoad">Load model</button> <span id="mMsg" style="margin-left:10px;color:var(--dim);font-size:13px"></span>`,
+ <button class="btn pri" id="mLoad">Load model</button> <span id="mMsg" style="margin-left:10px;color:var(--dim);font-size:13px"></span>
+ <div style="margin-top:18px">${sw('spec_decode','Faster replies (speculative decoding)','A small model with the same vocabulary drafts a few words at a time and the main model checks them in one pass. Answers stay the same; code and structured text often come out 30–60% faster. Ithaca picks the small model by itself and pauses it when it doesn\'t help.')}
+ <p class="sub" id="specState" style="margin-top:8px"></p></div>`,
 memory:()=>`<h2>Memory</h2><p class="sub">What Ithaca remembers across all chats. The model saves, updates, searches and forgets memories by itself while memory is on. Pinned memories are always shown to the model; with more than 40 memories, it sees the pinned ones plus those relevant to your message and can search the rest.</p>
  ${sw('memory','Use memory','Let the model read, write, search and edit memories while chatting.')}
  <div style="display:flex;gap:8px;margin:16px 0;flex-wrap:wrap"><input id="memFind" class="search" style="margin:0;flex:1;min-width:160px" placeholder="Search memories">
