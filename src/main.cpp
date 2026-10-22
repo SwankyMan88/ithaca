@@ -486,13 +486,14 @@ int main() {
     std::string last = load_cfg();
 
     std::string model, prompt, image, draft;
-    int n = 128, port = 7860; bool browser = true, wait = false, gpubench = false, explicit_port = false; float temp = 0.f;
+    int n = 128, port = 7860; bool browser = true, wait = false, gpubench = false, explicit_port = false, bench = false; float temp = 0.f;
     for (size_t i = 1; i < args.size(); i++) {
         auto nx = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : ""; };
         const std::string& k = args[i];
         if (k == "--model" || k == "-m") model = nx();
         else if (k == "--prompt" || k == "-p") prompt = nx();
         else if (k == "--image") image = nx();
+        else if (k == "--bench") { bench = true; if (prompt.empty()) prompt = "bench"; }
         else if (k == "--draft") draft = nx();
         else if (k == "--draft-k") g_chat.draft_k = atoi(nx().c_str());
         else if (k == "-n") n = atoi(nx().c_str());
@@ -565,8 +566,30 @@ int main() {
         }
         printf("[%s | %s | %d layers | %s | opened in %.0f ms]\n", g_model.hp.name.c_str(), g_model.hp.arch.c_str(),
                g_model.hp.n_layer, g_model.gpu_info.c_str(), (now_sec() - t0) * 1000);
-        if (wait) { while (g_model.migrating()) Sleep(50); printf("[tiers settled after %.1f s]\n", now_sec() - t0); }
+        double load_s = 0;
+        if (wait || bench) { while (g_model.migrating()) Sleep(50); load_s = now_sec() - t0; printf("[tiers settled after %.1f s]\n", load_s); }
         if (gpubench) { g_model.bench_gpu(); g_model.unload(); return 0; }
+        if (bench) {   // --bench: same measurements as llama-bench (pp512 / tg128), averaged over 3 runs
+            std::string filler;
+            while ((int)g_model.tok.encode(filler, false).size() < 600) filler += "The quick brown fox jumps over the lazy dog while the river keeps flowing past the old mill. ";
+            std::vector<int> t = g_model.tok.encode(filler, true);
+            t.resize(512);
+            g_model.rewind(0); g_model.eval(t.data(), 64);   // warm-up (JIT, graphs)
+            double pp = 0, tg = 0;
+            for (int run = 0; run < 3; run++) {
+                g_model.rewind(0);
+                double t0 = now_sec();
+                g_model.eval(t.data(), 512);
+                double t1 = now_sec();
+                int id = t[100];
+                for (int i = 0; i < 128; i++) g_model.eval(&id, 1);
+                double t2 = now_sec();
+                pp += 512 / (t1 - t0); tg += 128 / (t2 - t1);
+            }
+            printf("BENCH model=%s load_s=%.2f pp512=%.1f tg128=%.2f vram_mb=%lld\n", g_model.hp.name.c_str(), load_s, pp / 3, tg / 3, (long long)(g_model.gpu_bytes() >> 20));
+            g_model.unload();
+            return 0;
+        }
         if (getenv("ITHACA_EVALBENCH")) {   // batch-of-n forward cost vs single-token decode
             std::vector<int> t = g_model.tok.encode("The quick brown fox jumps over the lazy dog and keeps running", true);
             g_model.eval(t.data(), (int)t.size());

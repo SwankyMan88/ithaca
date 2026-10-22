@@ -1,0 +1,67 @@
+[
+ {
+  "model": "Granite 3.1 MoE 3B (Q4_K_M)",
+  "size_gb": 2.0,
+  "ith_load": 0.9,
+  "ith_pp": 819.2,
+  "ith_tg": 201.25,
+  "ith_vram": 2571,
+  "lc_pp": 6583.9,
+  "lc_tg": 222.68,
+  "lc_build": "7fe450e19 #11146",
+  "lc_fa": -1,
+  "lc_load": 1.28
+ },
+ {
+  "model": "Gemma 3 4B (Q4_K_M)",
+  "size_gb": 2.5,
+  "ith_load": 1.02,
+  "ith_pp": 1178.2,
+  "ith_tg": 69.86,
+  "ith_vram": 3190,
+  "lc_pp": 3716.8,
+  "lc_tg": 91.76,
+  "lc_build": "7fe450e19 #11146",
+  "lc_fa": -1,
+  "lc_load": 1.83
+ },
+ {
+  "model": "Qwen2.5 Coder 7B (Q4_0)",
+  "size_gb": 4.4,
+  "ith_load": 1.28,
+  "ith_pp": 672.8,
+  "ith_tg": 55.91,
+  "ith_vram": 4474,
+  "lc_pp": 2397.5,
+  "lc_tg": 68.27,
+  "lc_build": "7fe450e19 #11146",
+  "lc_fa": -1,
+  "lc_load": 2.52
+ },
+ {
+  "model": "Granite 4.1 8B (Q4_0)",
+  "size_gb": 5.1,
+  "ith_load": 1.56,
+  "ith_pp": 547.4,
+  "ith_tg": 46.13,
+  "ith_vram": 5222,
+  "lc_pp": 1661.0,
+  "lc_tg": 57.36,
+  "lc_build": "7fe450e19 #11146",
+  "lc_fa": -1,
+  "lc_load": 2.67
+ },
+ {
+  "model": "Qwen3 14B (Q4_0)",
+  "size_gb": 8.5,
+  "ith_load": 2.36,
+  "ith_pp": 301.1,
+  "ith_tg": 29.66,
+  "ith_vram": 8762,
+  "lc_pp": 1019.4,
+  "lc_tg": 35.31,
+  "lc_build": "7fe450e19 #11146",
+  "lc_fa": -1,
+  "lc_load": 4.17
+ }
+]

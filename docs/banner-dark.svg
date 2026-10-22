@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="300" viewBox="0 0 1280 300">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d0e14"/><stop offset="1" stop-color="#171a2b"/></linearGradient>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6c5cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ffb35c" stop-opacity="0.95"/><stop offset="1" stop-color="#ff7a59" stop-opacity="0"/></radialGradient>
+    <linearGradient id="seaf" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#171a2b" stop-opacity="0"/><stop offset="0.35" stop-color="#171a2b" stop-opacity="1"/></linearGradient>
+    <linearGradient id="hz" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6c5cff" stop-opacity="0"/><stop offset="0.3" stop-color="#6c5cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient>
+    <clipPath id="c"><rect width="1280" height="300" rx="24"/></clipPath>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect width="1280" height="300" fill="url(#bg)"/>
+    <circle cx="1010" cy="168" r="120" fill="url(#sun)" opacity="0.55"/>
+    <circle cx="1010" cy="168" r="44" fill="#ffb35c" opacity="0.9"/>
+    <rect x="640" y="168" width="640" height="132" fill="url(#seaf)"/>
+    <path d="M640 168 H1280" stroke="url(#hz)" stroke-width="2.5"/>
+    <g stroke="url(#acc)" stroke-width="2" fill="none" opacity="0.55" stroke-linecap="round">
+      <path d="M800 196 q20 -8 40 0 t40 0 t40 0"/><path d="M930 222 q20 -8 40 0 t40 0 t40 0 t40 0"/><path d="M1090 200 q20 -8 40 0 t40 0 t40 0"/>
+      <path d="M840 252 q20 -8 40 0 t40 0"/><path d="M1060 262 q20 -8 40 0 t40 0 t40 0"/>
+    </g>
+    <!-- island -->
+    <path d="M1112 168 L1150 140 L1168 148 L1196 122 L1222 146 L1240 140 L1270 168 Z" fill="#262a40"/>
+    <!-- sail -->
+    <g transform="translate(880 92)">
+      <path d="M40 0 L40 72 L4 72 Z" fill="url(#acc)"/>
+      <path d="M44 10 L44 72 L74 72 Z" fill="#f2f3f8" opacity="0.85"/>
+      <path d="M0 78 H82 L70 92 H12 Z" fill="#f2f3f8"/>
+    </g>
+    <g font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+      <text x="88" y="140" font-size="86" font-weight="700" fill="#f2f3f8" letter-spacing="-2">Ithaca</text>
+      <rect x="92" y="164" width="96" height="5" rx="2.5" fill="url(#acc)"/>
+      <text x="90" y="210" font-size="27" fill="#a3a8bd">Local AI for Windows in one small exe.</text>
+      <text x="90" y="246" font-size="20" fill="#a3a8bd" opacity="0.85">Chat · images in · files in · images, video and speech out · own engines</text>
+    </g>
+  </g>
+</svg>

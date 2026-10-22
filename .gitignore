@@ -9,3 +9,4 @@ ithaca.json
 *.exe
 *.gguf
 *.safetensors
+port.txt
