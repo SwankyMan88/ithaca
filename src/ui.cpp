@@ -118,10 +118,11 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 /* live render card */
 .rcard{max-width:420px;margin:10px 0;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:var(--panel);box-shadow:var(--shadow)}
 .rframe{position:relative;aspect-ratio:1;background:linear-gradient(135deg,#1d1f2b,#2a2140);overflow:hidden}
-.rshimmer{position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.08) 50%,transparent 70%);background-size:250% 100%;animation:shim 1.6s linear infinite}
+.rshimmer{position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.08) 50%,transparent 70%);background-size:250% 100%;background-repeat:no-repeat;animation:shim 1.6s linear infinite}
 @keyframes shim{from{background-position:150% 0}to{background-position:-100% 0}}
 .rimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;filter:blur(14px) saturate(1.2);transform:scale(1.06);transition:opacity .5s,filter 1.2s,transform 1.2s;image-rendering:auto}
-.rframe.has .rimg{opacity:1;filter:blur(2px) saturate(1.1);transform:scale(1.01)}
+.rframe.has .rimg+.rimg{filter:blur(2px) saturate(1.1);transform:scale(1.01);transition:opacity .45s}   /* later previews only cross-fade */
+.rframe.has .rimg.in{opacity:1;filter:blur(2px) saturate(1.1);transform:scale(1.01)}
 .rframe.has .rshimmer{opacity:.35}
 .rbadge{position:absolute;left:10px;bottom:10px;display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);color:#fff;font-size:12px}
 .rdot{width:7px;height:7px;border-radius:50%;background:var(--a1);box-shadow:0 0 0 0 var(--a1);animation:pulse 1.2s infinite}
@@ -227,7 +228,7 @@ input[type=file]{color:var(--dim)}
 .dots span{animation-delay:var(--ph,0ms)}.dots span:nth-child(2){animation-delay:calc(var(--ph,0ms) + .15s)}.dots span:nth-child(3){animation-delay:calc(var(--ph,0ms) + .3s)}
 .waiting{display:inline-flex;align-items:center;gap:10px;min-height:22px}
 .wl{font-size:13px;color:var(--dim)}
-.wl:not(:empty){background:linear-gradient(90deg,var(--dim) 30%,var(--text) 50%,var(--dim) 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:wshine 1.8s linear infinite}
+.wl:not(:empty){background:linear-gradient(90deg,var(--dim) 30%,var(--text) 50%,var(--dim) 70%);background-size:250% 100%;background-repeat:no-repeat;-webkit-background-clip:text;background-clip:text;color:transparent;animation:wshine 1.8s linear infinite}
 @keyframes wshine{from{background-position:120% 0}to{background-position:-120% 0}}
 /* new chat: the spark pops in and twinkles, the heading and suggestions rise in */
 .empty .logo{position:relative;animation:spawn .7s cubic-bezier(.2,1.5,.4,1) both}
@@ -255,6 +256,27 @@ input[type=file]{color:var(--dim)}
 @keyframes land{0%{transform:scale(1.35)}100%{transform:scale(1)}}
 /* new messages slide in */
 .msg.fresh{animation:rise .35s cubic-bezier(.2,.9,.3,1) both}
+.col>.msg:first-child{margin-top:34px}
+/* 1. streamed text: each new paragraph, list item or block eases in */
+.chunk{animation:chunk .38s cubic-bezier(.2,.9,.3,1) both}
+@keyframes chunk{from{opacity:0;transform:translateY(6px);filter:blur(3px)}to{opacity:1;transform:none;filter:none}}
+/* 2. send <-> stop morph */
+.send{transition:background .25s,color .25s,transform .15s}.send:active{transform:scale(.92)}
+.send.morph .icon{animation:morph .38s cubic-bezier(.3,1.4,.5,1)}
+.send.busy{background:var(--grad);color:#fff;box-shadow:0 0 0 0 rgba(139,108,255,.5);animation:busyring 1.8s ease-out infinite}
+@keyframes morph{0%{transform:rotate(-120deg) scale(.3);opacity:0}100%{transform:none;opacity:1}}
+@keyframes busyring{0%{box-shadow:0 0 0 0 rgba(139,108,255,.45)}70%,100%{box-shadow:0 0 0 9px rgba(139,108,255,0)}}
+/* 3. a finished picture sharpens in and a light sweep passes over it once */
+.gwrap.justmade{overflow:hidden;border-radius:12px}
+.gwrap.justmade .genimg{animation:sharpen 1.1s cubic-bezier(.2,.8,.2,1) both}
+.gwrap.justmade::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.35) 50%,transparent 65%);transform:translateX(-110%);animation:sweep1 1.2s .5s ease-out forwards}
+@keyframes sharpen{from{filter:blur(16px) saturate(1.3);transform:scale(1.04)}to{filter:none;transform:none}}
+@keyframes sweep1{to{transform:translateX(110%)}}
+/* 4. new chats slide into the history; switching views cross-fades */
+.hitem.slidein{animation:slidein .4s cubic-bezier(.2,.9,.3,1) both}
+@keyframes slidein{from{opacity:0;transform:translateX(-14px);max-height:0}to{opacity:1;transform:none;max-height:40px}}
+.viewin{animation:viewin .32s cubic-bezier(.2,.9,.3,1) both}
+@keyframes viewin{from{opacity:0;transform:translateY(8px) scale(.995)}to{opacity:1;transform:none}}
 /* studios */
 .hero textarea,.sizerow input[type=number]{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
 .hero textarea{width:100%;font-size:15px;min-height:84px;resize:vertical;padding:12px 14px;border-radius:12px;transition:border-color .2s,box-shadow .2s}
@@ -436,6 +458,8 @@ function applyMemoryOps(tools){const ops=[];
   for(const t of tools){
     if(t.tag=='memory_save'&&t.val&&t.val.length<600){
       if(memories.some(m=>m.text.toLowerCase()==t.val.toLowerCase()))continue;
+      // only facts about the user ("User prefers ..."), never notes about the assistant itself
+      if(!/\buser\b/i.test(t.val)&&!(prefs.name&&t.val.toLowerCase().includes(prefs.name.toLowerCase())))continue;
       memories.push({id:memNextId(),text:t.val,category:normCat(t.a.category),pinned:false,created:Date.now(),updated:Date.now()});ops.push({k:'Saved memory',t:t.val})}
     else if(t.tag=='memory_edit'){const x=memories.find(m=>m.id==+t.a.id);
       if(x&&(t.val||t.a.category)){if(t.val)x.text=t.val;if(t.a.category)x.category=normCat(t.a.category);x.updated=Date.now();ops.push({k:'Updated memory',t:x.text})}}
@@ -504,10 +528,17 @@ Rules:
   if(extra)s+='\n\n'+extra;
   return s}
 const REMINDER='\n\n(Reminder from Ithaca, not from the user: you can create media yourself. Image: <generate_image>description</generate_image>. Video: <generate_video>description</generate_video>. Speech: <generate_audio kind="speech">words</generate_audio>. Never write code, scripts or links to make media and never explain how to run a generator; just use the tag.)';
+// Did the user ask for a picture, video or speech? Only then is the media reminder sent and are media tags acted on,
+// so "what can you do?" doesn't make an image.
+function asksForMedia(t){t=String(t||'');
+  return /\b(image|picture|photo|pic|drawing|painting|artwork|illustration|wallpaper|background|logo|icon|poster|portrait|render|sketch|video|clip|animation|movie)s?\b/i.test(t)&&
+         /\b(make|generate|create|draw|paint|render|produce|design|show|give|craft|sketch|animate|film|want|need|like|get|do|can you|could you|another|again|one more)\b/i.test(t)
+    ||/\b(draw|paint|sketch|animate)\b/i.test(t)
+    ||/\b(say|speak|read)\b[^.?!\n]{0,80}\b(out loud|aloud)\b|\b(text to speech|voice clip|in your voice)\b/i.test(t)}
 function apiMessages(msgs,extra,noReminder){const lastUser=[...msgs].reverse().find(m=>m.role=='user');
   const out=[{role:'system',content:systemPrompt(extra,lastUser&&lastUser.content)}].concat(msgs.map(m=>{const o={role:m.role,content:m.role=='assistant'?stripTags(splitThink(m.content).body).trim():m.content};if(m.images&&m.images.length)o.images=m.images;return o}));
   // the media reminder is skipped when the user attached something: then they want it read, not generated
-  if(!noReminder){for(let i=out.length-1;i>0;i--)if(out[i].role=='user'){if(!out[i].images&&!(lastUser&&lastUser.docs))out[i]=Object.assign({},out[i],{content:out[i].content+REMINDER});break}}
+  if(!noReminder&&lastUser&&asksForMedia(lastUser.content)){for(let i=out.length-1;i>0;i--)if(out[i].role=='user'){if(!out[i].images&&!lastUser.docs)out[i]=Object.assign({},out[i],{content:out[i].content+REMINDER});break}}
   return out}
 // Recognizes clear requests for media so Ithaca can make them directly instead of hoping the model writes a tag.
 function mediaIntent(msgs){
@@ -640,15 +671,23 @@ function renderAI(m,live){
   h+=mh||(live&&m.pendingMedia?'<div class="mslot"></div>':'');
   if(after.trim())h+=md(after);
   if(live&&!before.trim()&&!after.trim()&&!think&&!m.passes&&!mh&&!m.pendingMedia)
-    h+=`<span class="waiting"><span class="dots" style="--ph:-${Math.round(performance.now()%1000)}ms"><span></span><span></span><span></span></span><span class="wl">${esc(m.wait||'')}</span></span>`;
+    h+=`<span class="waiting"><span class="dots" style="--ph:-${Math.round(performance.now()%1000)}ms"><span></span><span></span><span></span></span><span class="wl" style="${phase(1800)}">${esc(m.wait||'')}</span></span>`;
   if(m.error)h+=`<div class="err">${esc(m.error)}</div>`;
   return h}
-function mediaHtml(x){return x.url?(x.kind=='image'?`<div class="gwrap"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):''}
+function mediaHtml(x){return x.url?(x.kind=='image'?`<div class="gwrap${justMade.has(x.url)?' justmade':''}"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):''}
+const justMade=new Set();   // pictures that finished during this reply get the reveal once
 // Animations keep their phase when the element is rebuilt (replies re-render on every token), so nothing restarts.
 const phase=ms=>`animation-delay:-${Math.round(performance.now()%ms)}ms`;
 // The live render card is created once and moved into each re-render's slot.
 let liveCard=null;
-function paint(el,ai){el.innerHTML=renderAI(ai,true);if(liveCard){const s=el.querySelector('.mslot');if(s)s.appendChild(liveCard)}}
+const chunkBorn=new WeakMap();   // reply object -> birth time of each top-level block
+function fadeChunks(el,ai){let born=chunkBorn.get(ai);if(!born){born=[];chunkBorn.set(ai,born)}const now=performance.now();
+  [...el.children].forEach((c,i)=>{if(c.classList.contains('mslot')||c.classList.contains('waiting')||c.querySelector('.rcard'))return;
+    if(born[i]==null)born[i]=now;const age=now-born[i];if(age<380){c.classList.add('chunk');c.style.animationDelay=`-${Math.round(age)}ms`}})}
+function paint(el,ai){el.innerHTML=renderAI(ai,true);fadeChunks(el,ai);
+  if(liveCard){const s=el.querySelector('.mslot');if(s){s.appendChild(liveCard);
+    // moving a node restarts its CSS animations; restart them at the same point of the shared clock
+    liveCard.querySelectorAll('.rshimmer').forEach(x=>x.style.animationDelay=`-${Math.round(performance.now()%1600)}ms`)}}}
 function msgEl(m,i,isLast){
   const d=document.createElement('div');
   if(m.role=='user'){d.className='msg user';d.innerHTML=(m.images&&m.images.length?`<div class="uimgs">${m.images.map(u=>`<img src="${u}" onclick="window.open().document.write('<img src=&quot;'+this.src+'&quot; style=&quot;max-width:100%&quot;>')">`).join('')}</div>`:'')+
@@ -674,10 +713,14 @@ window.copyMsg=i=>{const m=chat.messages[i];navigator.clipboard.writeText(m.role
 
 /* ---------- chats ---------- */
 async function loadHistory(){chats=await api('/api/chats');drawHistory()}
+let knownChats=null;
 function drawHistory(){
   const q=$('search').value.toLowerCase();const now=Date.now(),day=864e5;const groups={};
   chats.filter(c=>!q||c.title.toLowerCase().includes(q)).forEach(c=>{const age=now-c.updated;const g=age<day?'Today':age<2*day?'Yesterday':age<7*day?'Previous 7 days':'Older';(groups[g]=groups[g]||[]).push(c)});
   $('history').innerHTML=Object.entries(groups).map(([g,list])=>`<div class="group">${g}</div>`+list.map(c=>`<div class="hitem${chat&&chat.id==c.id?' on':''}" data-id="${c.id}"><span>${esc(c.title)}</span><button class="x" data-del="${c.id}" title="Delete">${ico('trash')}</button></div>`).join('')).join('')||'<div class="group">No chats yet</div>';
+  const ids=new Set(chats.map(c=>c.id));
+  if(knownChats)$('history').querySelectorAll('.hitem').forEach(e=>{if(!knownChats.has(e.dataset.id))e.classList.add('slidein')});
+  knownChats=ids;
   $('history').querySelectorAll('.hitem').forEach(e=>e.onclick=ev=>{if(ev.target.closest('[data-del]'))return;openChat(e.dataset.id)});
   $('history').querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this chat?'))return;await api('/api/chats/'+b.dataset.del+'/delete',{});if(chat&&chat.id==b.dataset.del)newChat();loadHistory()})}
 async function openChat(id){if(busy)return;const c=await api('/api/chats/'+id);if(c.error)return;chat=c;if(view!='chat')setView('chat');render();drawHistory()}
@@ -698,7 +741,8 @@ async function updateCtx(){
 // Think hard: one short planning pass; a checking pass only when the plan is unsure or the task is tricky (code, maths, long).
 const PLAN=['Plan','In under 150 words of bullet points: what is really being asked, the key facts, steps or code structure the answer needs, and the one mistake most likely to sneak in. End with one line: CONFIDENCE: high, medium or low (how sure you are this plan is right).'];
 const CHECK=['Check','Review the plan below like a skeptical expert, in under 120 words: fix anything wrong, add what is missing, re-check every number, step and line of code. End with the corrected key points.'];
-function setBusy(b){busy=b;const s=$('send');s.innerHTML=ico(b?'stop':'up');s.disabled=!b&&!canSend();s.title=b?'Stop':'Send';updateCtx()}
+function setBusy(b){const changed=busy!=b;busy=b;const s=$('send');s.innerHTML=ico(b?'stop':'up');s.classList.toggle('busy',b);
+  if(changed){s.classList.remove('morph');void s.offsetWidth;s.classList.add('morph')}s.disabled=!b&&!canSend();s.title=b?'Stop':'Send';updateCtx()}
 async function runTools(tools){const results=[],chips=[],media=[];
   for(const t of tools){
     if(t.tag=='memory_search'){const r=searchMem(t.val);
@@ -709,7 +753,7 @@ async function runTools(tools){const results=[],chips=[],media=[];
       const size=kind=='image'?Object.assign(pickSize(t.a,lastRequest),{fit:true}):{};
       const r=await api('/api/media/generate',Object.assign({},t.a,size,{kind,prompt:t.val,mode:t.a.kind||t.a.mode||''}));stop();liveCard=null;
       results.push(`${t.tag} → `+(r.error?'FAILED: '+r.error:`done. The ${kind} is already displayed to the user right below your message, so do not add links, file names or markdown images; just describe it briefly or offer changes.`));chips.push({i:kind=='audio'?'audio':kind=='video'?'video':'image',k:`${kind[0].toUpperCase()+kind.slice(1)} request`,t:r.error?'not available':'created'});
-      if(r.url)media.push({kind,url:r.url})}}
+      if(r.url){media.push({kind,url:r.url});justMade.add(r.url);setTimeout(()=>justMade.delete(r.url),2500)}}}
   return{results,chips,media}}
 // Width and height for an image: from the tag (width/height, size="WxH", aspect="16:9"), else from the words of the request.
 // The engine keeps the shape and renders at the model's native pixel count.
@@ -733,7 +777,8 @@ async function generate(){
   // while nothing has been written yet, say whether the model is still loading (after an image, or a fresh load)
   const loadingNow=()=>status.paused||!status.loaded||(status.layers||[]).some(l=>l[1]!=l[0]);
   ai.wait=loadingNow()?'Loading model…':'';
-  const waitTimer=setInterval(()=>{const w=el.querySelector('.wl');if(w){ai.wait=loadingNow()?'Loading model…':'';w.textContent=ai.wait}},500);
+  const waitTimer=setInterval(()=>{const w=el.querySelector('.wl');if(!w)return;const t=loadingNow()?'Loading model…':'';
+    if(t!=w.textContent){ai.wait=t;w.textContent=t;w.style.animationDelay=`-${Math.round(performance.now()%1800)}ms`}},500);
   if(hard){
     // Build the animated header once; only the notes area below it re-renders while tokens stream in.
     ai.passes=[];
@@ -771,11 +816,11 @@ async function generate(){
     // model wrote it; the text around it is already the reply, so there is no follow-up round for it.
     // One picture per reply unless the user asked for several.
     const several=/\b(two|three|four|five|six|\d+|several|multiple|a few|some|variations?|versions?)\b[^.?!\n]{0,40}\b(images|pictures|photos|pics|wallpapers|drawings|videos|clips)\b/i.test(lastU.content);
-    let done=0,made=(ai.media||[]).length;
+    let done=0,made=(ai.media||[]).length;const asked=asksForMedia(lastU.content);
     for(let round=0;round<3&&!stopped&&!ai.error;round++){
       let calls=parseTools(ai.content).filter(t=>(!t.tag.startsWith('memory_')||t.tag=='memory_search')&&!((intent||(lastU.images&&lastU.images.length)||(lastU.docs&&lastU.docs.length))&&t.tag.startsWith('generate_'))).slice(done);
       if(!calls.length)break;done+=calls.length;
-      calls=calls.filter(t=>!t.tag.startsWith('generate_')||several||made++==0);
+      calls=calls.filter(t=>!t.tag.startsWith('generate_')||(asked&&(several||made++==0)));
       if(!calls.length)break;
       const media=calls.some(t=>t.tag.startsWith('generate_'));
       if(media){ai.pendingMedia=true;paint(el,ai)}
@@ -823,9 +868,11 @@ let flyFrom=null,freshFrom=1e9;
 function flyLogo(){const from=flyFrom;flyFrom=null;const to=document.querySelector('.msg.ai:last-child .avatar');if(!from||!to)return;
   const t=to.getBoundingClientRect(),f=document.createElement('div');f.className='flylogo';f.innerHTML='<svg><use href="#spark"/></svg>';
   Object.assign(f.style,{left:from.left+'px',top:from.top+'px',width:from.width+'px',height:from.height+'px'});document.body.appendChild(f);to.style.visibility='hidden';
-  const dx=t.left-from.left+(t.width-from.width)/2,dy=t.top-from.top+(t.height-from.height)/2,k=t.width/from.width,lift=Math.min(140,Math.abs(dy)*.35+60);
+  const dx=t.left-from.left+(t.width-from.width)/2,dy=t.top-from.top+(t.height-from.height)/2,k=t.width/from.width;
+  const peak=Math.max(Math.min(0,dy*.5)-Math.min(140,Math.abs(dy)*.35+60),24-from.top);   // arc top stays inside the window
+  const lift=Math.min(0,dy*.5)-peak;
   const a=f.animate([{transform:'translate(0,0) scale(1) rotate(0)',borderRadius:'14px'},
-    {transform:`translate(${dx*.5}px,${Math.min(0,dy*.5)-lift}px) scale(${(1+k)/2+.15}) rotate(200deg)`,borderRadius:'40%',offset:.5},
+    {transform:`translate(${dx*.5}px,${peak}px) scale(${(1+k)/2+.15}) rotate(200deg)`,borderRadius:'40%',offset:.5},
     {transform:`translate(${dx}px,${dy}px) scale(${k}) rotate(360deg)`,borderRadius:'50%'}],{duration:720,easing:'cubic-bezier(.45,0,.25,1)'});
   a.onfinish=()=>{f.remove();to.style.visibility='';to.classList.add('land')}}
 window.redo=async()=>{if(busy||!chat)return;if(chat.messages[chat.messages.length-1].role=='assistant')chat.messages.pop();await generate()};
@@ -1075,7 +1122,8 @@ $('settings').onclick=e=>{if(e.target.id=='settings'){$('settings').classList.re
 /* ---------- studio: image / video / audio ---------- */
 let view='chat',mediaModels=null;
 let vsel={amode:'Speech'};
-function setView(v){view=v;$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
+function setView(v){const prev=view;view=v;
+  if(prev!=v)setTimeout(()=>{const t=v=='chat'?$('log'):$('studio');if(t){t.classList.remove('viewin');void t.offsetWidth;t.classList.add('viewin')}});$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
   const chatv=v=='chat';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
   document.querySelector('.ctxwrap').style.visibility=chatv?'':'hidden';$('studio').style.display=chatv?'none':'block';
   if(!chatv)drawStudio()}
@@ -1197,16 +1245,20 @@ async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.
 function watchProgress(el){let on=true,seen=-1;
-  el.innerHTML=`<div class="rcard"><div class="rframe"><div class="rshimmer" style="${phase(2400)}"></div><img class="rimg" alt=""><div class="rbadge"><span class="rdot"></span><span class="mp-l">Starting</span></div></div>
+  el.innerHTML=`<div class="rcard"><div class="rframe"><div class="rshimmer" style="${phase(1600)}"></div><img class="rimg" alt=""><div class="rbadge"><span class="rdot"></span><span class="mp-l">Starting</span></div></div>
     <div class="rfoot"><div class="rbar"><i class="mp-b"></i></div><span class="rpct mp-p">0%</span><button class="btn mp-c">Cancel</button></div></div>`;
   el.querySelector('.mp-c').onclick=()=>fetch('/api/media/cancel',{method:'POST'});
-  const img=el.querySelector('.rimg'),fr=el.querySelector('.rframe');
-  img.onload=()=>{fr.classList.add('has')};
+  const fr=el.querySelector('.rframe');let img=el.querySelector('.rimg');
+  // Each preview loads off-screen and fades in over the previous one, so the frame never flashes back to empty.
+  const show=src=>{const n=new Image();n.className='rimg';n.alt='';
+    n.onload=()=>{if(!on)return;fr.insertBefore(n,img.nextSibling);fr.classList.add('has');
+      requestAnimationFrame(()=>{n.classList.add('in');const old=img;img=n;setTimeout(()=>{if(old!==img)old.remove()},600)})};
+    n.src=src};
   (async()=>{while(on){try{const p=await api('/api/media/progress');if(!on)break;
     const l=el.querySelector('.mp-l'),b=el.querySelector('.mp-b'),pc=el.querySelector('.mp-p');
     if(p.busy){const f=p.total?Math.min(1,(p.step+(p.phase=='Decoding'?1:0))/p.total):0;
       l.textContent=p.total?`${p.phase} · ${p.step}/${p.total}`:p.phase;b.style.width=Math.max(3,f*100)+'%';pc.textContent=Math.round(f*100)+'%';
-      if(p.preview&&p.preview!=seen){seen=p.preview;img.src='/api/media/preview?'+seen}}}catch(e){}
+      if(p.preview&&p.preview!=seen){seen=p.preview;show('/api/media/preview?'+seen)}}}catch(e){}
     await new Promise(r=>setTimeout(r,400))}})();
   return()=>{on=false}}
 $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.view));
