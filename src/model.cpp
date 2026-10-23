@@ -312,7 +312,7 @@ void Model::tier_thread() {
             {   // the KV cache starts small and grows with the conversation (ensure_kv); the tier plan
                 // already budgets the full context, so growing never pushes this model out of VRAM
                 std::lock_guard<std::mutex> kl(kv_m_);
-                int cap = std::min(ctx, std::max(1024, (n_past + 256 + 511) / 512 * 512));   // room for one more batch
+                int cap = std::min(ctx, (std::max({1024, kv_want_, n_past + gpu_batch_}) + 511) / 512 * 512);   // the request in flight, or one more batch
                 const size_t eb = kvq8_ ? 1 : 2;
                 L.d_kc = cuda().alloc((size_t)cap * kvd * eb); L.d_vc = cuda().alloc((size_t)cap * kvd * eb);
                 if (kvq8_) { L.d_ks = cuda().alloc((size_t)cap * hp.n_kv * 4); L.d_vs = cuda().alloc((size_t)cap * hp.n_kv * 4); }
@@ -635,6 +635,7 @@ bool Model::moe_grouped(Layer& L, int n) {
 bool Model::ensure_kv(int need) {
     if (!dev_ok_) return true;
     std::lock_guard<std::mutex> kl(kv_m_);
+    kv_want_ = std::max(kv_want_, need);
     const size_t kvd = (size_t)hp.n_kv * hp.hd;
     bool grew = false;
     for (auto& L : layers_) {
@@ -820,6 +821,9 @@ const float* Model::eval(const int* toks, int n_all) {
     double ev0 = now_sec();
     EvT evt{evp, ev0};
     if (!loaded_ || n_all <= 0 || n_past + n_all > ctx) return nullptr;
+    // A long prompt right after a (re)load reads far faster once the layers are in VRAM than on the CPU, and the
+    // placement is fixed per request below, so give the background placement a moment to finish first.
+    if (n_all > 64 && migrating_) for (double t0 = now_sec(); migrating_ && now_sec() - t0 < 30;) Sleep(20);
     if (!ensure_kv(n_past + n_all)) return nullptr;
     if (n_all == 1 && toks[0] >= 0 && dev_ok_ && !migrating_ && all_gpu()) {
         // Fully VRAM-resident decode: replay one CUDA graph for the whole forward pass.
@@ -858,6 +862,10 @@ const float* Model::eval(const int* toks, int n_all) {
         }
     }
     const int B = dev_ok_ ? gpu_batch_ : 256;
+    // Placement is fixed for the whole request: a layer that reaches VRAM mid-request joins at the next one.
+    std::vector<char> on_gpu(hp.n_layer);
+    for (int i = 0; i < hp.n_layer; i++) on_gpu[i] = dev_ok_ && layers_[i].state == TIER_GPU;
+    const bool head_gpu = dev_ok_ && out_state_ == TIER_GPU;
     for (int c0 = 0, n = 0; c0 < n_all; c0 += n) {
         // batches never mix text and image tokens: an image run is one non-causal block
         const bool img = toks[c0] < 0;
@@ -887,7 +895,7 @@ const float* Model::eval(const int* toks, int n_all) {
             Layer& L = layers_[li];
             { std::lock_guard<std::mutex> l(pre_m_); pre_want_ = li + 1; }
             pre_cv_.notify_one();
-            if (dev_ok_ && L.state == TIER_GPU) {
+            if (on_gpu[li]) {
                 CudaTier& cu = cuda();
                 if (!on_dev) { cu.htod_async(dX_, x_.data(), (size_t)n * d * 4); on_dev = true; }
                 if (!cs_up) {
@@ -931,7 +939,7 @@ const float* Model::eval(const int* toks, int n_all) {
                 if (n == 1 && !nc && !migrating_) {
                     // Decode: replay a cached CUDA graph for this whole run of VRAM layers.
                     int e = li;
-                    while (e < hp.n_layer && layers_[e].state == TIER_GPU) kv_sync(e++);
+                    while (e < hp.n_layer && on_gpu[e]) kv_sync(e++);
                     void*& g = seg_graphs_[li * 4096 + e];
                     if (!g && cu.begin_capture()) {
                         for (int k = li; k < e; k++) gpu_layer(layers_[k], 1);
@@ -1022,7 +1030,7 @@ const float* Model::eval(const int* toks, int n_all) {
             if (!L.post_ffn_norm.empty()) rmsnorm(tmp_.data(), L.post_ffn_norm.data(), tmp_.data(), n, d);
             for (size_t i = 0; i < (size_t)n * d; i++) x_[i] += tmp_[i] * hp.res_scale;
         }
-        if (c0 + n >= n_all && dev_ok_ && out_state_ == TIER_GPU && out_.dptr.load()) {
+        if (c0 + n >= n_all && head_gpu && out_.dptr.load()) {
             CudaTier& cu = cuda();
             if (!on_dev) { cu.htod_async(dX_, x_.data(), (size_t)n * d * 4); on_dev = true; }
             unsigned ud = d; float eps = hp.eps;

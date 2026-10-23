@@ -5,6 +5,7 @@
 #include "tts.h"
 #include "wan.h"
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 
 extern std::wstring g_store_dir;
@@ -16,9 +17,10 @@ static int g_step = 0, g_total = 0;
 static std::string g_preview;   // latest live preview as a BMP file
 static int g_preview_n = 0;      // bumps on every new preview
 static std::atomic<bool> g_media_busy{false}, g_media_cancel{false};
+bool media_busy() { return g_media_busy; }
 
 void chat_model_release();
-void chat_model_restore();
+void chat_model_restore_later();
 // Frees the chat model's VRAM when a job needs more than is free; restores it when the job ends.
 struct VramLease {
     bool released = false;
@@ -27,7 +29,7 @@ struct VramLease {
         Model::cuda().mem_info(f, t);
         if ((int64_t)(f >> 20) < need_mb) { chat_model_release(); released = true; }
     }
-    ~VramLease() { if (released) { gx().trim(); chat_model_restore(); } }
+    ~VramLease() { if (released) { gx().trim(); chat_model_restore_later(); } }
 };
 
 static std::string read_text(const std::wstring& p) {
@@ -86,6 +88,12 @@ std::string media_generate_image(const J& req) {
     int def = e.info().default_res;
     j.width = (int)req["width"].num(prefs["img_width"].num(def));
     j.height = (int)req["height"].num(prefs["img_height"].num(def));
+    {   // "fit": keep the requested shape but render at the model's native pixel count (SDXL ~1 MP); always multiples of 64
+        double w = std::max(1, j.width), h = std::max(1, j.height), a = std::max(0.25, std::min(4.0, w / h));
+        if (req["fit"].t == J::BOOL && req["fit"].b) { w = std::sqrt((double)def * def * a); h = w / a; }
+        j.width = std::max(256, std::min(2048, (int)std::lround(w / 64) * 64));
+        j.height = std::max(256, std::min(2048, (int)std::lround(h / 64) * 64));
+    }
     j.steps = std::max(1, std::min(150, (int)req["steps"].num(prefs["img_steps"].num(25))));
     j.cfg = (float)req["cfg"].num(prefs["img_cfg"].num(e.info().arch == "sdxl" ? 6.0 : 7.0));
     j.sampler = req["sampler"].str(prefs["img_sampler"].str("dpmpp_2m"));

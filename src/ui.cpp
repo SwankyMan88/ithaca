@@ -216,6 +216,62 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .genimg{max-width:100%;border-radius:12px;margin:6px 0}
 .result{margin-top:12px;font-size:13.5px}
 @media(max-width:820px){aside{position:fixed;z-index:10;height:100%}.ctxbar{width:80px}.sheet{flex-direction:column;height:90vh}.tabs{width:auto;flex-direction:row;overflow:auto}.tabs h3{display:none}.grid2,.pc{grid-template-columns:1fr}}
+/* every form control follows the theme (some had the browser's white default, hiding light text) */
+:root{color-scheme:dark}:root[data-theme=light]{color-scheme:light}
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]),textarea:not(#q),select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px;font:inherit}
+input::placeholder,textarea::placeholder{color:var(--faint)}
+select option{background:var(--panel);color:var(--text)}
+input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--a1)}
+input[type=file]{color:var(--dim)}
+/* waiting label, loading shine */
+.dots span{animation-delay:var(--ph,0ms)}.dots span:nth-child(2){animation-delay:calc(var(--ph,0ms) + .15s)}.dots span:nth-child(3){animation-delay:calc(var(--ph,0ms) + .3s)}
+.waiting{display:inline-flex;align-items:center;gap:10px;min-height:22px}
+.wl{font-size:13px;color:var(--dim)}
+.wl:not(:empty){background:linear-gradient(90deg,var(--dim) 30%,var(--text) 50%,var(--dim) 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:wshine 1.8s linear infinite}
+@keyframes wshine{from{background-position:120% 0}to{background-position:-120% 0}}
+/* new chat: the spark pops in and twinkles, the heading and suggestions rise in */
+.empty .logo{position:relative;animation:spawn .7s cubic-bezier(.2,1.5,.4,1) both}
+.empty .logo svg{animation:twinkle 3.2s ease-in-out .7s infinite}
+.empty .logo::after{content:"";position:absolute;inset:-7px;border-radius:18px;border:1.5px solid rgba(139,108,255,.55);opacity:0;animation:halo 3.2s ease-out .7s infinite}
+.empty .spark{position:absolute;width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 8px #b9a8ff;opacity:0;animation:glint 3.2s ease-in-out infinite}
+.empty h2{animation:rise .55s .12s cubic-bezier(.2,.9,.3,1) both}
+.empty .chip{animation:rise .5s cubic-bezier(.2,.9,.3,1) both}
+.empty .chip:nth-child(1){animation-delay:.22s}.empty .chip:nth-child(2){animation-delay:.29s}.empty .chip:nth-child(3){animation-delay:.36s}.empty .chip:nth-child(4){animation-delay:.43s}
+.empty .chip{transition:transform .15s,border-color .15s}.empty .chip:hover{transform:translateY(-2px);border-color:var(--a1)}
+@keyframes spawn{from{transform:scale(0) rotate(-90deg);opacity:0}to{transform:none;opacity:1}}
+@keyframes twinkle{0%,100%{transform:scale(1) rotate(0)}12%{transform:scale(1.18) rotate(18deg)}24%{transform:scale(1) rotate(0)}}
+@keyframes halo{0%{opacity:0;transform:scale(.8)}12%{opacity:.9}40%,100%{opacity:0;transform:scale(1.35)}}
+@keyframes glint{0%,100%{opacity:0;transform:scale(.2)}8%{opacity:1;transform:scale(1)}18%{opacity:0;transform:scale(.2)}}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+/* sending from a new chat: suggestions pop away, the heading lifts off */
+.empty.leaving .chip{animation:popout .3s cubic-bezier(.5,0,.75,0) forwards}
+.empty.leaving .chip:nth-child(2){animation-delay:.04s}.empty.leaving .chip:nth-child(3){animation-delay:.08s}.empty.leaving .chip:nth-child(4){animation-delay:.12s}
+.empty.leaving h2{animation:liftoff .35s cubic-bezier(.5,0,.75,0) forwards}
+@keyframes popout{to{opacity:0;transform:scale(.6) translateY(10px)}}
+@keyframes liftoff{to{opacity:0;transform:translateY(-18px) scale(.96);filter:blur(4px)}}
+.flylogo{position:fixed;z-index:50;pointer-events:none;border-radius:14px;background:var(--grad);display:grid;place-items:center;box-shadow:0 0 22px rgba(139,108,255,.6)}
+.flylogo svg{width:58%;height:58%}
+.avatar.land{animation:land .45s cubic-bezier(.2,1.6,.4,1)}
+@keyframes land{0%{transform:scale(1.35)}100%{transform:scale(1)}}
+/* new messages slide in */
+.msg.fresh{animation:rise .35s cubic-bezier(.2,.9,.3,1) both}
+/* studios */
+.hero textarea,.sizerow input[type=number]{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+.hero textarea{width:100%;font-size:15px;min-height:84px;resize:vertical;padding:12px 14px;border-radius:12px;transition:border-color .2s,box-shadow .2s}
+.hero textarea:focus,.sizerow input:focus{outline:none;border-color:var(--a1);box-shadow:0 0 0 3px rgba(139,108,255,.18)}
+.sizerow input[type=range]{accent-color:var(--a1)}
+.sizerow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
+.sizerow label{font-size:13px;font-weight:600;color:var(--dim)}
+.sizerow input[type=number]{width:86px}
+.sizerow .x{color:var(--faint)}
+.sizerow .hint{font-size:12.5px;color:var(--faint)}
+.chk{display:inline-flex;align-items:center;gap:6px;font-weight:500!important;cursor:pointer}
+.studio .row{display:flex;gap:8px;align-items:center}
+details.adv{padding:0}details.adv>summary{padding:14px 18px;cursor:pointer;font-weight:600;font-size:14px;list-style:none;display:flex;align-items:center;gap:8px}
+details.adv>summary::before{content:"›";display:inline-block;transition:transform .2s;color:var(--dim)}details.adv[open]>summary::before{transform:rotate(90deg)}
+details.adv>.in{padding:0 18px 16px}
+.studio .card{animation:rise .4s cubic-bezier(.2,.9,.3,1) both}.studio .card:nth-of-type(2){animation-delay:.05s}.studio .card:nth-of-type(3){animation-delay:.1s}
+.btn.pri{transition:transform .12s,box-shadow .2s}.btn.pri:hover{box-shadow:0 6px 20px rgba(139,108,255,.35)}.btn.pri:active{transform:scale(.97)}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -283,7 +339,7 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
       <div class="boxrow">
         <button class="toggle icononly" id="attBtn" title="Attach images or files (PDF, Word, PowerPoint, Excel, text, code). You can also paste or drop them."><svg class="icon" style="width:16px;height:16px"><use href="#i-clip"/></svg></button>
         <input type="file" id="fileIn" multiple hidden accept="image/*,.pdf,.docx,.pptx,.xlsx,.txt,.md,.csv,.tsv,.json,.xml,.html,.htm,.log,.ini,.yaml,.yml,.toml,.py,.js,.ts,.tsx,.jsx,.c,.cpp,.h,.hpp,.cs,.java,.go,.rs,.rb,.php,.lua,.gd,.sh,.bat,.ps1,.sql,.tex,.rtf">
-        <button class="toggle" id="hardBtn" title="Think hard: the model reasons over the task in 4 separate passes before answering"><svg class="icon" style="width:15px;height:15px"><use href="#i-brain"/></svg>Think hard</button>
+        <button class="toggle" id="hardBtn" title="Think hard: the model makes a short plan (and checks it when the task is tricky) before answering"><svg class="icon" style="width:15px;height:15px"><use href="#i-brain"/></svg>Think hard</button>
         <button class="send" id="send" disabled title="Send"><svg class="icon"><use href="#i-up"/></svg></button>
       </div>
     </div>
@@ -318,7 +374,7 @@ const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',body:JSON.stringify(b)});return r.json()}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
 
-let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',think_passes:4,spec_decode:true};
+let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',spec_decode:true};
 let memories=[],chats=[],chat=null,busy=false,hard=false,status={},abortCtl=null;
 
 /* ---------- markdown ---------- */
@@ -419,7 +475,7 @@ function systemPrompt(extra,lastUser){
 
 # Tools
 Call a tool by writing its tag in your final answer. Tags are invisible to the user; results come back to you automatically and you then continue the reply.
-- <generate_image>detailed visual description</generate_image>: make an image when the user asks for one.
+- <generate_image width="W" height="H">detailed visual description</generate_image>: make ONE image when the user asks for one. Set width and height to the shape they need (phone wallpaper width="1170" height="2532", desktop wallpaper width="1920" height="1080", portrait width="832" height="1216", otherwise width="1024" height="1024"). Ithaca renders the closest size the image model handles well. Write the tag once, with plain text inside and nothing else. Order: one or two sentences saying what you are making, then the tag, then one short line after it (the picture appears between them).
 - <generate_video seconds="5">detailed description of subject, action, camera and style</generate_video>: make a short video.
 - <generate_audio kind="speech">exact text to speak</generate_audio>: say something out loud in the user's chosen voice (when they ask you to speak, read aloud or make a voice clip).
 If a tool reports a problem (for example that no model is loaded), explain it to the user in your own words and suggest what they can do.`;
@@ -440,7 +496,9 @@ Rules:
 - Never save what is in attached images or files: they stay available in this chat. Only save it if the user explicitly asks you to remember it.
 - Check the list first. If a related memory exists, edit it instead of saving a duplicate. Write in third person ("User prefers ...").
 - When the user corrects something or asks you to forget it, edit or delete that memory.
-- Write tags only in your final answer, never while reasoning, and never mention the tags themselves. Instead tell the user naturally, e.g. "Got it, I'll remember that."`}
+- Write tags only in your final answer, never while reasoning, and never mention the tags themselves.
+- Most messages need no memory tag at all. Questions, requests and small talk are not facts about the user.
+- Only when you actually wrote a memory tag in this reply, say so naturally (e.g. "Got it, I'll remember that."). Otherwise never say you will remember something.`}
   if(chat&&chat.summary)s+='\n\n# Summary of the earlier part of this conversation\n'+chat.summary;
   const fc=fileContext(lastUser||'');if(fc)s+='\n\n'+fc;
   if(extra)s+='\n\n'+extra;
@@ -565,20 +623,32 @@ async function stream(messages,opts,onText){
   }catch(e){if(e.name!='AbortError')error=String(e)}
   abortCtl=null;return{text,stats,error}}
 function stopGen(){fetch('/api/stop',{method:'POST'});stopped=true}
-let stopped=false;
+let stopped=false,fromChip=false;
 
 /* ---------- rendering ---------- */
 function renderAI(m,live){
   const {think,body,open}=splitThink(m.content||'');let h='';
-  if(m.passes&&m.passes.length)h+=`<details class="think"><summary>${ico('brain')}Thought hard · ${m.passes.length} passes</summary><div class="tb">`+m.passes.map((p,i)=>`<div class="pass"><h4>Pass ${i+1} · ${esc(p.title)}</h4>${md(p.text)}</div>`).join('')+'</div></details>';
+  if(m.passes&&m.passes.length)h+=`<details class="think"><summary>${ico('brain')}Thought hard · ${m.passes.length==1?'planned':m.passes.length==2?'planned and checked':m.passes.length+' passes'}</summary><div class="tb">`+m.passes.map((p,i)=>`<div class="pass"><h4>${m.passes.length>2?`Pass ${i+1} · `:''}${esc(p.title)}</h4>${md(p.text)}</div>`).join('')+'</div></details>';
   if(think)h+=`<details class="think"${open&&live?' open':''}><summary>${ico('brain')}${open&&live?'Thinking…':'Thought process'}</summary><div class="tb">${md(think)}</div></details>`;
   const chips=(m.tools||[]).concat(m.mem||[]);
   if(chips.length)h+='<div>'+chips.map(o=>`<span class="memchip">${ico(o.i||'mem')}${esc(o.k)}${o.t?': '+esc(o.t.length>70?o.t.slice(0,70)+'…':o.t):''}</span>`).join('')+'</div>';
-  const b=stripTags(body);h+=md(b);
-  if(m.media)h+=m.media.map(x=>x.url?(x.kind=='image'?`<div class="gwrap"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):'').join('');
-  if(live&&!b&&!think&&!m.passes)h+='<span class="dots"><span></span><span></span><span></span></span>';
+  // the picture sits where the model wrote its tag: text before it, the picture (or its live card), then the text after it
+  const tm=body.match(/<generate_(image|video|audio)\b[\s\S]*?(?:<\/generate_\1>|\/>)/);
+  const before=stripTags(tm?body.slice(0,tm.index):body),after=tm?stripTags(body.slice(tm.index+tm[0].length)):'';
+  h+=md(before);
+  const mh=(m.media||[]).map(mediaHtml).join('');
+  h+=mh||(live&&m.pendingMedia?'<div class="mslot"></div>':'');
+  if(after.trim())h+=md(after);
+  if(live&&!before.trim()&&!after.trim()&&!think&&!m.passes&&!mh&&!m.pendingMedia)
+    h+=`<span class="waiting"><span class="dots" style="--ph:-${Math.round(performance.now()%1000)}ms"><span></span><span></span><span></span></span><span class="wl">${esc(m.wait||'')}</span></span>`;
   if(m.error)h+=`<div class="err">${esc(m.error)}</div>`;
   return h}
+function mediaHtml(x){return x.url?(x.kind=='image'?`<div class="gwrap"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):''}
+// Animations keep their phase when the element is rebuilt (replies re-render on every token), so nothing restarts.
+const phase=ms=>`animation-delay:-${Math.round(performance.now()%ms)}ms`;
+// The live render card is created once and moved into each re-render's slot.
+let liveCard=null;
+function paint(el,ai){el.innerHTML=renderAI(ai,true);if(liveCard){const s=el.querySelector('.mslot');if(s)s.appendChild(liveCard)}}
 function msgEl(m,i,isLast){
   const d=document.createElement('div');
   if(m.role=='user'){d.className='msg user';d.innerHTML=(m.images&&m.images.length?`<div class="uimgs">${m.images.map(u=>`<img src="${u}" onclick="window.open().document.write('<img src=&quot;'+this.src+'&quot; style=&quot;max-width:100%&quot;>')">`).join('')}</div>`:'')+
@@ -592,12 +662,13 @@ function render(){
   const log=$('log');
   if(!chat||!chat.messages.length){
     const hi=prefs.name?`Hi ${esc(prefs.name)}, what's on your mind?`:'How can I help you today?';
-    log.innerHTML=`<div class="empty"><div class="logo" style="width:46px;height:46px;border-radius:14px"><svg style="width:26px;height:26px"><use href="#spark"/></svg></div><h2>${hi}</h2><div class="chips">`+
+    log.innerHTML=`<div class="empty"><div class="logo" style="width:46px;height:46px;border-radius:14px"><svg style="width:26px;height:26px"><use href="#spark"/></svg><i class="spark" style="left:-10px;top:4px;animation-delay:1s"></i><i class="spark" style="right:-8px;top:-6px;animation-delay:1.6s"></i><i class="spark" style="right:-12px;bottom:2px;animation-delay:2.3s"></i></div><h2>${hi}</h2><div class="chips">`+
       ['Explain how attention works in transformers','Write a Python script that renames files by date','Help me plan a Blender animation workflow','What do you remember about me?'].map(t=>`<button class="chip">${t}</button>`).join('')+'</div></div>';
-    log.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('q').value=c.textContent;send()});updateCtx();drawAtt();return}
+    log.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('q').value=c.textContent;fromChip=true;send()});updateCtx();drawAtt();return}
   const col=document.createElement('div');col.className='col';
   if(chat.summary)col.innerHTML=`<details class="think"><summary>${ico('compact')}Earlier messages were compacted into a summary</summary><div class="tb">${md(chat.summary)}</div></details>`;
-  chat.messages.forEach((m,i)=>col.appendChild(msgEl(m,i,i==chat.messages.length-1&&m.role=='assistant')));
+  chat.messages.forEach((m,i)=>{const e=msgEl(m,i,i==chat.messages.length-1&&m.role=='assistant');if(i>=freshFrom)e.classList.add('fresh');col.appendChild(e)});
+  freshFrom=1e9;
   log.innerHTML='';log.appendChild(col);log.scrollTop=log.scrollHeight;updateCtx();drawAtt()}
 window.copyMsg=i=>{const m=chat.messages[i];navigator.clipboard.writeText(m.role=='assistant'?stripTags(splitThink(m.content).body).trim():m.content);toast('Copied')};
 
@@ -624,78 +695,112 @@ async function updateCtx(){
   $('compact').disabled=busy||!chat||chat.messages.length<4}
 
 /* ---------- sending ---------- */
-const PASSES=[
- ['Understand','Restate the task in your own words. Identify exactly what is being asked, the constraints, what is unknown, and what an excellent answer must contain. Note any assumptions you are making.'],
- ['Explore','Work out at least two genuinely different approaches or interpretations. For each, sketch how it would go and its strengths and weaknesses. Choose the strongest and say why.'],
- ['Stress-test','Hunt for edge cases, failure modes, hidden assumptions, missing information and things the user has not considered. For each, decide how the answer should handle it.'],
- ['Critique','Act as a skeptical expert reviewing all notes so far. What is wrong, weak or missing? Correct it and settle the final plan: the key points, in order, that the answer must make.'],
- ['Verify','Re-check every fact, number, calculation and line of code in the plan step by step. Fix anything that does not hold up.'],
- ['Simplify','Find the clearest, most direct structure for the final answer and cut anything unnecessary.']];
+// Think hard: one short planning pass; a checking pass only when the plan is unsure or the task is tricky (code, maths, long).
+const PLAN=['Plan','In under 150 words of bullet points: what is really being asked, the key facts, steps or code structure the answer needs, and the one mistake most likely to sneak in. End with one line: CONFIDENCE: high, medium or low (how sure you are this plan is right).'];
+const CHECK=['Check','Review the plan below like a skeptical expert, in under 120 words: fix anything wrong, add what is missing, re-check every number, step and line of code. End with the corrected key points.'];
 function setBusy(b){busy=b;const s=$('send');s.innerHTML=ico(b?'stop':'up');s.disabled=!b&&!canSend();s.title=b?'Stop':'Send';updateCtx()}
 async function runTools(tools){const results=[],chips=[],media=[];
   for(const t of tools){
     if(t.tag=='memory_search'){const r=searchMem(t.val);
       results.push(`memory_search("${t.val}") → `+(r.length?'\n'+r.map(memLine).join('\n'):'no matching memories'));chips.push({i:'mem',k:'Searched memory',t:`"${t.val}" · ${r.length} found`})}
-    else{const kind=t.tag.slice(9);const holder=document.querySelector('.msg.ai:last-child .content');let stop=()=>{};
-      if(holder){const d=document.createElement('div');holder.appendChild(d);stop=watchProgress(d)}
-      // tag attributes (like kind="speech") must not override which engine is called
-      const r=await api('/api/media/generate',Object.assign({},t.a,{kind,prompt:t.val,mode:t.a.kind||t.a.mode||''}));stop();
+    else{const kind=t.tag.slice(9);const holder=document.querySelector('.msg.ai:last-child .content');
+      liveCard=document.createElement('div');if(holder)(holder.querySelector('.mslot')||holder).appendChild(liveCard);const stop=watchProgress(liveCard);
+      // tag attributes (like kind="speech") must not override which engine is called; images get a size that fits the request
+      const size=kind=='image'?Object.assign(pickSize(t.a,lastRequest),{fit:true}):{};
+      const r=await api('/api/media/generate',Object.assign({},t.a,size,{kind,prompt:t.val,mode:t.a.kind||t.a.mode||''}));stop();liveCard=null;
       results.push(`${t.tag} → `+(r.error?'FAILED: '+r.error:`done. The ${kind} is already displayed to the user right below your message, so do not add links, file names or markdown images; just describe it briefly or offer changes.`));chips.push({i:kind=='audio'?'audio':kind=='video'?'video':'image',k:`${kind[0].toUpperCase()+kind.slice(1)} request`,t:r.error?'not available':'created'});
       if(r.url)media.push({kind,url:r.url})}}
   return{results,chips,media}}
+// Width and height for an image: from the tag (width/height, size="WxH", aspect="16:9"), else from the words of the request.
+// The engine keeps the shape and renders at the model's native pixel count.
+let lastRequest='';
+function pickSize(a,req){let w=+a.width||0,h=+a.height||0;
+  const m=String(a.size||a.resolution||a.aspect||a.ratio||'').match(/(\d+(?:\.\d+)?)\s*[x×:*]\s*(\d+(?:\.\d+)?)/);if(!(w>0&&h>0)&&m){w=+m[1];h=+m[2]}
+  if(!(w>0&&h>0)){const t=String(req||'').toLowerCase(),e=t.match(/(\d{3,4})\s*[x×*]\s*(\d{3,4})/),q=t.match(/\b(\d{1,2})\s*:\s*(\d{1,2})\b/);
+    if(e){w=+e[1];h=+e[2]}else if(q){w=+q[1];h=+q[2]}
+    else if(/\b(iphone|phone|mobile|lock ?screen|android|story|stories|tiktok|reels?|vertical)\b/.test(t)){w=9;h=19.5}
+    else if(/\b(portrait|poster|book cover|pinterest|tall)\b/.test(t)){w=2;h=3}
+    else if(/\b(desktop|monitor|pc|laptop|youtube|banner|thumbnail|widescreen|landscape|cinematic|header|wallpaper|background|panorama)\b/.test(t)){w=16;h=9}
+    else{w=1;h=1}}
+  return{width:Math.round(w*1000),height:Math.round(h*1000)}}
 async function generate(){
-  if(!status.loaded){toast('Load a model first (Settings → Model)');openSettings('model');return}
+  if(!status.loaded&&!status.paused){toast('Load a model first (Settings → Model)');openSettings('model');return}
   setBusy(true);stopped=false;
-  const ai={role:'assistant',content:''};chat.messages.push(ai);render();
+  const ai={role:'assistant',content:''};chat.messages.push(ai);render();if(flyFrom)flyLogo();
   const el=$('log').querySelector('.col').lastChild.querySelector('.content');
   const history=chat.messages.slice(0,-1);let extra='';
+  lastRequest=history[history.length-1].content;
+  // while nothing has been written yet, say whether the model is still loading (after an image, or a fresh load)
+  const loadingNow=()=>status.paused||!status.loaded||(status.layers||[]).some(l=>l[1]!=l[0]);
+  ai.wait=loadingNow()?'Loading model…':'';
+  const waitTimer=setInterval(()=>{const w=el.querySelector('.wl');if(w){ai.wait=loadingNow()?'Loading model…':'';w.textContent=ai.wait}},500);
   if(hard){
     // Build the animated header once; only the notes area below it re-renders while tokens stream in.
-    const n=Math.max(4,Math.min(6,+prefs.think_passes||4));ai.passes=[];
-    el.innerHTML=`<div class="hard"><div class="orbit"><i></i><i></i><i></i></div><div class="hardtxt"><b>Thinking hard…</b><span class="hlbl"></span></div><div class="steps">${'<i></i>'.repeat(n)}</div></div><div class="live"></div>`;
-    const lbl=el.querySelector('.hlbl'),steps=el.querySelectorAll('.steps i'),live=el.querySelector('.live');
+    ai.passes=[];
+    el.innerHTML=`<div class="hard"><div class="orbit"><i></i><i></i><i></i></div><div class="hardtxt"><b>Thinking hard…</b><span class="hlbl"></span></div><div class="steps"><i></i></div></div><div class="live"></div>`;
+    const lbl=el.querySelector('.hlbl'),stepsEl=el.querySelector('.steps'),live=el.querySelector('.live');
     const q=history[history.length-1].content;
-    for(let p=0;p<n&&!stopped;p++){
-      const [title,instr]=PASSES[p];
-      lbl.textContent=`Pass ${p+1} of ${n} · ${title}`;steps.forEach((x,i)=>x.className=i<p?'done':i==p?'cur':'');
-      const notes=ai.passes.map((x,i)=>`## Pass ${i+1}: ${x.title}\n${x.text}`).join('\n\n');
-      const msgs=apiMessages(history.slice(0,-1).concat([{role:'user',content:`${q}\n\n---\n[Private deep-thinking pass ${p+1} of ${n}: ${title}. Write working notes only. Do NOT write the final answer and do NOT use any tags.]\n${instr}`+(notes?`\n\nYour notes from earlier passes:\n${notes}`:'')}]));
-      const r=await stream(msgs,{max_tokens:900},t=>{const x=splitThink(t);live.innerHTML=renderAI({passes:ai.passes.concat([{title:title+' (writing…)',text:stripTags(x.body||x.think)}])})});
-      const x=splitThink(r.text);ai.passes.push({title,text:stripTags(x.body||x.think).trim()});
-      if(r.error){ai.error=r.error;break}}
-    extra=`# Your private deep-thinking notes for the latest message\nYou already analysed this task in ${ai.passes.length} passes. Use the notes to write the best possible final answer. Do not mention the passes or the notes.\n\n`+ai.passes.map((x,i)=>`## Pass ${i+1}: ${x.title}\n${x.text}`).join('\n\n');}
+    const pass=async([title,instr],max)=>{
+      const n=ai.passes.length;lbl.textContent=title=='Plan'?'Making a plan':'Checking the plan';
+      stepsEl.querySelectorAll('i').forEach((x,i)=>x.className=i<n?'done':i==n?'cur':'');
+      const notes=ai.passes.map(x=>`## ${x.title}\n${x.text}`).join('\n\n');
+      const msgs=apiMessages(history.slice(0,-1).concat([{role:'user',content:`${q}\n\n---\n[Private thinking step: ${title}. Working notes only: do NOT write the final answer and do NOT use any tags.]\n${instr}`+(notes?`\n\nThe plan so far:\n${notes}`:'')+' /no_think'}]),'',true);
+      const r=await stream(msgs,{max_tokens:max,temperature:0.3},t=>{const x=splitThink(t);live.innerHTML=renderAI({passes:ai.passes.concat([{title:title+' (writing…)',text:stripTags(x.body||x.think)}])})});
+      const x=splitThink(r.text),text=stripTags(x.body||x.think).trim();if(r.error)ai.error=r.error;return text};
+    const plan=await pass(PLAN,450);
+    const sure=/CONFIDENCE:\s*\**\s*high/i.test(plan);
+    ai.passes.push({title:'Plan',text:plan.replace(/\n?.*CONFIDENCE:.*$/i,'').trim()});
+    const tricky=q.length>500||/```|\b(code|function|script|program|bug|error|debug|regex|sql|calculate|compute|prove|equation|math|probability|step[- ]by[- ]step)\b|\d+\s*[-+*\/^%]\s*\d+/i.test(q)||(q.match(/\d+(?:[.,:]\d+)?/g)||[]).length>=2;
+    if(!stopped&&!ai.error&&(!sure||tricky)){stepsEl.insertAdjacentHTML('beforeend','<i></i>');ai.passes.push({title:'Check',text:await pass(CHECK,350)})}
+    stepsEl.querySelectorAll('i').forEach(x=>x.className='done');
+    extra=`# Your private notes for the latest message\nYou already planned this answer. Use the notes to write the best possible final answer. Do not mention the notes.\n\n`+ai.passes.map(x=>`## ${x.title}\n${x.text}`).join('\n\n');}
   const lastU=history[history.length-1];
   const intent=hard||(lastU.images&&lastU.images.length)||(lastU.docs&&lastU.docs.length)?null:mediaIntent(history);
   let mediaPrompt=null;
   if(intent&&!stopped){mediaPrompt=await writeMediaPrompt(intent,el,history);extra=mediaNote(intent,mediaPrompt)}
   if(!stopped&&!ai.error){
-    const r=await stream(apiMessages(history,extra,!!intent),{},t=>{ai.content=t;el.innerHTML=renderAI(ai,true);scrollDown()});
+    const r=await stream(apiMessages(history,extra,!!intent),{},t=>{ai.content=t;paint(el,ai);scrollDown()});
     ai.content=r.text;ai.stats=r.stats;if(r.error)ai.error=r.error;
     // the reply text comes first; then the media renders live underneath it
-    if(mediaPrompt&&!stopped){ai.content=splitThink(ai.content).body.trim().split(/\n\s*(?:-{3,}|\n)/)[0].trim();el.innerHTML=renderAI(ai,true);   // small models ramble after the intro
-      const tr=await runTools([{tag:'generate_'+intent.kind,a:intent.kind=='audio'?{kind:'speech'}:{},val:mediaPrompt}]);
+    if(mediaPrompt&&!stopped){ai.content=splitThink(ai.content).body.trim().split(/\n\s*(?:-{3,}|\n)/)[0].trim();ai.pendingMedia=true;paint(el,ai);   // small models ramble after the intro
+      const tr=await runTools([{tag:'generate_'+intent.kind,a:intent.kind=='audio'?{kind:'speech'}:{},val:mediaPrompt}]);ai.pendingMedia=false;
       ai.tools=(ai.tools||[]).concat(tr.chips);ai.media=(ai.media||[]).concat(tr.media);
       if(!tr.media.length)ai.content+='\n\n*Sorry, that didn\'t work: '+tr.results.join(' ').replace(/^.*FAILED:\s*/,'')+'*';
-      el.innerHTML=renderAI(ai,true)}
-    // Tool loop: memory searches and media requests feed results back so the model can finish its reply.
-    let done=0;
+      paint(el,ai)}
+    // Tool loop: memory searches feed results back so the model can finish its reply. A media tag is made once, where the
+    // model wrote it; the text around it is already the reply, so there is no follow-up round for it.
+    // One picture per reply unless the user asked for several.
+    const several=/\b(two|three|four|five|six|\d+|several|multiple|a few|some|variations?|versions?)\b[^.?!\n]{0,40}\b(images|pictures|photos|pics|wallpapers|drawings|videos|clips)\b/i.test(lastU.content);
+    let done=0,made=(ai.media||[]).length;
     for(let round=0;round<3&&!stopped&&!ai.error;round++){
-      const calls=parseTools(ai.content).filter(t=>(!t.tag.startsWith('memory_')||t.tag=='memory_search')&&!((intent||(lastU.images&&lastU.images.length)||(lastU.docs&&lastU.docs.length))&&t.tag.startsWith('generate_'))).slice(done);
+      let calls=parseTools(ai.content).filter(t=>(!t.tag.startsWith('memory_')||t.tag=='memory_search')&&!((intent||(lastU.images&&lastU.images.length)||(lastU.docs&&lastU.docs.length))&&t.tag.startsWith('generate_'))).slice(done);
       if(!calls.length)break;done+=calls.length;
-      const tr=await runTools(calls);ai.tools=(ai.tools||[]).concat(tr.chips);ai.media=(ai.media||[]).concat(tr.media);el.innerHTML=renderAI(ai,true);
+      calls=calls.filter(t=>!t.tag.startsWith('generate_')||several||made++==0);
+      if(!calls.length)break;
+      const media=calls.some(t=>t.tag.startsWith('generate_'));
+      if(media){ai.pendingMedia=true;paint(el,ai)}
+      const tr=await runTools(calls);ai.pendingMedia=false;ai.tools=(ai.tools||[]).concat(tr.chips);ai.media=(ai.media||[]).concat(tr.media);
+      if(media&&!tr.media.length)ai.content+='\n\n*Sorry, that didn\'t work: '+tr.results.filter(x=>/FAILED/.test(x)).join(' ').replace(/^.*FAILED:\s*/,'')+'*';
+      paint(el,ai);
+      if(!calls.some(t=>t.tag=='memory_search'))break;
       const prev=ai.content;
       const msgs=apiMessages(history.concat([{role:'assistant',content:prev},{role:'user',content:'[Tool results, sent automatically, not written by the user]\n'+tr.results.join('\n')+'\n\nContinue your reply to the user using these results. Do not repeat what you already wrote and do not call the same tool again.'}]),extra);
-      const r2=await stream(msgs,{},t=>{ai.content=prev+'\n\n'+splitThink(t).body;el.innerHTML=renderAI(ai,true);scrollDown()});
+      const r2=await stream(msgs,{},t=>{ai.content=prev+'\n\n'+splitThink(t).body;paint(el,ai);scrollDown()});
       ai.content=prev+'\n\n'+splitThink(r2.text).body;if(r2.stats)ai.stats=r2.stats;if(r2.error)ai.error=r2.error}}
   if(prefs.memory){let ops=applyMemoryOps(parseTools(ai.content));
     const u=history[history.length-1].content;
     // Backup: models often say "I'll remember" without writing the tag, so run a short focused extraction pass.
-    if(!ops.length&&!stopped&&/\b(remember|forget|my name|call me|i'?m |i am |i use|i work|i prefer|i like|i love|i hate|i don'?t like|my (job|project|pc|computer|gpu|wife|husband|kid|dog|cat)|i live|i'?ve been)/i.test(u)){
+    // (questions like "what do you remember about me?" and the starter suggestions are not facts to save)
+    const question=/\?\s*$/.test(u)||/^\s*(what|who|how|why|when|where|which|do|does|did|can|could|would|should|is|are)\b/i.test(u);
+    if(!ops.length&&!stopped&&!fromChip&&!question&&/\b(remember|forget|my name|call me|i'?m |i am |i use|i work|i prefer|i like|i love|i hate|i don'?t like|my (job|project|pc|computer|gpu|wife|husband|kid|dog|cat)|i live|i'?ve been)/i.test(u)){
       const r=await stream([{role:'system',content:`You extract long-term memories about the user from their latest message. Existing memories:\n${memories.map(memLine).join('\n')||'(none)'}\n\nOutput ONLY tags, one per line, for lasting facts (identity, preferences, tools, projects, explicit "remember"/"forget" requests):\n<memory_save category="about|preferences|projects|knowledge|other">User ...</memory_save>\n<memory_edit id="N">full corrected text</memory_edit>\n<memory_delete id="N"/>\nEdit an existing memory instead of duplicating it. Ignore small talk, one-off tasks and secrets. Output nothing if there is nothing worth remembering.`},
         {role:'user',content:u+' /no_think'}],{max_tokens:300,temperature:0});
       ops=applyMemoryOps(parseTools(r.text))}
     if(ops.length)ai.mem=ops}
+  // small models tack on "I'll remember that" even when nothing was saved
+  if(!(ai.mem&&ai.mem.length))ai.content=ai.content.replace(/\n*[ \t]*(?:Got it[,!.]?\s*)?I(?:'|’)?ll (?:remember|keep) (?:that|this)(?: in mind)?[.!]?\s*$/i,'');
   if(!ai.content&&!ai.error&&stopped)ai.error='Stopped.';
+  clearInterval(waitTimer);delete ai.wait;delete ai.pendingMedia;fromChip=false;
   setBusy(false);render();saveChat();refreshStatus()}
 function scrollDown(){const l=$('log');if(l.scrollHeight-l.scrollTop-l.clientHeight<200)l.scrollTop=l.scrollHeight}
 async function send(){
@@ -709,7 +814,20 @@ async function send(){
   if(pend.docs.length){chat.files=(chat.files||[]).concat(pend.docs.map(d=>({id:uid(),name:d.name,text:d.text,chars:d.chars,pages:d.pages,kind:d.kind})));
     m.docs=pend.docs.map(d=>({name:d.name,chars:d.chars,pages:d.pages}))}
   pend={images:[],docs:[]};drawAtt();
+  const empty=$('log').querySelector('.empty');
+  if(empty){flyFrom=empty.querySelector('.logo').getBoundingClientRect();empty.classList.add('leaving');await new Promise(r=>setTimeout(r,330))}
+  freshFrom=chat.messages.length;
   $('q').value='';autosize();chat.messages.push(m);render();await generate()}
+// The new-chat logo hops in an arc and lands as the first reply's avatar.
+let flyFrom=null,freshFrom=1e9;
+function flyLogo(){const from=flyFrom;flyFrom=null;const to=document.querySelector('.msg.ai:last-child .avatar');if(!from||!to)return;
+  const t=to.getBoundingClientRect(),f=document.createElement('div');f.className='flylogo';f.innerHTML='<svg><use href="#spark"/></svg>';
+  Object.assign(f.style,{left:from.left+'px',top:from.top+'px',width:from.width+'px',height:from.height+'px'});document.body.appendChild(f);to.style.visibility='hidden';
+  const dx=t.left-from.left+(t.width-from.width)/2,dy=t.top-from.top+(t.height-from.height)/2,k=t.width/from.width,lift=Math.min(140,Math.abs(dy)*.35+60);
+  const a=f.animate([{transform:'translate(0,0) scale(1) rotate(0)',borderRadius:'14px'},
+    {transform:`translate(${dx*.5}px,${Math.min(0,dy*.5)-lift}px) scale(${(1+k)/2+.15}) rotate(200deg)`,borderRadius:'40%',offset:.5},
+    {transform:`translate(${dx}px,${dy}px) scale(${k}) rotate(360deg)`,borderRadius:'50%'}],{duration:720,easing:'cubic-bezier(.45,0,.25,1)'});
+  a.onfinish=()=>{f.remove();to.style.visibility='';to.classList.add('land')}}
 window.redo=async()=>{if(busy||!chat)return;if(chat.messages[chat.messages.length-1].role=='assistant')chat.messages.pop();await generate()};
 window.editMsg=i=>{if(busy)return;const m=chat.messages[i];const d=$('log').querySelector('.col').children[i+(chat.summary?1:0)];
   d.innerHTML=`<textarea class="editbox">${esc(m.content)}</textarea><div class="editbtns"><button class="btn" id="ecancel">Cancel</button><button class="btn pri" id="esave">Save &amp; resend</button></div>`;
@@ -734,9 +852,9 @@ function drawSpec(){const e=$('specState');if(!e)return;const d=status.draft||'o
 async function refreshStatus(){
   try{status=await api('/api/status')}catch(e){return}
   drawSpec();
-  $('modelName').textContent=status.loaded?status.name:'No model loaded';
+  $('modelName').textContent=status.loaded?status.name:status.paused?'Paused for media':'No model loaded';
   const svg=$('ringSvg');
-  if(!status.loaded){svg.innerHTML='<circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="4"/>';$('ringText').textContent='no model loaded';$('ringTip').innerHTML=esc(status.gpu||'');return}
+  if(!status.loaded){svg.innerHTML='<circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="4"/>';$('ringText').textContent=status.paused?'paused while media is made':'no model loaded';$('ringTip').innerHTML=esc(status.gpu||'');return}
   const L=status.layers.concat([status.out]),n=L.length,C=2*Math.PI*15,seg=C/n,gap=n>40?0.35:0.8;
   const col=t=>t==2?'var(--gpu)':t==1?'var(--ram)':'var(--disk)';
   svg.innerHTML='<circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="4"/>'+L.map((l,i)=>`<circle cx="18" cy="18" r="15" fill="none" stroke="${col(l[1])}" stroke-width="4" stroke-dasharray="${Math.max(.2,seg-gap)} ${C}" stroke-dashoffset="${-i*seg}" opacity="${l[1]==l[0]?1:.45}"/>`).join('');
@@ -764,7 +882,7 @@ general:()=>`<h2>General</h2><p class="sub">How Ithaca talks to you.</p>
  <div class="field"><label>Custom instructions</label><textarea data-pref="instructions" rows="3" placeholder="Anything Ithaca should always keep in mind">${esc(prefs.instructions)}</textarea></div>
  <div class="grid2"><div class="field"><label>Creativity (temperature)</label><input data-pref="temperature" type="number" step="0.1" min="0" max="2" value="${prefs.temperature}"><small>0 = precise, 1+ = creative</small></div>
  <div class="field"><label>Max reply length (tokens)</label><input data-pref="max_tokens" type="number" step="256" value="${prefs.max_tokens}"></div></div>
- <div class="field"><label>Think hard passes</label><input data-pref="think_passes" type="number" min="4" max="6" value="${prefs.think_passes}"><small>How many separate reasoning passes "Think hard" runs before answering (4–6).</small></div>`,
+ `,
 model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Ithaca spreads it across VRAM, RAM and SSD.</p>
  <div class="field"><label>Model</label><select id="mSel"><option>loading…</option></select></div>
  <div class="field"><label>Add a folder with .gguf files</label><div style="display:flex;gap:8px"><input id="mDir" placeholder="D:\\AI\\models"><button class="btn" id="mAdd">Add</button></div></div>
@@ -956,11 +1074,7 @@ $('settings').onclick=e=>{if(e.target.id=='settings'){$('settings').classList.re
 
 /* ---------- studio: image / video / audio ---------- */
 let view='chat',mediaModels=null;
-const VIDEO={camera:['Static','Slow push-in','Pull-out','Pan left','Pan right','Orbit','Tracking shot','Handheld','Drone flyover','Crane up'],
-  style:['Cinematic','Photoreal','Anime','Pixar-style 3D','Claymation','Watercolor','Cyberpunk','Documentary','Vintage film'],
-  light:['Golden hour','Soft daylight','Night, neon','Overcast','Studio lighting','Candlelight','Moody low-key'],
-  length:['1','2','3','5'],res:['640x352','832x480','1280x704','352x640','480x832']};
-let vsel={camera:'Slow push-in',style:'Cinematic',light:'Golden hour',length:'2',res:'640x352'};
+let vsel={amode:'Speech'};
 function setView(v){view=v;$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
   const chatv=v=='chat';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
   document.querySelector('.ctxwrap').style.visibility=chatv?'':'hidden';$('studio').style.display=chatv?'none':'block';
@@ -970,10 +1084,6 @@ function modelSelect(kind){const list=(mediaModels||[]).filter(m=>m.kind==kind),
    <small>${list.length?`${list.length} ${kind} model(s) found on this PC.`:`No ${kind} models found yet. Put them in the <b>models</b> folder next to Ithaca.exe, or add their folder below.`}</small>
    <div style="display:flex;gap:8px;margin-top:8px"><input id="mdir" placeholder="Add a folder that contains ${kind} models"><button class="btn" id="mdirAdd">Add folder</button></div>`}
 function opts(key,vals){return `<div class="opts" data-key="${key}">`+vals.map(v=>`<button class="opt${vsel[key]==v?' on':''}">${v}</button>`).join('')+'</div>'}
-function videoPrompt(){const g=k=>($('v_'+k)||{}).value||'';
-  return [g('subject')&&`${g('subject')}`,g('action')&&`${g('action')}`,g('setting')&&`Setting: ${g('setting')}.`,
-    `Camera: ${vsel.camera.toLowerCase()}.`,`Style: ${vsel.style.toLowerCase()}, ${vsel.light.toLowerCase()} lighting.`,
-    `Smooth natural motion, consistent subject, high detail.`].filter(Boolean).join(' ')}
 async function polish(kind,text,out){
   if(!status.loaded){toast('Load a chat model first to polish prompts');return}
   out.textContent='Polishing…';
@@ -991,29 +1101,27 @@ async function drawStudio(){
     :kind=='video'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs <b>Wan 2.2 TI2V-5B</b> text-to-video (with the umT5-XXL text encoder and Wan 2.2 VAE, found automatically next to the model). Weights that don't fit in VRAM stream from RAM. You can also ask for a video in a normal chat. Image-to-video and the 14B GGUF models are coming.</div>`
     :`<div class="banner"><b>Engine status:</b> Ithaca can already find and select ${kind} models and prepare prompts, and the chat model knows how to request ${kind}s. The ${kind} engine itself is still being built, so Generate reports that for now.</div>`;
   let body='';
-  if(kind=='image')body=`<div class="card"><h3>Model</h3><div class="field">${modelSelect('image')}</div>
-   <div class="field"><label>VAE (optional)</label><input id="p_vae" placeholder="Leave empty to use the checkpoint's own VAE" value="${esc(prefs.media_image_vae||'')}"></div></div>
-   <div class="card"><h3>Prompt</h3><div class="field"><textarea id="p_text" rows="3" placeholder="A lighthouse on a cliff at sunset, oil painting"></textarea></div>
-   <div class="field"><label>Avoid (negative prompt)</label><input id="p_neg" value="${esc(prefs.img_negative||'blurry, low quality, deformed, watermark, text')}"></div>
-   <div class="grid2"><div class="field"><label>Size</label><select id="p_size">${['1024x1024','1152x896','896x1152','1216x832','832x1216','768x768','512x512','512x768','768x512'].map(x=>`<option ${x==(prefs.img_size||'1024x1024')?'selected':''}>${x}</option>`).join('')}</select><small>SD 1.5 models work best at 512, SD 2 at 768, SDXL at 1024.</small></div>
-   <div class="field"><label>Steps · Guidance (CFG) · Seed</label><div style="display:flex;gap:8px"><input id="p_steps" type="number" min="1" max="150" value="${prefs.img_steps||25}"><input id="p_cfg" type="number" step="0.5" value="${prefs.img_cfg||6}"><input id="p_seed" placeholder="random"></div></div>
-   <div class="field"><label>Sampler</label><select id="p_sampler">${[['dpmpp_2m','DPM++ 2M (recommended)'],['euler_a','Euler a (creative)'],['euler','Euler']].map(([v,t])=>`<option value="${v}" ${v==(prefs.img_sampler||'dpmpp_2m')?'selected':''}>${t}</option>`).join('')}</select></div>
-   <div class="field"><label>Schedule</label><select id="p_sched">${['karras','normal'].map(v=>`<option ${v==(prefs.img_scheduler||'karras')?'selected':''}>${v}</option>`).join('')}</select></div></div>
-   <div style="display:flex;gap:8px"><button class="btn" id="polish">${ico('wand')} Improve prompt with AI</button><button class="btn pri" id="gen">Generate image</button></div>
+  const adv=inner=>`<details class="card adv"><summary>More options</summary><div class="in">${inner}</div></details>`;
+  if(kind=='image')body=`<div class="card hero"><textarea id="p_text" rows="3" placeholder="Describe the picture. For example: a misty mountain lake at sunrise, as a background for my iPhone"></textarea>
+   <div class="sizerow"><label>Size</label><input id="p_w" type="number" min="256" max="2048" step="8" value="${prefs.img_width||1024}"><span class="x">×</span><input id="p_h" type="number" min="256" max="2048" step="8" value="${prefs.img_height||1024}">
+   <button class="btn" id="p_swap" title="Swap width and height">⇄</button><label class="chk"><input type="checkbox" id="p_auto" ${prefs.img_auto!==false?'checked':''}>Pick from the description</label>
+   <label class="chk"><input type="checkbox" id="p_fit" ${prefs.img_fit!==false?'checked':''}>Best quality for this model</label><span class="hint" id="p_hint"></span></div>
+   <div class="row"><button class="btn" id="polish">${ico('wand')} Improve prompt</button><button class="btn pri" id="gen">Generate image</button></div>
    <div class="preview" id="pv" style="margin-top:12px;display:none"></div><div class="result" id="res"></div></div>
+   ${adv(`<div class="field"><label>Model</label>${modelSelect('image')}</div>
+   <div class="field"><label>Avoid (negative prompt)</label><input id="p_neg" value="${esc(prefs.img_negative||'blurry, low quality, deformed, watermark, text')}"></div>
+   <div class="grid2"><div class="field"><label>Steps · Guidance (CFG) · Seed</label><div style="display:flex;gap:8px"><input id="p_steps" type="number" min="1" max="150" value="${prefs.img_steps||25}"><input id="p_cfg" type="number" step="0.5" value="${prefs.img_cfg||6}"><input id="p_seed" placeholder="random"></div></div>
+   <div class="field"><label>Sampler · Schedule</label><div style="display:flex;gap:8px"><select id="p_sampler">${[['dpmpp_2m','DPM++ 2M'],['euler_a','Euler a'],['euler','Euler']].map(([v,t])=>`<option value="${v}" ${v==(prefs.img_sampler||'dpmpp_2m')?'selected':''}>${t}</option>`).join('')}</select><select id="p_sched">${['karras','normal'].map(v=>`<option ${v==(prefs.img_scheduler||'karras')?'selected':''}>${v}</option>`).join('')}</select></div></div></div>
+   <div class="field"><label>VAE (optional)</label><input id="p_vae" placeholder="Leave empty to use the checkpoint's own VAE" value="${esc(prefs.media_image_vae||'')}"></div>`)}
    <div class="card"><h3>Gallery</h3><div class="gallery" id="gal"></div></div>`;
-  if(kind=='video')body=`<div class="card"><h3>Model</h3><div class="field">${modelSelect('video')}</div></div>
-   <div class="card"><h3>1 · What's in the shot</h3><div class="grid2"><div class="field"><label>Subject</label><input id="v_subject" placeholder="A red fox with a fluffy tail"></div>
-   <div class="field"><label>Action (one clear motion)</label><input id="v_action" placeholder="trots through fresh snow and looks up"></div></div>
-   <div class="field"><label>Setting</label><input id="v_setting" placeholder="snowy pine forest at dawn, light mist"></div></div>
-   <div class="card"><h3>2 · Camera</h3>${opts('camera',VIDEO.camera)}</div>
-   <div class="card"><h3>3 · Look</h3>${opts('style',VIDEO.style)}<div style="height:10px"></div>${opts('light',VIDEO.light)}</div>
-   <div class="card"><h3>4 · Format</h3><div class="grid2"><div><label style="font-size:13px;font-weight:600">Length (seconds)</label>${opts('length',VIDEO.length)}</div><div><label style="font-size:13px;font-weight:600">Size (width x height)</label>${opts('res',VIDEO.res)}</div></div>
-   <div class="grid2" style="margin-top:12px"><div class="field"><label>Steps</label><input id="v_steps" type="number" min="4" max="60" value="${prefs.vid_steps||20}"></div><div class="field"><label>Guidance (CFG)</label><input id="v_cfg" type="number" step="0.5" value="${prefs.vid_cfg||5}"></div></div>
-   <small style="color:var(--faint)">640x352 at 2 seconds takes about 3 minutes on an RTX 3060. Bigger sizes and longer clips take much longer.</small></div>
-   <div class="card"><h3>5 · Final prompt</h3><div class="preview" id="pv"></div>
-   <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" id="polish">${ico('wand')} Polish with AI</button><button class="btn pri" id="gen">Generate video</button></div>
-   <div class="result" id="res"></div><small style="color:var(--faint)">Tips: one subject, one motion, one camera move. Avoid on-screen text and crowds.</small></div>
+  if(kind=='video')body=`<div class="card hero"><textarea id="v_text" rows="3" placeholder="Describe one shot: a red fox trotting through fresh snow at dawn, slow push-in, cinematic"></textarea>
+   <div class="sizerow"><label>Length</label><input id="v_len" type="range" min="1" max="5" step="1" value="${prefs.vid_seconds||2}"><span class="hint" id="v_lenl"></span>
+   <label style="margin-left:10px">Size</label><input id="v_w" type="number" min="256" max="1280" step="32" value="${prefs.vid_width||640}"><span class="x">×</span><input id="v_h" type="number" min="256" max="1280" step="32" value="${prefs.vid_height||352}"><button class="btn" id="v_swap" title="Swap width and height">⇄</button></div>
+   <div class="row"><button class="btn" id="polish">${ico('wand')} Improve prompt</button><button class="btn pri" id="gen">Generate video</button></div>
+   <div class="preview" id="pv" style="margin-top:12px;display:none"></div><div class="result" id="res"></div>
+   <small style="color:var(--faint)">One subject, one motion, one camera move works best. 640×352 for 2 seconds takes about 3 minutes on an RTX 3060.</small></div>
+   ${adv(`<div class="field"><label>Model</label>${modelSelect('video')}</div>
+   <div class="grid2"><div class="field"><label>Steps</label><input id="v_steps" type="number" min="4" max="60" value="${prefs.vid_steps||20}"></div><div class="field"><label>Guidance (CFG)</label><input id="v_cfg" type="number" step="0.5" value="${prefs.vid_cfg||5}"></div></div>`)}
    <div class="card"><h3>Gallery</h3><div class="gallery" id="gal"></div></div>`;
   if(kind=='audio')body=`<div class="card"><h3>Speech model</h3><div class="field">${modelSelect('audio')}</div>
    <small style="color:var(--faint)">Supported: F5-TTS (the .safetensors with vocab.txt next to it, and a vocos folder beside it).</small></div>
@@ -1031,9 +1139,7 @@ async function drawStudio(){
    <div class="card"><h3>Gallery</h3><div class="gallery" id="gal"></div></div>`;
   st.innerHTML=`<div class="col studio"><h1>${ico(kind)}${kind[0].toUpperCase()+kind.slice(1)} studio</h1>${banner}${body}</div>`;
   if(!vsel.amode)vsel.amode='Speech';
-  st.querySelectorAll('.opts').forEach(g=>g.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{vsel[g.dataset.key]=b.textContent;g.querySelectorAll('.opt').forEach(x=>x.classList.toggle('on',x==b));upd()}));
-  const upd=()=>{if(kind=='video')$('pv').textContent=videoPrompt()};
-  st.querySelectorAll('input,textarea').forEach(e=>e.oninput=upd);upd();
+  st.querySelectorAll('.opts').forEach(g=>g.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{vsel[g.dataset.key]=b.textContent;g.querySelectorAll('.opt').forEach(x=>x.classList.toggle('on',x==b))}));
   $('mediaSel').onchange=e=>{prefs['media_'+kind]=e.target.value;savePrefs()};
   $('mdirAdd').onclick=async()=>{const d=$('mdir').value.trim();if(!d)return;mediaModels=await api('/api/media/adddir',{dir:d});
     prefs=Object.assign(prefs,await api('/api/prefs'));toast('Folder added');drawStudio()};
@@ -1043,25 +1149,39 @@ async function drawStudio(){
       const wav=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(f)});
       const res=await api('/api/voices/add',{name,text,wav});if(res.error){toast(res.error);return}
       if(!prefs.voice){prefs.voice=name;savePrefs()}toast('Voice added');drawVoices()}}
-  $('polish').onclick=()=>{const pv=$('pv');pv.style.display='block';polish(kind,kind=='video'?pv.textContent:$('p_text').value||'',pv)};
-  if(kind=='video'){drawGallery();['v_steps','v_cfg'].forEach(id=>$(id).onchange=()=>{prefs.vid_steps=+$('v_steps').value;prefs.vid_cfg=+$('v_cfg').value;savePrefs()})}
+  const promptEl=$(kind=='video'?'v_text':'p_text');
+  $('polish').onclick=()=>{const pv=$('pv');pv.style.display='block';polish(kind,promptEl.value||'',pv)};
   if(kind=='image'){drawGallery();
-    ['p_neg','p_steps','p_cfg','p_sampler','p_sched','p_size','p_vae'].forEach(id=>$(id).onchange=()=>{prefs.img_negative=$('p_neg').value;prefs.img_steps=+$('p_steps').value;prefs.img_cfg=+$('p_cfg').value;
-      prefs.img_sampler=$('p_sampler').value;prefs.img_scheduler=$('p_sched').value;prefs.img_size=$('p_size').value;prefs.media_image_vae=$('p_vae').value.trim();
-      const [w,h]=prefs.img_size.split('x').map(Number);prefs.img_width=w;prefs.img_height=h;savePrefs()})}
-  $('gen').onclick=async()=>{const prompt=kind=='video'?$('pv').textContent:(($('pv').style.display!='none'&&$('pv').textContent)||$('p_text').value);
+    // the size follows the description ("...for my iPhone") until it is typed in by hand; the hint shows what will be rendered
+    const hint=()=>{const w=+$('p_w').value||1024,h=+$('p_h').value||1024;let rw=w,rh=h;
+      if($('p_fit').checked){const a=w/h,res=1024;rw=Math.round(Math.sqrt(res*res*a)/64)*64;rh=Math.round(rw/a/64)*64}
+      $('p_hint').textContent=$('p_fit').checked&&(rw!=w||rh!=h)?`renders at about ${rw} × ${rh}, same shape`:''};
+    const auto=()=>{if(!$('p_auto').checked)return;const z=pickSize({},promptEl.value);const k=1024/Math.sqrt(z.width*z.height);
+      $('p_w').value=Math.round(z.width*k/8)*8;$('p_h').value=Math.round(z.height*k/8)*8;hint()};
+    const save=()=>{prefs.img_negative=$('p_neg').value;prefs.img_steps=+$('p_steps').value;prefs.img_cfg=+$('p_cfg').value;prefs.img_sampler=$('p_sampler').value;
+      prefs.img_scheduler=$('p_sched').value;prefs.media_image_vae=$('p_vae').value.trim();prefs.img_width=+$('p_w').value;prefs.img_height=+$('p_h').value;
+      prefs.img_auto=$('p_auto').checked;prefs.img_fit=$('p_fit').checked;savePrefs();hint()};
+    ['p_neg','p_steps','p_cfg','p_sampler','p_sched','p_vae','p_fit','p_auto'].forEach(id=>$(id).onchange=save);
+    ['p_w','p_h'].forEach(id=>$(id).oninput=()=>{$('p_auto').checked=false;save()});
+    $('p_swap').onclick=()=>{const w=$('p_w').value;$('p_w').value=$('p_h').value;$('p_h').value=w;$('p_auto').checked=false;save()};
+    promptEl.oninput=auto;hint()}
+  if(kind=='video'){drawGallery();
+    const len=()=>{$('v_lenl').textContent=$('v_len').value+' s'};len();
+    const save=()=>{prefs.vid_seconds=+$('v_len').value;prefs.vid_width=+$('v_w').value;prefs.vid_height=+$('v_h').value;prefs.vid_steps=+$('v_steps').value;prefs.vid_cfg=+$('v_cfg').value;savePrefs();len()};
+    ['v_len','v_w','v_h','v_steps','v_cfg'].forEach(id=>$(id).onchange=save);$('v_len').oninput=len;
+    $('v_swap').onclick=()=>{const w=$('v_w').value;$('v_w').value=$('v_h').value;$('v_h').value=w;save()}}
+  $('gen').onclick=async()=>{const prompt=($('pv').style.display!='none'&&$('pv').textContent)||promptEl.value;
     if(!prompt.trim()){toast('Write a prompt first');return}
     const extra={};
-    if(kind=='image'){const [w,h]=$('p_size').value.split('x').map(Number);Object.assign(extra,{width:w,height:h,steps:+$('p_steps').value,cfg:+$('p_cfg').value,
+    if(kind=='image'){Object.assign(extra,{width:+$('p_w').value,height:+$('p_h').value,fit:$('p_fit').checked,steps:+$('p_steps').value,cfg:+$('p_cfg').value,
       sampler:$('p_sampler').value,scheduler:$('p_sched').value,negative:$('p_neg').value,vae:$('p_vae').value.trim()});if($('p_seed').value)extra.seed=+$('p_seed').value}
     if(kind=='audio'){Object.assign(extra,{speed:+$('a_speed').value})}
-    if(kind=='video'){const [w,h]=vsel.res.split('x').map(Number);Object.assign(extra,{width:w,height:h,steps:+$('v_steps').value,cfg:+$('v_cfg').value});
-      prefs.vid_width=w;prefs.vid_height=h;prefs.vid_seconds=+vsel.length;savePrefs()}
+    if(kind=='video'){const r32=v=>Math.max(256,Math.round(v/32)*32);Object.assign(extra,{width:r32(+$('v_w').value),height:r32(+$('v_h').value),steps:+$('v_steps').value,cfg:+$('v_cfg').value,seconds:+$('v_len').value})}
     const b=$('gen');b.disabled=true;const stop=watchProgress($('res'));
-    const r=await api('/api/media/generate',Object.assign({kind,prompt,mode:vsel.amode,seconds:vsel.length},extra));
+    const r=await api('/api/media/generate',Object.assign({kind,prompt,mode:vsel.amode},extra));
     stop();b.disabled=false;
-    const media=r.url?(kind=='video'?`<video class="genimg" controls autoplay loop src="${esc(r.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(r.url)}"></audio>`:`<img class="genimg" src="${esc(r.url)}">`):'';
-    $('res').innerHTML=r.url?`${media}<div class="meta" style="margin:0">seed ${r.seed} · ${r.seconds} s</div>`:`<span class="err">${esc(r.error)}</span>`;
+    const media=r.url?(kind=='video'?`<video class="genimg" controls autoplay loop src="${esc(r.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(r.url)}"></audio>`:`<div class="gwrap"><img class="genimg" src="${esc(r.url)}" onclick="viewImg(this.src)"></div>`):'';
+    $('res').innerHTML=r.url?`${media}<div class="meta" style="margin:0">${r.width?r.width+' × '+r.height+' · ':''}seed ${r.seed} · ${r.seconds} s</div>`:`<span class="err">${esc(r.error)}</span>`;
     if(r.url)drawGallery()}}
 async function drawVoices(){const el=$('voices');if(!el)return;const list=await api('/api/voices');
   el.innerHTML=list.length?list.map(v=>`<div class="memrow"><span><b>${esc(v.name)}</b>${prefs.voice==v.name?' <small style="display:inline;color:var(--ok)">(default)</small>':''}<small>"${esc(v.text.slice(0,90))}"</small></span>
@@ -1077,7 +1197,7 @@ async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.
 function watchProgress(el){let on=true,seen=-1;
-  el.innerHTML=`<div class="rcard"><div class="rframe"><div class="rshimmer"></div><img class="rimg" alt=""><div class="rbadge"><span class="rdot"></span><span class="mp-l">Starting</span></div></div>
+  el.innerHTML=`<div class="rcard"><div class="rframe"><div class="rshimmer" style="${phase(2400)}"></div><img class="rimg" alt=""><div class="rbadge"><span class="rdot"></span><span class="mp-l">Starting</span></div></div>
     <div class="rfoot"><div class="rbar"><i class="mp-b"></i></div><span class="rpct mp-p">0%</span><button class="btn mp-c">Cancel</button></div></div>`;
   el.querySelector('.mp-c').onclick=()=>fetch('/api/media/cancel',{method:'POST'});
   const img=el.querySelector('.rimg'),fr=el.querySelector('.rframe');

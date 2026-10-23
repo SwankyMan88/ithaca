@@ -1,5 +1,6 @@
 // Ithaca: double-click to start. Serves a chat UI on http://127.0.0.1:7860 and opens your browser.
 // CLI: Ithaca.exe --model path.gguf --prompt "hello" [-n 128] [--threads N] [--ctx N] [--vram MB] [--ram MB]
+#include <thread>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <shellapi.h>
@@ -263,6 +264,23 @@ void chat_model_restore() {
     if (!g_model.loaded() && g_model.load(utf8_to_w(p), g_opts, err)) start_draft();   // opens instantly; layers return to VRAM in the background
 }
 
+// After a media job the chat model comes back only once no other job follows (a reply may make several in a row,
+// and reloading between them made each one fight the reload for the GPU), or right away when a chat request needs it.
+bool media_busy();
+static std::atomic<int> g_restore_gen{0};
+void chat_model_restore_later() {
+    const int gen = ++g_restore_gen;
+    std::thread([gen] {
+        for (int i = 0; i < 40; i++) {   // 2 s without a new media job
+            Sleep(50);
+            if (g_restore_gen != gen) return;
+            if (media_busy()) i = 0;
+        }
+        chat_model_restore();
+    }).detach();
+}
+static bool chat_model_paused() { std::lock_guard<std::mutex> rl(g_release_m); return !g_released_path.empty(); }
+
 // ---------- HTTP ----------
 static bool send_all(SOCKET s, const std::string& d) {
     size_t off = 0;
@@ -323,7 +341,7 @@ static void handle(SOCKET s) {
         st.pop_back();
         {
             std::lock_guard<std::mutex> l(g_stats_m);
-            st += ",\"busy\":" + std::string(g_busy ? "true" : "false") + ",\"stats\":" + g_last_stats +
+            st += ",\"busy\":" + std::string(g_busy ? "true" : "false") + ",\"paused\":" + std::string(chat_model_paused() ? "true" : "false") + ",\"stats\":" + g_last_stats +
                   ",\"model\":" + json_esc(g_model.path_utf8) + ",\"name\":" + json_esc(g_model.hp.name) +
                   ",\"opts\":{\"threads\":" + std::to_string(g_opts.threads) + ",\"ctx\":" + std::to_string(g_opts.ctx) +
                   ",\"vram_mb\":" + std::to_string(g_opts.vram_mb) + ",\"ram_mb\":" + std::to_string(g_opts.ram_mb) +
@@ -380,6 +398,7 @@ static void handle(SOCKET s) {
         else respond(s, 400, "application/json", "{\"error\":" + json_esc(err) + "}");
     }
     else if (path == "/api/chat" && method == "POST") {
+        chat_model_restore();   // paused for a media job: bring it back now (no-op otherwise)
         J j; json_parse(body, j);
         std::vector<Msg> msgs = parse_msgs(j["messages"]);
         GenOpts o;

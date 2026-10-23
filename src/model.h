@@ -100,6 +100,7 @@ private:
     bool kvq8_ = false;      // VRAM KV cache stored as int8 + scales (half the memory of fp16)
     size_t kv_pos_bytes() const;   // device KV bytes per position per layer   // decode attention generated for this model's head layout
     std::mutex kv_m_;
+    int kv_want_ = 0;   // largest KV size asked for (ensure_kv): layers reaching VRAM mid-request get at least this
     void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y, bool same_x = false);
     bool moe_grouped(Layer& L, int n);
     std::atomic<bool> tc_prefill_{false};
