@@ -460,6 +460,10 @@ function applyMemoryOps(tools){const ops=[];
       if(memories.some(m=>m.text.toLowerCase()==t.val.toLowerCase()))continue;
       // only facts about the user ("User prefers ..."), never notes about the assistant itself
       if(!/\buser\b/i.test(t.val)&&!(prefs.name&&t.val.toLowerCase().includes(prefs.name.toLowerCase())))continue;
+      // not a description of the conversation itself ("User is asking how I am"), and only when the user said something
+      // about themselves (or asked to be remembered) in the message being answered
+      if(/\buser\s+(is\s+|was\s+|just\s+)?(ask|asked|asking|wants to know|wanted to know|greet|greeted|greeting|says|said|saying|is curious|wonder|inquir|request|thank|chatting|talking)/i.test(t.val))continue;
+      if(!/\b(i|i'm|im|i've|i'd|i'll|my|me|mine|myself|remember|call me)\b/i.test(lastRequest))continue;
       memories.push({id:memNextId(),text:t.val,category:normCat(t.a.category),pinned:false,created:Date.now(),updated:Date.now()});ops.push({k:'Saved memory',t:t.val})}
     else if(t.tag=='memory_edit'){const x=memories.find(m=>m.id==+t.a.id);
       if(x&&(t.val||t.a.category)){if(t.val)x.text=t.val;if(t.a.category)x.category=normCat(t.a.category);x.updated=Date.now();ops.push({k:'Updated memory',t:x.text})}}
