@@ -9,7 +9,7 @@
 class CudaTier {
 public:
     // GPU weight kinds: Q4 (scale, 4-bit), Q8 (scale, int8), Q4M (scale + min, 4-bit: exact for Q4_K)
-    enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2 };
+    enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2, K_Q6 = 3, N_KINDS = 4 };
     enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, N_OPS };
     bool init(std::string& info);   // safe to call when no NVIDIA GPU: returns false
     bool ok() const { return ok_; }
@@ -29,7 +29,8 @@ public:
     // Host round-trip matmul: Y[n][rows] = W[rows][cols] * X[n][cols]
     bool matmul(uint64_t W, uint64_t qoff, int kind, const float* X, int n, int cols, int rows, float* Y);
     // Device-resident matmul (async).
-    bool matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int n, int cols, int rows, uint64_t dY);
+    // same_x: dX is unchanged since the previous call (its int8 copy is reused)
+    bool matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int n, int cols, int rows, uint64_t dY, bool same_x = false);
     // Async launch of an op kernel; args are pointers to the kernel parameters.
     bool launch(Op op, unsigned gx, unsigned gy, unsigned block, std::initializer_list<void*> args);
     // Elementwise helper: launches ceil(n/256) blocks and appends n as the last parameter.
@@ -40,6 +41,10 @@ public:
     bool matmul_experts(uint64_t W, uint64_t qoff, int kind, uint64_t ids, int slots, uint64_t dX, int xrows, int xstep, int cols, int R, uint64_t dY);
     // Router on device: softmax over E logits per token, top-k ids + weights (x scale, renormalized if norm)
     bool topk(uint64_t logits, int E, int K, bool norm, float scale, uint64_t ids, uint64_t w);
+    // Prompt routing without a host round trip: top-K per token (ids/w token-major, n*K), then grouped by expert:
+    // off[E+1] row ranges, sorted_ids = token of each row, sorted_w its weight (times scale).
+    bool moe_route(uint64_t logits, int n, int E, int K, bool norm, float scale, uint64_t ids, uint64_t w,
+                   uint64_t off, uint64_t sorted_ids, uint64_t sorted_w);
     // X[j] += sum_s w[s] * T[s*D + j]
     bool wsum(uint64_t X, uint64_t T, uint64_t w, int K, int D);
     // Generic access used by the image/video/audio engines.
@@ -59,9 +64,12 @@ public:
 private:
     bool ok_ = false;
     void* ctx_ = nullptr;
-    void* fn_[3] = {nullptr, nullptr, nullptr};
-    void* fe_[3] = {nullptr, nullptr, nullptr};
-    void* ftopk_ = nullptr; void* fwsum_ = nullptr;
+    void* fn_[N_KINDS] = {};
+    void* fn1_[N_KINDS] = {};   // n == 1 variants: 4 rows per warp
+    void* fns_[N_KINDS] = {};   // n == 1, 1 row per warp (small matrices)
+    uint64_t qx_src_ = 0; int qx_n_ = 0, qx_cols_ = 0;   // input of the last activation quantization
+    void* fe_[N_KINDS] = {};
+    void* ftopk_ = nullptr; void* fwsum_ = nullptr; void* fsort_ = nullptr;
     void* cv_[11] = {};
     void* up_ = nullptr;                 // upload stream
     static const int kSlots = 6;           // read-ahead depth of the weight loader

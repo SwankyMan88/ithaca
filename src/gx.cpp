@@ -78,7 +78,12 @@ bool Gx::init(std::string& err) {
     void* tm = getenv("ITHACA_NO_TC") ? nullptr : cu().load_module(gx_ptx_tc(), tlog);
     if (tm) {
         void *a = cu().function(tm, "t_lin"), *b = cu().function(tm, "t_nt"), *c = cu().function(tm, "t_nn"), *d = cu().function(tm, "t_conv");
-        if (a && b && c && d) { f_lin_ = a; f_nt_ = b; f_nn_ = c; f_conv_ = d; tc_ = true; f_linf_ = cu().function(tm, "t_linf"); f_linq8_ = cu().function(tm, "t_linq8"); f_linh_ = cu().function(tm, "t_linh"); f_linq8h_ = cu().function(tm, "t_linq8h"); f_fa64_ = cu().function(tm, "t_fa64"); f_fa128_ = cu().function(tm, "t_fa128"); f_fa72_ = cu().function(tm, "t_fa72"); f_linq4_ = cu().function(tm, "t_linq4"); f_linq4m_ = cu().function(tm, "t_linq4m");
+        if (a && b && c && d) { f_lin_ = a; f_nt_ = b; f_nn_ = c; f_conv_ = d; tc_ = true; f_linf_ = cu().function(tm, "t_linf"); f_linq8_ = cu().function(tm, "t_linq8"); f_linh_ = cu().function(tm, "t_linh"); f_linq8h_ = cu().function(tm, "t_linq8h"); f_fa64_ = cu().function(tm, "t_fa64"); f_fa128_ = cu().function(tm, "t_fa128"); f_fa72_ = cu().function(tm, "t_fa72");
+            f_qx_ = cu().function(tm, "t_qx"); for (int i = 0; i < 4; i++) { f_mmq_[i] = cu().function(tm, ("t_mmq" + std::to_string(i)).c_str()); f_mmqs_[i] = cu().function(tm, ("t_mmqs" + std::to_string(i)).c_str()); f_mmqg_[i] = cu().function(tm, ("t_mmqg" + std::to_string(i)).c_str()); }
+            {   // SM count, for choosing int8 matmul tile sizes
+                typedef int (__stdcall *DA)(int*, int, int); DA da = (DA)GetProcAddress(GetModuleHandleA("nvcuda.dll"), "cuDeviceGetAttribute");
+                int v = 0; if (da && da(&v, 16, 0) == 0 && v > 0) sms_ = v;
+            }
             const char* fk[5] = {"t_fkv64", "t_fkv80", "t_fkv96", "t_fkv128", "t_fkv256"}; for (int i = 0; i < 5; i++) f_fkv_[i] = cu().function(tm, fk[i]);
             const char* fq[5] = {"t_fkq64", "t_fkq80", "t_fkq96", "t_fkq128", "t_fkq256"}; for (int i = 0; i < 5; i++) f_fkq_[i] = cu().function(tm, fq[i]); }
     }
@@ -282,6 +287,7 @@ void Gx::weights_end() {
 
 // ---------------- ops ----------------
 // ITHACA_GXPROF=1: time every kernel (synchronizes after each launch).
+extern const int kMmqTiles[2][4];
 static bool g_gxprof = getenv("ITHACA_GXPROF") != nullptr;
 static std::map<void*, std::pair<double, long>> g_gxt;
 static void prof_launch(void* fn, unsigned gx_, unsigned gy, unsigned gz, unsigned b, unsigned sh, void** a) {
@@ -291,7 +297,7 @@ static void prof_launch(void* fn, unsigned gx_, unsigned gy, unsigned gz, unsign
 }
 void Gx::print_profile() {
     std::map<void*, const char*> nm = {{f_lin_, "linear"}, {f_nt_, "attn QK"}, {f_nn_, "attn PV"}, {f_conv_, "conv"}, {f_gn_, "groupnorm"}, {f_ln_, "layernorm"},
-        {f_linf_, "linear*"}, {f_im2col_, "im2col"}, {f_tradd_, "tr-add"}, {f_sm_, "softmax"}, {f_act_, "act"}, {f_axpy_, "add"}, {f_chan_, "chanadd"}, {f_geglu_, "geglu"}, {f_tr_, "transpose"}, {f_up2_, "upsample"}, {f_embed_, "embed"}, {f_linh_, "linear16"}, {f_fa64_, "flash64"}, {f_fa72_, "flash72"}, {f_fa128_, "flash128"}};
+        {f_linf_, "linear*"}, {f_im2col_, "im2col"}, {f_tradd_, "tr-add"}, {f_sm_, "softmax"}, {f_act_, "act"}, {f_axpy_, "add"}, {f_chan_, "chanadd"}, {f_geglu_, "geglu"}, {f_tr_, "transpose"}, {f_up2_, "upsample"}, {f_embed_, "embed"}, {f_linh_, "linear16"}, {f_fa64_, "flash64"}, {f_fa72_, "flash72"}, {f_fa128_, "flash128"}, {f_qx_, "quantx"}, {f_mmq_[0], "mmq q4_0"}, {f_mmq_[1], "mmq q8"}, {f_mmq_[2], "mmq q4_k"}};
     for (auto& kv : g_gxt) printf("    %-10s %8.1f ms  (%ld calls)\n", nm.count(kv.first) ? nm[kv.first] : "?", kv.second.first * 1000, kv.second.second);
     g_gxt.clear();
 }
@@ -342,14 +348,59 @@ bool Gx::attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, i
     }
     return true;
 }
-bool Gx::linear_quant(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y) {
-    void* fn = kind == 1 ? f_linq8_ : kind == 0 ? f_linq4_ : f_linq4m_;
-    if (!fn || K % 32) return false;
-    unsigned M_ = M, N_ = N, K_ = K, ldb = kind == 1 ? K : K / 2, z = 0, one = 1, flags = 0;
-    float alpha = 1.f, b = 0.f; uint64_t B0 = 0;
-    void* a[] = {&X, &Q, &Y, &B0, &M_, &N_, &K_, &K_, &ldb, &N_, &z, &z, &z, &alpha, &b, &flags, &z, &z, &one, &one, &one, &z, &one, &z, &S};
-    prof_launch(fn, (N + 63) / 64, (M + 63) / 64, 1, 128, 0, a);
+// int8 copy of the activations for the int8 matmuls: XQ [M][K] int8, XD [M][K/32] (scale, scale * sum)
+bool Gx::quantize_x(uint64_t X, int M, int K, bool same_x, uint64_t& XQ, uint64_t& XD) {
+    static bool no_mmq = getenv("ITHACA_NO_MMQ") != nullptr;
+    if (no_mmq || !f_qx_ || K % 32) return false;
+    size_t nb = (size_t)M * K / 32, need = nb * 40;
+    if (need > xq_cap_) { cu().sync(); if (xq_) cu().free(xq_); xq_ = cu().alloc(need); xq_cap_ = xq_ ? need : 0; xq_src_ = 0; }
+    if (!xq_) return false;
+    XQ = xq_; XD = xq_ + nb * 32;
+    if (!(same_x && xq_src_ == X && xq_m_ == M && xq_k_ == K)) {
+        unsigned n = (unsigned)nb;
+        void* qa[] = {&X, &XQ, &XD, &n};
+        prof_launch(f_qx_, (n * 8 + 255) / 256, 1, 1, 256, 0, qa);
+        xq_src_ = X; xq_m_ = M; xq_k_ = K;
+    }
     return true;
+}
+bool Gx::linear_quant_grouped(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y,
+                              uint64_t off, int E, int maxc, uint64_t s_stride, uint64_t q_stride, bool same_x) {
+    uint64_t XQ, XD;
+    if (!f_mmqg_[kind] || !quantize_x(X, M, K, same_x, XQ, XD)) return false;
+    unsigned M_ = M, N_ = N, K_ = K;
+    void* a[] = {&XQ, &XD, &Q, &S, &Y, &M_, &N_, &K_, &off, &q_stride, &s_stride};
+    const int bm = 16 * kMmqTiles[0][2] * kMmqTiles[0][0], bn = 8 * kMmqTiles[0][3] * kMmqTiles[0][1];
+    prof_launch(f_mmqg_[kind], (N + bn - 1) / bn, (maxc + bm - 1) / bm, E, 32 * kMmqTiles[0][0] * kMmqTiles[0][1], 0, a);
+    return true;
+}
+bool Gx::linear_quant(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y, bool same_x) {
+    if (K % 32) return false;
+    {
+        // int8 tensor cores: quantize the activations once, then one pass per weight matrix
+        uint64_t XQ, XD;
+        if (f_mmq_[kind] && quantize_x(X, M, K, same_x, XQ, XD)) {
+            unsigned M_ = M, N_ = N, K_ = K;
+            void* a[] = {&XQ, &XD, &Q, &S, &Y, &M_, &N_, &K_};
+            // Big tiles reuse more of every load, but a matrix with few tiles leaves SMs idle in the last wave.
+            // Pick the tile whose waves are fuller (the big tile gets a 10% edge for its better reuse).
+            auto grid = [&](int t, unsigned& gx_, unsigned& gy) {
+                int bm = 16 * kMmqTiles[t][2] * kMmqTiles[t][0], bn = 8 * kMmqTiles[t][3] * kMmqTiles[t][1];
+                gx_ = (N + bn - 1) / bn; gy = (M + bm - 1) / bm;
+                double slots = sms_ * (t ? 2.0 : 1.0), blocks = (double)gx_ * gy;   // resident blocks per SM: 1 big, 2 small
+                return blocks / (std::ceil(blocks / slots) * slots);
+            };
+            unsigned gb[2], gs[2];
+            double fb = grid(0, gb[0], gb[1]), fs = grid(1, gs[0], gs[1]);
+            static const char* force = getenv("ITHACA_MMQ_TILE");
+            int t = force ? atoi(force) : (fb * 1.1 >= fs ? 0 : 1);
+            void* fn = t ? f_mmqs_[kind] : f_mmq_[kind];
+            if (!fn) { t = 0; fn = f_mmq_[kind]; }
+            prof_launch(fn, t ? gs[0] : gb[0], t ? gs[1] : gb[1], 1, 32 * kMmqTiles[t][0] * kMmqTiles[t][1], 0, a);
+            return true;
+        }
+    }
+    return false;   // no int8 kernels: the caller falls back to the dp4a matmuls
 }
 void Gx::conv(const GT& x, int Cin, int H, int W, uint64_t Wt, int Cout, int kh, int kw, int stride, int pad, const GT* bias, GT& y, float beta, int padw) {
     if (padw < 0) padw = pad;

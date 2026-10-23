@@ -100,7 +100,8 @@ private:
     bool kvq8_ = false;      // VRAM KV cache stored as int8 + scales (half the memory of fp16)
     size_t kv_pos_bytes() const;   // device KV bytes per position per layer   // decode attention generated for this model's head layout
     std::mutex kv_m_;
-    void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y);
+    void mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y, bool same_x = false);
+    bool moe_grouped(Layer& L, int n);
     std::atomic<bool> tc_prefill_{false};
     uint64_t dev_vec(const std::vector<float>& v);
     void tier_thread();
@@ -137,6 +138,7 @@ private:
     std::atomic<bool> dev_ok_{false};
     int gpu_batch_ = 256, sc_rows_ = 256;   // sc_rows_: token rows of the attention score buffer
     uint64_t dCS2_ = 0, dR_ = 0, dG_ = 0, dIdx_ = 0, dWt_ = 0;
+    uint64_t dMG_ = 0, dMF1_ = 0, dMF2_ = 0, dMT_ = 0, dOff_ = 0, dSI_ = 0, dSW_ = 0;   // MoE prompts: all routed rows, grouped by expert
     uint64_t dPM_ = 0, dPL_ = 0, dPO_ = 0, dPOS_ = 0, dX_ = 0, dXN_ = 0, dQ_ = 0, dK_ = 0, dV_ = 0, dATT_ = 0, dF1_ = 0, dF2_ = 0, dT_ = 0, dLOG_ = 0, dSC_ = 0, dCS_ = 0, d_onorm_ = 0;
     std::vector<uint64_t> dev_allocs_;
     std::vector<float> cs_, cs2_;

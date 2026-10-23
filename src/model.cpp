@@ -170,7 +170,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         std::string ge;
         const bool flash = !getenv("ITHACA_NO_FLASH") && !getenv("ITHACA_NO_TC_PREFILL") && (gx().ok() || gx().init(ge)) && gx().tensor_cores() &&
                            (hp.hd == 64 || hp.hd == 80 || hp.hd == 96 || hp.hd == 128 || hp.hd == 256);
-        gpu_batch_ = flash ? 256 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
+        gpu_batch_ = flash ? 512 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
         sc_rows_ = flash ? 1 : gpu_batch_;
         {   // int8 KV needs the flash prompt kernels and the generated decode kernel (they read int8)
             const int G = hp.n_head / std::max(1, hp.n_kv), NT = (hp.hd + 31) / 32;
@@ -239,13 +239,13 @@ void Model::tier_thread() {
                 return true;
             }
         }
-        // Repack into the GPU layout: [f32 scales][pad to 256][quants]. Q4_0 stays 4-bit,
+        // Repack into the GPU layout: [f16 scales][pad to 256][quants]. Q4_0 stays 4-bit,
         // everything else becomes 8-bit. Done on a few side threads, not the inference pool.
         const bool q4 = l.t->type == GT_Q4_0;
         const size_t nb = (size_t)l.cols / 32, nblk = nb * l.rows, qb = q4 ? 16 : 32;
-        const size_t qoff = (nblk * 4 + 255) / 256 * 256;
+        const size_t qoff = (nblk * 2 + 255) / 256 * 256;
         std::vector<uint8_t> buf(qoff + nblk * qb);
-        float* S = (float*)buf.data(); uint8_t* Q = buf.data() + qoff;
+        uint16_t* S = (uint16_t*)buf.data(); uint8_t* Q = buf.data() + qoff;
         const size_t rb_in = gtype_row_bytes(l.t->type, l.cols);
         int nth = std::max(2, (int)std::thread::hardware_concurrency() / 2);
         std::vector<std::thread> th;
@@ -255,8 +255,8 @@ void Model::tier_thread() {
                 const uint8_t* src = l.t->data + r * rb_in;
                 for (size_t b = 0; b < nb; b++) {
                     size_t i = r * nb + b;
-                    if (q4) { uint16_t d; memcpy(&d, src + b * 18, 2); S[i] = h2f(d); memcpy(Q + i * 16, src + b * 18 + 2, 16); }
-                    else if (l.t->type == GT_Q8_0) { uint16_t d; memcpy(&d, src + b * 34, 2); S[i] = h2f(d); memcpy(Q + i * 32, src + b * 34 + 2, 32); }
+                    if (q4) { memcpy(&S[i], src + b * 18, 2); memcpy(Q + i * 16, src + b * 18 + 2, 16); }
+                    else if (l.t->type == GT_Q8_0) { memcpy(&S[i], src + b * 34, 2); memcpy(Q + i * 32, src + b * 34 + 2, 32); }
                 }
                 if (q4 || l.t->type == GT_Q8_0) continue;
                 dequant_row(l.t->type, src, row.data(), l.cols);
@@ -264,7 +264,7 @@ void Model::tier_thread() {
                     const float* x = row.data() + b * 32; float amax = 0;
                     for (int j = 0; j < 32; j++) amax = std::max(amax, std::fabs(x[j]));
                     float d = amax / 127.f, id = d ? 1.f / d : 0.f;
-                    size_t i = r * nb + b; S[i] = d;
+                    size_t i = r * nb + b; S[i] = f2h(d);
                     for (int j = 0; j < 32; j++) Q[i * 32 + j] = (uint8_t)(int8_t)std::lrintf(x[j] * id);
                 }
             }
@@ -474,6 +474,12 @@ bool Model::alloc_dev_buffers() {
         {&dSC_, (size_t)sc_rows_ * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
         {&dR_, B * (size_t)std::max(1, hp.n_expert)}, {&dG_, B * d}, {&dIdx_, B * (size_t)std::max(1, hp.n_expert_used)}, {&dWt_, B * (size_t)std::max(1, hp.n_expert_used)},
         {&dPM_, (size_t)hp.n_head * 16}, {&dPL_, (size_t)hp.n_head * 16}, {&dPO_, (size_t)hp.n_head * 16 * hp.hd}};
+    if (hp.n_expert > 0) {   // grouped expert matmuls for prompts: every (token, expert) row at once
+        const size_t R = B * (size_t)std::max(1, hp.n_expert_used), fe = hp.n_ff_exp;
+        struct { uint64_t* p; size_t n; } moe[] = {{&dMG_, R * d}, {&dMF1_, R * fe}, {&dMF2_, R * fe}, {&dMT_, R * d}, {&dOff_, (size_t)hp.n_expert + 1}, {&dSI_, R}, {&dSW_, R}};
+        for (auto& b : moe) { *b.p = cuda().alloc(b.n * 4); if (*b.p) dev_allocs_.push_back(*b.p); }
+        if (!dMG_ || !dMF1_ || !dMF2_ || !dMT_ || !dOff_ || !dSI_ || !dSW_) dMG_ = 0;   // the per-expert loop still works
+    }
     for (auto& b : bufs) {
         *b.p = cuda().alloc(b.n * 4);
         if (!*b.p) return false;
@@ -552,7 +558,7 @@ void Model::moe_cpu(Layer& L, int n) {
 // Expert slice of a stacked GPU weight: rows [e*R, (e+1)*R).
 static void expert_slice(const Lin& l, int e, int ne, uint64_t& W, uint64_t& qoff) {
     const size_t nb = l.cols / 32, R = l.rows / ne, boff = (size_t)e * R * nb;
-    const size_t sb = l.gkind == CudaTier::K_Q4M ? 8 : 4, qb = l.gkind == CudaTier::K_Q8_0 ? 32 : 16;
+    const size_t sb = l.gkind == CudaTier::K_Q4M || l.gkind == CudaTier::K_Q6 ? 4 : 2, qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
     W = l.dptr.load() + boff * sb;
     qoff = l.gqoff + boff * qb - boff * sb;
 }
@@ -575,6 +581,7 @@ void Model::moe_gpu(Layer& L, int n) {
         cu.wsum(dX_, dT_, dWt_, K, d);
         return;
     }
+    if (tc_prefill_ && dMG_ && moe_grouped(L, n)) return;
     cu.dtoh(router_.data(), dR_, (size_t)n * E * 4);
     std::vector<std::vector<std::pair<int, float>>> pe;
     route(router_.data(), n, pe);
@@ -593,11 +600,34 @@ void Model::moe_gpu(Layer& L, int n) {
         uint64_t pI = dIdx_ + off[e] * 4, pW = dWt_ + off[e] * 4, W, q;
         cu.ew(CudaTier::GATHER, c * d, {&dXN_, &pI, &dG_, &d});
         expert_slice(L.gate_exps, e, E, W, q); mmq(W, q, L.gate_exps.gkind, dG_, c, d, ff, dF1_);
-        expert_slice(L.up_exps, e, E, W, q); mmq(W, q, L.up_exps.gkind, dG_, c, d, ff, dF2_);
+        expert_slice(L.up_exps, e, E, W, q); mmq(W, q, L.up_exps.gkind, dG_, c, d, ff, dF2_, true);
         cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, c * ff, {&dF1_, &dF2_});
         expert_slice(L.down_exps, e, E, W, q); mmq(W, q, L.down_exps.gkind, dF1_, c, ff, d, dT_);
         cu.ew(CudaTier::SCATTER, c * d, {&dX_, &dT_, &pI, &pW, &d});
     }
+}
+
+// Prompt MoE in one launch per matrix: routing and grouping on the GPU (no host round trip), every expert's rows
+// gathered at once, grouped int8 matmuls (grid z = expert), one atomic scatter back into x.
+bool Model::moe_grouped(Layer& L, int n) {
+    CudaTier& cu = cuda();
+    const int E = hp.n_expert, K = std::min(hp.n_expert_used, E);
+    unsigned d = hp.n_embd, ff = hp.n_ff_exp, tot = (unsigned)(n * K);
+    // check first: the router kernel overwrites the logits, so a fallback after it would route wrongly
+    if (!gx().can_group(L.gate_exps.gkind) || !gx().can_group(L.up_exps.gkind) || !gx().can_group(L.down_exps.gkind)) return false;
+    if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
+    auto grouped = [&](const Lin& l, uint64_t x, unsigned K_, unsigned N, uint64_t y, bool same_x) {
+        const size_t nb = l.cols / 32, R = l.rows / E;
+        const size_t sb = l.gkind == CudaTier::K_Q4M || l.gkind == CudaTier::K_Q6 ? 4 : 2, qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
+        uint64_t S = l.dptr.load();
+        return gx().linear_quant_grouped(x, tot, K_, S, S + l.gqoff, l.gkind, N, y, dOff_, E, n, R * nb * sb, R * nb * qb, same_x);
+    };
+    cu.ew(CudaTier::GATHER, tot * d, {&dXN_, &dSI_, &dMG_, &d});
+    if (!grouped(L.gate_exps, dMG_, d, ff, dMF1_, false) || !grouped(L.up_exps, dMG_, d, ff, dMF2_, true)) return false;
+    cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
+    if (!grouped(L.down_exps, dMF1_, ff, d, dMT_, false)) return false;
+    cu.ew(CudaTier::SCATTER, tot * d, {&dX_, &dMT_, &dSI_, &dSW_, &d});
+    return true;
 }
 
 // Grows every VRAM layer's KV buffers to hold `need` positions (doubling, capped at ctx).
@@ -652,10 +682,10 @@ void Model::rewind(int n) {
     for (auto& L : layers_) if (L.kv_dev > n) L.kv_dev = n;
 }
 
-// Prompt batches go through tensor cores (weights decoded while loading tiles); single tokens use the dp4a kernels.
-void Model::mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y) {
-    if (n >= 16 && tc_prefill_ && gx().linear_quant(x, n, cols, W, W + qoff, kind, rows, y)) return;
-    cuda().matmul_dev(W, qoff, kind, x, n, cols, rows, y);
+// Prompt batches go through the int8 tensor-core kernels; single tokens use the dp4a kernels.
+void Model::mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y, bool same_x) {
+    if (n >= 16 && tc_prefill_ && gx().linear_quant(x, n, cols, W, W + qoff, kind, rows, y, same_x)) return;
+    cuda().matmul_dev(W, qoff, kind, x, n, cols, rows, y, same_x);
 }
 
 void Model::gpu_layer(Layer& L, int n, unsigned nc) {
@@ -663,9 +693,14 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     unsigned d = hp.n_embd, hd = hp.hd, nh = hp.n_head, nkv = hp.n_kv, qd = nh * hd, kvd = nkv * hd, ff = hp.n_ff;
     unsigned half = hp.n_rot / 2, neox = hp.neox ? 1 : 0, grp = nh / nkv, ctxu = ctx, un = n;
     float eps = hp.eps, res = hp.res_scale, scale = hp.attn_scale > 0 ? hp.attn_scale : 1.0f / std::sqrt((float)hd);
-    auto mm = [&](Lin& w, uint64_t x, uint64_t y) { mmq(w.dptr.load(), w.gqoff, w.gkind, x, n, w.cols, w.rows, y); };
     static bool pp = getenv("ITHACA_PREPROF") != nullptr;
     const bool ppn = pp && n > 1;
+    static double t_mm = 0;
+    auto mm = [&](Lin& w, uint64_t x, uint64_t y, bool same_x = false) {
+        double t = ppn ? (cu.sync(), now_sec()) : 0;
+        mmq(w.dptr.load(), w.gqoff, w.gkind, x, n, w.cols, w.rows, y, same_x);
+        if (ppn) { cu.sync(); t_mm += now_sec() - t; }
+    };
     double T0 = ppn ? (cu.sync(), now_sec()) : 0;
     cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
     if (L.qkv.t) {
@@ -676,7 +711,7 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         cu.ew(CudaTier::COPY2D, un * kvd, {&sk, &W, &dK_, &kvd, &kvd});
         cu.ew(CudaTier::COPY2D, un * kvd, {&sv, &W, &dV_, &kvd, &kvd});
     } else {
-        mm(L.q, dXN_, dQ_); mm(L.k, dXN_, dK_); mm(L.v, dXN_, dV_);
+        mm(L.q, dXN_, dQ_); mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
     }
     if (L.d_bq) cu.ew(CudaTier::BIAS, un * qd, {&dQ_, &L.d_bq, &qd});
     if (L.d_bk) cu.ew(CudaTier::BIAS, un * kvd, {&dK_, &L.d_bk, &kvd});
@@ -710,7 +745,7 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     static double t_attn = 0, t_all = 0; static int calls = 0;
     if (ppn) { cu.sync(); t_attn += now_sec() - Ta; }
     mm(L.o, dATT_, dT_);
-    if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_all * 1e3);
+    if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
     struct PP { bool on; double t0; double& acc; ~PP() { if (on) { cuda().sync(); acc += now_sec() - t0; } } } pp_guard{ppn, T0, t_all};
     if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
     cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
@@ -720,7 +755,7 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         mm(L.gateup, dXN_, dT_);
         cu.ew(CudaTier::SILU_SPLIT, un * ff, {&dT_, &dF1_, &ff});
     } else {
-        mm(L.gate, dXN_, dF1_); mm(L.up, dXN_, dF2_);
+        mm(L.gate, dXN_, dF1_); mm(L.up, dXN_, dF2_, true);
         cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, un * ff, {&dF1_, &dF2_});
     }
     mm(L.down, dF1_, dT_);
@@ -744,7 +779,7 @@ void Model::bench_gpu() {
     Lin* big = L.gate.t ? &L.gate : &L.gateup;
     Lin* down = &L.down;
     Lin* kk = L.k.t ? &L.k : &L.qkv;
-    auto cost = [](Lin* l) { return (double)l->rows * (l->cols / 32) * (l->gkind == CudaTier::K_Q4_0 ? 20 : 36); };
+    auto cost = [](Lin* l) { return (double)l->rows * (l->cols / 32) * (l->gkind == CudaTier::K_Q4_0 ? 18 : l->gkind == CudaTier::K_Q4M ? 20 : l->gkind == CudaTier::K_Q6 ? 28 : 34); };
     timeit("mm gate/up", cost(big), [&] { cu.matmul_dev(big->dptr.load(), big->gqoff, big->gkind, dXN_, 1, big->cols, big->rows, dT_); });
     timeit("mm down", cost(down), [&] { cu.matmul_dev(down->dptr.load(), down->gqoff, down->gkind, dF1_, 1, down->cols, down->rows, dT_); });
     timeit("mm k", cost(kk), [&] { cu.matmul_dev(kk->dptr.load(), kk->gqoff, kk->gkind, dXN_, 1, kk->cols, kk->rows, dK_); });
@@ -822,7 +857,7 @@ const float* Model::eval(const int* toks, int n_all) {
             }
         }
     }
-    const int B = dev_ok_ ? std::min(256, gpu_batch_) : 256;
+    const int B = dev_ok_ ? gpu_batch_ : 256;
     for (int c0 = 0, n = 0; c0 < n_all; c0 += n) {
         // batches never mix text and image tokens: an image run is one non-causal block
         const bool img = toks[c0] < 0;
@@ -1056,7 +1091,9 @@ int quant_selftest(const std::wstring& path) {
     HANDLE fh = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
     std::vector<int> seen;
     for (auto& t : g.tensors) {
-        if (t.nd != 2 || std::find(seen.begin(), seen.end(), t.type) != seen.end() || !CudaTier::can_load(t.type)) continue;
+        static const bool layer0 = getenv("ITHACA_MMBENCH") && !strcmp(getenv("ITHACA_MMBENCH"), "layer");   // every matrix of block 0
+        if (t.nd != 2 || !CudaTier::can_load(t.type)) continue;
+        if (layer0 ? t.name.rfind("blk.0.", 0) != 0 : std::find(seen.begin(), seen.end(), t.type) != seen.end()) continue;
         seen.push_back(t.type);
         int cols = (int)t.ne[0], rows = (int)std::min<int64_t>(t.ne[1], 512);
         size_t nbytes = gtype_row_bytes(t.type, cols) * rows;

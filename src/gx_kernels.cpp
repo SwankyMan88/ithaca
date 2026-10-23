@@ -5,10 +5,14 @@
 
 std::string gx_ptx();
 std::string gx_ptx_tc();
+// int8 prompt matmul tiles {warps along tokens, warps along weight rows, 16-token and 8-row mma fragments per warp}:
+// [0] 128 x 128 for big matrices, [1] 128 tokens x 64 rows when the big tile would leave SMs idle. gx.cpp sizes grids from these.
+extern const int kMmqTiles[2][4] = {{2, 4, 4, 4}, {2, 4, 4, 2}};
+static const int kMmqRegs = 0;   // register cap for the int8 matmuls (0 = none)
 
 namespace {
 std::string gen_gemm_tc(const char* name, int mode);
-std::string gen_lin_fast(const char* name, bool q8, bool half, int q4);
+std::string gen_lin_fast(const char* name, bool q8, bool half);
 struct Out {
     std::string s;
     char b[512];
@@ -263,11 +267,9 @@ std::string gen_gemm_tc(const char* name, int mode) {
 
 // Fast tensor-core linear for K % 32 == 0: y[M,N] = x[M,K] W^T (+bias, +beta*y), W fp16 [N][K].
 // 64x64x32 tiles, 128-bit loads, next tile prefetched into registers while the current one computes.
-// q4: 0 = none, 1 = 4-bit blocks with offset 8 (scale per 32), 2 = 4-bit blocks with (scale, min) pairs.
-// The 4-bit layouts are the chat engine's GPU weight formats, so prompts run through tensor cores directly.
-std::string gen_lin_fast(const char* name, bool q8 = false, bool half = false, int q4 = 0) {
+std::string gen_lin_fast(const char* name, bool q8 = false, bool half = false) {
     Out o;
-    const bool quant = q8 || q4;
+    const bool quant = q8;
     o(".visible .entry %s(.param .u64 pA, .param .u64 pB, .param .u64 pC, .param .u64 pBias,", name);
     o(" .param .u32 pM, .param .u32 pN, .param .u32 pK, .param .u32 pLda, .param .u32 pLdb, .param .u32 pLdc,");
     o(" .param .u32 pSA, .param .u32 pSB, .param .u32 pSC, .param .f32 pAlpha, .param .f32 pBeta, .param .u32 pFlags,");
@@ -295,9 +297,7 @@ std::string gen_lin_fast(const char* name, bool q8 = false, bool half = false, i
     }
     for (int e = 0; e < 2; e++) {
         o(" add.u32 %%r22,%%r20,%d; add.u32 %%r22,%%r22,%%r15; setp.lt.u32 %%vb%d,%%r22,%%r2; min.u32 %%r22,%%r22,%%r2;", e * 32, e);
-        if (q4)   // ldb = bytes per row; this thread's 8 values sit in bytes (k0 & 15).., low or high nibbles
-            o(" and.b32 %%r76,%%r21,15; mad.lo.u32 %%r23,%%r22,%%r5,%%r76; cvt.u64.u32 %%rd%d,%%r23; add.u64 %%rd%d,%%rd2,%%rd%d;", 24 + e, 24 + e, 24 + e);
-        else o(" mad.lo.u32 %%r23,%%r22,%%r5,%%r21; mul.wide.u32 %%rd%d,%%r23,%d; add.u64 %%rd%d,%%rd2,%%rd%d;", 24 + e, q8 ? 1 : 2, 24 + e, 24 + e);
+        o(" mad.lo.u32 %%r23,%%r22,%%r5,%%r21; mul.wide.u32 %%rd%d,%%r23,%d; add.u64 %%rd%d,%%rd2,%%rd%d;", 24 + e, q8 ? 1 : 2, 24 + e, 24 + e);
     }
     // shared store addresses
     o(" mad.lo.u32 %%r24,%%r18,36,%%r19; mul.wide.u32 %%rd9,%%r24,4; add.u64 %%rd9,%%rd7,%%rd9;");
@@ -313,28 +313,16 @@ std::string gen_lin_fast(const char* name, bool q8 = false, bool half = false, i
             o(" @%%va%d ld.global.v4.f32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd30];", e, e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
         }
         for (int e = 0; e < 2; e++) {
-            if (q4) o(" shr.u32 %%r78,%s,1; cvt.u64.u32 %%rd31,%%r78; add.u64 %%rd31,%%rd%d,%%rd31;", koff_reg, 24 + e);   // 16 bytes per 32 values
-            else o(" mul.wide.u32 %%rd31,%s,%d; add.u64 %%rd31,%%rd%d,%%rd31;", koff_reg, q8 ? 1 : 2, 24 + e);
+            o(" mul.wide.u32 %%rd31,%s,%d; add.u64 %%rd31,%%rd%d,%%rd31;", koff_reg, q8 ? 1 : 2, 24 + e);
             o(" mov.b32 %%y%d,0; mov.b32 %%y%d,0; mov.b32 %%y%d,0; mov.b32 %%y%d,0;", e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
-            if (quant) o(" @%%vb%d ld.global.nc.v2.b32 {%%y%d,%%y%d},[%%rd31];", e, e * 4, e * 4 + 1);   // 8 int8 weights or 16 nibbles
+            if (quant) o(" @%%vb%d ld.global.nc.v2.b32 {%%y%d,%%y%d},[%%rd31];", e, e * 4, e * 4 + 1);   // 8 int8 weights
             else o(" @%%vb%d ld.global.nc.v4.b32 {%%y%d,%%y%d,%%y%d,%%y%d},[%%rd31];", e, e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
         }
     };
     auto sstore = [&](const char* koff) {
         for (int e = 0; e < 4; e++) o(" st.shared.v4.f32 [%%rd9+%d],{%%x%d,%%x%d,%%x%d,%%x%d};", e * 16 * 36 * 4, e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
         for (int e = 0; e < 2; e++) {
-            if (q4) {
-                o(" add.u32 %%r71,%%r20,%d; add.u32 %%r71,%%r71,%%r15; min.u32 %%r71,%%r71,%%r2; shr.u32 %%r72,%%r3,5; shr.u32 %%r73,%s,5;", e * 32, koff);
-                o(" mad.lo.u32 %%r71,%%r71,%%r72,%%r73; mov.f32 %%f10,0f00000000; mov.f32 %%f11,0f00000000;");
-                if (q4 == 2) o(" mul.wide.u32 %%rd19,%%r71,8; add.u64 %%rd19,%%rd18,%%rd19; @%%vb%d ld.global.nc.v2.f32 {%%f10,%%f11},[%%rd19];", e);
-                else o(" mul.wide.u32 %%rd19,%%r71,4; add.u64 %%rd19,%%rd18,%%rd19; @%%vb%d ld.global.nc.f32 %%f10,[%%rd19];", e);
-                o(" shr.u32 %%r77,%%r21,4; shl.b32 %%r77,%%r77,2;");   // nibble shift: 0 for k0 < 16, 4 above
-                for (int q = 0; q < 8; q++) {
-                    o(" add.u32 %%r79,%%r77,%d; bfe.u32 %%r70,%%y%d,%%r79,4; cvt.rn.f32.u32 %%z%d,%%r70;", (q % 4) * 8, e * 4 + q / 4, q);
-                    if (q4 == 2) o(" mul.f32 %%z%d,%%z%d,%%f10; sub.f32 %%z%d,%%z%d,%%f11;", q, q, q, q);
-                    else o(" sub.f32 %%z%d,%%z%d,0f41000000; mul.f32 %%z%d,%%z%d,%%f10;", q, q, q, q);
-                }
-            } else if (q8) {
+            if (q8) {
                 // scale for (row n, group k/32): S[n*(K/32) + koff/32]
                 o(" add.u32 %%r71,%%r20,%d; add.u32 %%r71,%%r71,%%r15; min.u32 %%r71,%%r71,%%r2; shr.u32 %%r72,%%r3,5; shr.u32 %%r73,%s,5;", e * 32, koff);
                 o(" mad.lo.u32 %%r71,%%r71,%%r72,%%r73; mul.wide.u32 %%rd19,%%r71,4; add.u64 %%rd19,%%rd18,%%rd19; mov.f32 %%f10,0f00000000; @%%vb%d ld.global.nc.f32 %%f10,[%%rd19];", e);
@@ -744,9 +732,250 @@ const char* kRed =
     " mov.u64 %rdr,red; mul.wide.u32 %rdw,%rwarp,4; add.u64 %rdw,%rdr,%rdw;\n";
 }  // namespace
 
+// ---------------------------------------------------------------------------------------------
+// Int8 prompt matmuls for the chat engine (the llama.cpp "mmq" idea): activations are quantized to int8 per
+// 32 values, multiplied against the 4/8-bit weights with int8 tensor cores, and each 32-wide step is scaled
+// back to f32. 4-bit weights go in unsigned (0..15); the offset or min is applied with the row sums of x.
+// t_qx: X f32 [n*32] -> Q int8 [n*32], D float2 [n] = (scale, scale * sum of q). 8 threads per 32 values.
+std::string gen_qx(const char* name) {
+    Out o;
+    o(".visible .entry %s(.param .u64 pX, .param .u64 pQ, .param .u64 pD, .param .u32 pN)", name);
+    o("{");
+    o(" .reg .pred %%p<2>; .reg .b32 %%r<24>; .reg .b64 %%rd<8>; .reg .f32 %%f<16>;");
+    o(" ld.param.u64 %%rd1,[pX]; ld.param.u64 %%rd2,[pQ]; ld.param.u64 %%rd3,[pD]; ld.param.u32 %%r3,[pN];");
+    o(" mov.u32 %%r1,%%ctaid.x; mov.u32 %%r2,%%tid.x; mad.lo.u32 %%r1,%%r1,256,%%r2; shl.b32 %%r3,%%r3,3; setp.lt.u32 %%p1,%%r1,%%r3;");   // p1: in range
+    o(" mov.f32 %%f0,0f00000000; mov.f32 %%f1,0f00000000; mov.f32 %%f2,0f00000000; mov.f32 %%f3,0f00000000;");
+    o(" mul.wide.u32 %%rd4,%%r1,16; add.u64 %%rd4,%%rd1,%%rd4; @%%p1 ld.global.nc.v4.f32 {%%f0,%%f1,%%f2,%%f3},[%%rd4];");
+    o(" abs.f32 %%f4,%%f0; abs.f32 %%f5,%%f1; max.f32 %%f4,%%f4,%%f5; abs.f32 %%f5,%%f2; max.f32 %%f4,%%f4,%%f5; abs.f32 %%f5,%%f3; max.f32 %%f4,%%f4,%%f5;");
+    for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%f5,%%f4,%d,31,0xffffffff; max.f32 %%f4,%%f4,%%f5;", m);
+    o(" mul.f32 %%f6,%%f4,0f3C010204; setp.gt.f32 %%p0,%%f4,0f00000000; rcp.approx.f32 %%f7,%%f6; selp.f32 %%f7,%%f7,0f00000000,%%p0;");   // d, 1/d
+    for (int j = 0; j < 4; j++) o(" mul.f32 %%f8,%%f%d,%%f7; cvt.rni.s32.f32 %%r%d,%%f8;", j, 4 + j);
+    o(" add.s32 %%r8,%%r4,%%r5; add.s32 %%r8,%%r8,%%r6; add.s32 %%r8,%%r8,%%r7;");
+    for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%r9,%%r8,%d,31,0xffffffff; add.s32 %%r8,%%r8,%%r9;", m);
+    o(" bfi.b32 %%r10,%%r5,%%r4,8,8; bfi.b32 %%r10,%%r6,%%r10,16,8; bfi.b32 %%r10,%%r7,%%r10,24,8;");
+    o(" mul.wide.u32 %%rd5,%%r1,4; add.u64 %%rd5,%%rd2,%%rd5; @%%p1 st.global.b32 [%%rd5],%%r10;");
+    o(" and.b32 %%r11,%%r1,7; setp.eq.and.u32 %%p0,%%r11,0,%%p1;");
+    o(" cvt.rn.f32.s32 %%f9,%%r8; mul.f32 %%f9,%%f9,%%f6; shr.u32 %%r12,%%r1,3;");
+    o(" mul.wide.u32 %%rd6,%%r12,8; add.u64 %%rd6,%%rd3,%%rd6; @%%p0 st.global.v2.f32 [%%rd6],{%%f6,%%f9};");
+    o(" ret;\n}");
+    return o.s;
+}
+
+// t_mmq*: Y[M][N] = X[M][K] W^T. XQ int8 [M][K], XD float2 [M][K/32]; W rows in the chat GPU layout:
+// kind 0 = 4-bit (q-8)*d, kind 1 = int8 q*d, kind 2 = 4-bit q*d - m.
+// A block computes (WM*FM*16 tokens) x (WN*FN*8 weight rows) with WM x WN warps; big tiles
+// so every byte loaded into shared memory is reused many times (llama.cpp uses 128 x 128 on Ampere).
+// 128-wide K steps; the next step is loaded into registers while the current one computes.
+// grouped: mixture-of-experts form. Grid z = expert e; its tokens are rows off[e]..off[e+1] of X and Y, its
+// weights sit e * stride bytes further on (quants pQs, scales pSs).
+std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = false) {   // tile: warps M, warps N, fragments M, fragments N
+    Out o;
+    const bool q4 = kind == 0 || kind == 2, q6 = kind == 3, pair = kind == 2 || kind == 3;
+    const int WM = tile[0], WN = tile[1], FM = tile[2], FN = tile[3], T = 32 * WM * WN, BM = 16 * FM * WM, BN = 8 * FN * WN, BK = 128, NB = BK / 32;
+    const int SA = BK + 16, RB = q4 ? BK / 2 : q6 ? BK / 4 * 3 : BK, SB = RB + 16;   // shared row strides (bytes), padded against bank conflicts
+    const int CA = BK / 16, CB = RB / 16;                          // 16-byte chunks per row
+    const int EA = BM * CA / T, EB = (BN * CB + T - 1) / T;        // chunks per thread (weights: the last may be partial)
+    const int WB = pair ? 8 : 4, SSA = NB * 8 + 8, SSB = NB * WB + WB;   // scale tiles (f32): (d, d*sum) per token row; d or (d, m) per weight row
+    const int WG = WB / 2;                                         // weight scales in VRAM are f16
+    const int ESA = BM * NB / T, ESB = BN * NB / T;                // scale entries per thread
+    const int NC = FM * FN * 4, NR = FM * 2, NW = FN * 2;          // f32 sums, token rows and weight columns per thread
+    o(".visible .entry %s(.param .u64 pX, .param .u64 pXD, .param .u64 pW, .param .u64 pS, .param .u64 pY, .param .u32 pM, .param .u32 pN, .param .u32 pK%s)", name,
+      grouped ? ", .param .u64 pOff, .param .u64 pQs, .param .u64 pSs" : "");
+    if (kMmqRegs) o(".maxnreg %d", kMmqRegs);
+    o("{");
+    o(" .reg .pred %%p<8>; .reg .pred %%va<%d>, %%vb<%d>, %%vs<%d>; .reg .b32 %%cb<%d>; .reg .b64 %%sb<%d>;", EA, EB, EB, EB, EB);
+    o(" .reg .b32 %%r<80>; .reg .b64 %%rd<24>; .reg .b64 %%ga<%d>; .reg .b64 %%gb<%d>; .reg .b64 %%gsa<%d>; .reg .b64 %%gsb<%d>; .reg .b64 %%ssa<%d>; .reg .b64 %%ssb<%d>;", EA, EB, ESA, ESB, ESA, ESB);
+    o(" .reg .b32 %%ja<%d>; .reg .b32 %%jb<%d>;", ESA, ESB);
+    o(" .reg .f32 %%c<%d>; .reg .b32 %%i<%d>; .reg .b32 %%a<4>; .reg .b32 %%b<%d>; .reg .b32 %%x<%d>;", NC, FN * 4 * (q6 ? 2 : 1), FN * 2, (EA + EB) * 4);
+    o(" .reg .f32 %%dx<%d>; .reg .f32 %%xs<%d>; .reg .f32 %%dw<%d>; .reg .f32 %%mw<%d>; .reg .f32 %%f<4>;", NR, NR, NW, NW);
+    o(" .reg .f32 %%ya<%d>; .reg .f32 %%yb<%d>; .reg .b16 %%h<2>;", ESA * 2, ESB * 2);
+    o(" .shared .align 16 .b8 sA[%d]; .shared .align 16 .b8 sB[%d]; .shared .align 16 .b8 sSA[%d]; .shared .align 16 .b8 sSB[%d];", BM * SA, BN * SB, BM * SSA, BN * SSB);
+    o(" ld.param.u64 %%rd1,[pX]; ld.param.u64 %%rd2,[pXD]; ld.param.u64 %%rd3,[pW]; ld.param.u64 %%rd4,[pS]; ld.param.u64 %%rd5,[pY];");
+    o(" ld.param.u32 %%r1,[pM]; ld.param.u32 %%r2,[pN]; ld.param.u32 %%r3,[pK]; shr.u32 %%r4,%%r3,5; shr.u32 %%r25,%%r3,%d;", q4 ? 1 : q6 ? 2 : 0);   // r4 = K/32, r25 = weight row bytes
+    if (q6) o(" mul.lo.u32 %%r25,%%r25,3;");   // 6 bits per weight
+    if (grouped) {
+        o(" mov.u32 %%r7,%%ctaid.z; ld.param.u64 %%rd19,[pOff]; mul.wide.u32 %%rd20,%%r7,4; add.u64 %%rd19,%%rd19,%%rd20;");
+        o(" ld.global.u32 %%r8,[%%rd19]; ld.global.u32 %%r9,[%%rd19+4]; sub.u32 %%r1,%%r9,%%r8;");   // this expert's rows
+        o(" mul.wide.u32 %%rd20,%%r8,%%r3; add.u64 %%rd1,%%rd1,%%rd20; mul.wide.u32 %%rd20,%%r8,%%r4; shl.b64 %%rd20,%%rd20,3; add.u64 %%rd2,%%rd2,%%rd20;");
+        o(" mul.wide.u32 %%rd20,%%r8,%%r2; shl.b64 %%rd20,%%rd20,2; add.u64 %%rd5,%%rd5,%%rd20; cvt.u64.u32 %%rd21,%%r7;");
+        o(" ld.param.u64 %%rd20,[pQs]; mul.lo.u64 %%rd20,%%rd20,%%rd21; add.u64 %%rd3,%%rd3,%%rd20;");
+        o(" ld.param.u64 %%rd20,[pSs]; mul.lo.u64 %%rd20,%%rd20,%%rd21; add.u64 %%rd4,%%rd4,%%rd20;");
+    }
+    o(" sub.u32 %%r5,%%r1,1; sub.u32 %%r6,%%r2,1;");
+    o(" mov.u32 %%r12,%%tid.x; and.b32 %%r13,%%r12,31; shr.u32 %%r14,%%r12,5; shr.u32 %%r60,%%r13,2; and.b32 %%r61,%%r13,3;");   // tid lane warp g t
+    o(" div.u32 %%r62,%%r14,%d; mul.lo.u32 %%r62,%%r62,%d; rem.u32 %%r63,%%r14,%d; mul.lo.u32 %%r63,%%r63,%d;", WN, FM * 16, WN, FN * 8);   // wm, wn
+    o(" mov.u32 %%r15,%%ctaid.x; mul.lo.u32 %%r15,%%r15,%d; mov.u32 %%r16,%%ctaid.y; mul.lo.u32 %%r16,%%r16,%d;", BN, BM);      // n0, m0
+    if (grouped) o(" setp.ge.u32 %%p0,%%r16,%%r1; @%%p0 ret;");   // past this expert's tokens
+    o(" mov.u32 %%r0,0; mov.u64 %%rd7,sA; mov.u64 %%rd8,sB;");
+    // loaders: chunk tid + T*e -> row (tid / C) + e*T/C, byte (tid % C)*16
+    o(" div.u32 %%r18,%%r12,%d; rem.u32 %%r19,%%r12,%d; shl.b32 %%r19,%%r19,4;", CA, CA);
+    for (int e = 0; e < EA; e++) {
+        o(" add.u32 %%r22,%%r18,%d; add.u32 %%r22,%%r22,%%r16; setp.lt.u32 %%va%d,%%r22,%%r1; min.u32 %%r22,%%r22,%%r5;", e * T / CA, e);
+        o(" mad.lo.u32 %%r23,%%r22,%%r3,%%r19; cvt.u64.u32 %%ga%d,%%r23; add.u64 %%ga%d,%%rd1,%%ga%d;", e, e, e);
+    }
+    o(" mad.lo.u32 %%r24,%%r18,%d,%%r19; cvt.u64.u32 %%rd9,%%r24; add.u64 %%rd9,%%rd7,%%rd9;", SA);
+    for (int e = 0; e < EB; e++) {   // weight chunk tid + T*e: row (/ CB), byte (% CB)*16; vs = the chunk exists
+        o(" add.u32 %%r20,%%r12,%d; setp.lt.u32 %%vs%d,%%r20,%d; div.u32 %%r22,%%r20,%d; rem.u32 %%cb%d,%%r20,%d; shl.b32 %%cb%d,%%cb%d,4;", e * T, e, BN * CB, CB, e, CB, e, e);
+        o(" mad.lo.u32 %%r24,%%r22,%d,%%cb%d; cvt.u64.u32 %%sb%d,%%r24; add.u64 %%sb%d,%%rd8,%%sb%d;", SB, e, e, e, e);
+        o(" add.u32 %%r22,%%r22,%%r15; setp.lt.u32 %%vb%d,%%r22,%%r2; and.pred %%vb%d,%%vb%d,%%vs%d; min.u32 %%r22,%%r22,%%r6;", e, e, e, e);
+        o(" mad.lo.u32 %%r23,%%r22,%%r25,%%cb%d; cvt.u64.u32 %%gb%d,%%r23; add.u64 %%gb%d,%%rd3,%%gb%d;", e, e, e, e);
+    }
+    // fragment read bases: A row wm+g, byte 4t; B row wn+g, byte 4t
+    o(" shl.b32 %%r27,%%r61,2;");
+    o(" add.u32 %%r26,%%r62,%%r60; mad.lo.u32 %%r26,%%r26,%d,%%r27; cvt.u64.u32 %%rd12,%%r26; add.u64 %%rd12,%%rd7,%%rd12;", SA);
+    o(" add.u32 %%r28,%%r63,%%r60; mad.lo.u32 %%r28,%%r28,%d,%%r27; cvt.u64.u32 %%rd13,%%r28; add.u64 %%rd13,%%rd8,%%rd13;", SB);
+    if (q6) {   // qh word of this lane: row wn+g, byte (t>>1)*4; its 2-bit fields start at bit (t&1)*4 (low half) and +2 (high half)
+        o(" shr.u32 %%r70,%%r61,1; shl.b32 %%r70,%%r70,2; add.u32 %%r72,%%r63,%%r60; mad.lo.u32 %%r72,%%r72,%d,%%r70; cvt.u64.u32 %%rd22,%%r72; add.u64 %%rd22,%%rd8,%%rd22;", SB);
+        o(" and.b32 %%r70,%%r61,1; shl.b32 %%r70,%%r70,2; add.u32 %%r71,%%r70,2;");
+    }
+    // scale tiles: entry tid + T*i -> row / NB, block j = % NB. Global rows clamped to the matrix.
+    for (int i = 0; i < ESA; i++) {
+        o(" add.u32 %%r30,%%r12,%d; div.u32 %%r31,%%r30,%d; rem.u32 %%ja%d,%%r30,%d;", i * T, NB, i, NB);
+        o(" add.u32 %%r29,%%r31,%%r16; min.u32 %%r29,%%r29,%%r5; mad.lo.u32 %%r29,%%r29,%%r4,%%ja%d; mul.wide.u32 %%gsa%d,%%r29,8; add.u64 %%gsa%d,%%rd2,%%gsa%d;", i, i, i, i);
+        o(" mov.u64 %%ssa%d,sSA; mul.lo.u32 %%r29,%%r31,%d; mad.lo.u32 %%r37,%%ja%d,8,%%r29; cvt.u64.u32 %%rd14,%%r37; add.u64 %%ssa%d,%%ssa%d,%%rd14;", i, SSA, i, i, i);
+    }
+    for (int i = 0; i < ESB; i++) {
+        o(" add.u32 %%r30,%%r12,%d; div.u32 %%r31,%%r30,%d; rem.u32 %%jb%d,%%r30,%d;", i * T, NB, i, NB);
+        o(" add.u32 %%r29,%%r31,%%r15; min.u32 %%r29,%%r29,%%r6; mad.lo.u32 %%r29,%%r29,%%r4,%%jb%d; mul.wide.u32 %%gsb%d,%%r29,%d; add.u64 %%gsb%d,%%rd4,%%gsb%d;", i, i, WG, i, i);
+        o(" mov.u64 %%ssb%d,sSB; mul.lo.u32 %%r29,%%r31,%d; mad.lo.u32 %%r37,%%jb%d,%d,%%r29; cvt.u64.u32 %%rd14,%%r37; add.u64 %%ssb%d,%%ssb%d,%%rd14;", i, SSB, i, WB, i, i);
+    }
+    // compute-side scale bases: A row wm+g, B row wn+2t
+    o(" mov.u64 %%rd15,sSA; add.u32 %%r29,%%r62,%%r60; mul.lo.u32 %%r29,%%r29,%d; cvt.u64.u32 %%rd14,%%r29; add.u64 %%rd15,%%rd15,%%rd14;", SSA);
+    o(" mov.u64 %%rd10,sSB; shl.b32 %%r29,%%r61,1; add.u32 %%r29,%%r29,%%r63; mul.lo.u32 %%r29,%%r29,%d; cvt.u64.u32 %%rd14,%%r29; add.u64 %%rd10,%%rd10,%%rd14;", SSB);
+    for (int i = 0; i < NC; i++) o(" mov.f32 %%c%d,0f00000000;", i);
+    auto gload = [&](const char* k0) {
+        o(" cvt.u64.u32 %%rd16,%s;", k0);
+        for (int e = 0; e < EA; e++) {
+            o(" add.u32 %%r40,%s,%%r19; setp.lt.u32 %%p2,%%r40,%%r3; and.pred %%p2,%%p2,%%va%d; add.u64 %%rd17,%%ga%d,%%rd16;", k0, e, e);
+            o(" mov.b32 %%x%d,0; mov.b32 %%x%d,0; mov.b32 %%x%d,0; mov.b32 %%x%d,0;", e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
+            o(" @%%p2 ld.global.nc.v4.b32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd17];", e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
+        }
+        o(" shr.u32 %%r42,%s,5;", k0);   // first 32-block of this K step
+        for (int i = 0; i < ESA; i++) {
+            o(" add.u32 %%r43,%%r42,%%ja%d; setp.lt.u32 %%p2,%%r43,%%r4; mul.wide.u32 %%rd17,%%r42,8; add.u64 %%rd17,%%gsa%d,%%rd17;", i, i);
+            o(" mov.f32 %%ya%d,0f00000000; mov.f32 %%ya%d,0f00000000; @%%p2 ld.global.nc.v2.f32 {%%ya%d,%%ya%d},[%%rd17];", i * 2, i * 2 + 1, i * 2, i * 2 + 1);
+        }
+        for (int i = 0; i < ESB; i++) {
+            o(" add.u32 %%r43,%%r42,%%jb%d; setp.lt.u32 %%p2,%%r43,%%r4; mul.wide.u32 %%rd17,%%r42,%d; add.u64 %%rd17,%%gsb%d,%%rd17;", i, WG, i);
+            o(" mov.b16 %%h0,0; mov.b16 %%h1,0;");
+            if (pair) o(" @%%p2 ld.global.nc.v2.b16 {%%h0,%%h1},[%%rd17];");
+            else o(" @%%p2 ld.global.nc.b16 %%h0,[%%rd17];");
+            o(" cvt.f32.f16 %%yb%d,%%h0; cvt.f32.f16 %%yb%d,%%h1;", i * 2, i * 2 + 1);
+        }
+        o(" shr.u32 %%r41,%s,%d;", k0, q4 ? 1 : q6 ? 2 : 0);   // byte offset of this K step in a weight row
+        if (q6) o(" mul.lo.u32 %%r41,%%r41,3;");
+        o(" cvt.u64.u32 %%rd16,%%r41;");
+        for (int e = 0; e < EB; e++) {
+            int x = (EA + e) * 4;
+            o(" add.u32 %%r40,%%r41,%%cb%d; setp.lt.u32 %%p2,%%r40,%%r25; and.pred %%p2,%%p2,%%vb%d; add.u64 %%rd17,%%gb%d,%%rd16;", e, e, e);
+            o(" mov.b32 %%x%d,0; mov.b32 %%x%d,0; mov.b32 %%x%d,0; mov.b32 %%x%d,0;", x, x + 1, x + 2, x + 3);
+            o(" @%%p2 ld.global.nc.v4.b32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd17];", x, x + 1, x + 2, x + 3);
+        }
+    };
+    auto sstore = [&]() {
+        for (int e = 0; e < EA; e++) o(" st.shared.v4.b32 [%%rd9+%d],{%%x%d,%%x%d,%%x%d,%%x%d};", e * (T / CA) * SA, e * 4, e * 4 + 1, e * 4 + 2, e * 4 + 3);
+        for (int e = 0; e < EB; e++) { int x = (EA + e) * 4; o(" @%%vs%d st.shared.v4.b32 [%%sb%d],{%%x%d,%%x%d,%%x%d,%%x%d};", e, e, x, x + 1, x + 2, x + 3); }
+        for (int i = 0; i < ESA; i++) o(" st.shared.v2.f32 [%%ssa%d],{%%ya%d,%%ya%d};", i, i * 2, i * 2 + 1);
+        for (int i = 0; i < ESB; i++) {
+            if (pair) o(" st.shared.v2.f32 [%%ssb%d],{%%yb%d,%%yb%d};", i, i * 2, i * 2 + 1);
+            else o(" st.shared.f32 [%%ssb%d],%%yb%d;", i, i * 2);
+        }
+    };
+    o(" mov.u32 %%r32,0;");
+    gload("%r32");
+    sstore();
+    o(" bar.sync 0;");
+    o("LK:");
+    o(" add.u32 %%r33,%%r32,%d; setp.lt.u32 %%p1,%%r33,%%r3;", BK);
+    o(" @!%%p1 bra NOPF;");
+    gload("%r33");
+    o("NOPF:");
+    for (int b = 0; b < NB; b++) {
+        o(" add.u32 %%r34,%%r32,%d; setp.ge.u32 %%p3,%%r34,%%r3; @%%p3 bra SKIP%d;", b * 32, b);
+        // weight fragments (all FN), unpacked once per block
+        for (int nt = 0; nt < FN; nt++) {
+            if (q4) {
+                o(" ld.shared.b32 %%r36,[%%rd13+%d]; and.b32 %%b%d,%%r36,0x0F0F0F0F; shr.u32 %%r36,%%r36,4; and.b32 %%b%d,%%r36,0x0F0F0F0F;", nt * 8 * SB + b * 16, nt * 2, nt * 2 + 1);
+                if (kind == 0)   // q - 8 per byte without borrows: (q + 0x78) ^ 0x80
+                    for (int h = 0; h < 2; h++) o(" add.u32 %%b%d,%%b%d,0x78787878; xor.b32 %%b%d,%%b%d,0x80808080;", nt * 2 + h, nt * 2 + h, nt * 2 + h, nt * 2 + h);
+            } else if (q6) {   // 48-byte units of two blocks: ql (low 4 bits) at u*48 + half*16, qh (top 2) at u*48 + 32 + half*8
+                const int u = b / 2, half = b % 2, ql = nt * 8 * SB + u * 48 + half * 16, qh = nt * 8 * SB + u * 48 + 32 + half * 8;
+                o(" ld.shared.b32 %%r36,[%%rd13+%d]; ld.shared.b32 %%r37,[%%rd22+%d];", ql, qh);
+                o(" and.b32 %%r73,%%r36,0x0F0F0F0F; shr.u32 %%r74,%%r37,%%r70; and.b32 %%r74,%%r74,0x03030303; shl.b32 %%r74,%%r74,4; or.b32 %%b%d,%%r73,%%r74;", nt * 2);
+                o(" shr.u32 %%r73,%%r36,4; and.b32 %%r73,%%r73,0x0F0F0F0F; shr.u32 %%r74,%%r37,%%r71; and.b32 %%r74,%%r74,0x03030303; shl.b32 %%r74,%%r74,4; or.b32 %%b%d,%%r73,%%r74;", nt * 2 + 1);
+                for (int h = 0; h < 2; h++)   // q - 32 per byte: (q + 0x60) ^ 0x80
+                    o(" add.u32 %%b%d,%%b%d,0x60606060; xor.b32 %%b%d,%%b%d,0x80808080;", nt * 2 + h, nt * 2 + h, nt * 2 + h, nt * 2 + h);
+            } else
+                o(" ld.shared.b32 %%b%d,[%%rd13+%d]; ld.shared.b32 %%b%d,[%%rd13+%d];", nt * 2, nt * 8 * SB + b * 32, nt * 2 + 1, nt * 8 * SB + b * 32 + 16);
+        }
+        for (int k = 0; k < NR; k++) o(" ld.shared.v2.f32 {%%dx%d,%%xs%d},[%%rd15+%d];", k, k, ((k / 2) * 16 + (k % 2) * 8) * SSA + b * 8);
+        for (int k = 0; k < NW; k++) {
+            int off = ((k / 2) * 8 + k % 2) * SSB + b * WB;
+            if (kind == 2) o(" ld.shared.v2.f32 {%%dw%d,%%mw%d},[%%rd10+%d]; neg.f32 %%mw%d,%%mw%d;", k, k, off, k, k);
+            else if (q6) o(" ld.shared.v2.f32 {%%dw%d,%%mw%d},[%%rd10+%d];", k, k, off);   // scales of elements 0..15 and 16..31
+            else o(" ld.shared.f32 %%dw%d,[%%rd10+%d];", k, off);
+        }
+        // one 16-row token fragment at a time: FN int8 mma, then scale into the f32 sums
+        for (int mt = 0; mt < FM; mt++) {
+            int base = mt * 16 * SA + b * 32;
+            o(" ld.shared.b32 %%a0,[%%rd12+%d]; ld.shared.b32 %%a1,[%%rd12+%d]; ld.shared.b32 %%a2,[%%rd12+%d]; ld.shared.b32 %%a3,[%%rd12+%d];",
+              base, base + 8 * SA, base + 16, base + 8 * SA + 16);
+            if (q6) {   // the two 16-element halves have their own scales: two k16 mma, sums in i[0..] and i[FN*4..]
+                for (int nt = 0; nt < FN; nt++) {
+                    const int lo = nt * 4, hi = FN * 4 + nt * 4;
+                    o(" mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%%i%d,%%i%d,%%i%d,%%i%d},{%%a0,%%a1},{%%b%d},{%%r0,%%r0,%%r0,%%r0};", lo, lo + 1, lo + 2, lo + 3, nt * 2);
+                    o(" mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%%i%d,%%i%d,%%i%d,%%i%d},{%%a2,%%a3},{%%b%d},{%%r0,%%r0,%%r0,%%r0};", hi, hi + 1, hi + 2, hi + 3, nt * 2 + 1);
+                }
+                for (int nt = 0; nt < FN; nt++)
+                    for (int h = 0; h < 2; h++)
+                        for (int j = 0; j < 2; j++) {
+                            int ii = nt * 4 + h * 2 + j, ci = (mt * FN + nt) * 4 + h * 2 + j, r = mt * 2 + h, w = nt * 2 + j;
+                            o(" cvt.rn.f32.s32 %%f0,%%i%d; cvt.rn.f32.s32 %%f1,%%i%d; mul.f32 %%f0,%%f0,%%dw%d; fma.rn.f32 %%f0,%%f1,%%mw%d,%%f0; fma.rn.f32 %%c%d,%%f0,%%dx%d,%%c%d;",
+                              ii, FN * 4 + ii, w, w, ci, r, ci);
+                        }
+                continue;
+            }
+            for (int nt = 0; nt < FN; nt++)
+                o(" mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%%i%d,%%i%d,%%i%d,%%i%d},{%%a0,%%a1,%%a2,%%a3},{%%b%d,%%b%d},{%%r0,%%r0,%%r0,%%r0};",
+                  nt * 4, nt * 4 + 1, nt * 4 + 2, nt * 4 + 3, nt * 2, nt * 2 + 1);
+            for (int nt = 0; nt < FN; nt++)
+                for (int h = 0; h < 2; h++)
+                    for (int j = 0; j < 2; j++) {
+                        int ii = nt * 4 + h * 2 + j, ci = (mt * FN + nt) * 4 + h * 2 + j, r = mt * 2 + h, w = nt * 2 + j;
+                        o(" cvt.rn.f32.s32 %%f0,%%i%d; mul.f32 %%f0,%%f0,%%dx%d; fma.rn.f32 %%c%d,%%f0,%%dw%d,%%c%d;", ii, r, ci, w, ci);
+                        if (kind == 2) o(" fma.rn.f32 %%c%d,%%xs%d,%%mw%d,%%c%d;", ci, r, w, ci);
+                    }
+        }
+        o("SKIP%d:", b);
+    }
+    o(" bar.sync 0;");
+    o(" @!%%p1 bra EK;");
+    sstore();
+    o(" bar.sync 0;");
+    o(" mov.u32 %%r32,%%r33; bra LK;");
+    o("EK:");
+    for (int mt = 0; mt < FM; mt++)
+        for (int nt = 0; nt < FN; nt++)
+            for (int h = 0; h < 2; h++) {
+                int ci = (mt * FN + nt) * 4 + h * 2;
+                o(" add.u32 %%r52,%%r16,%%r62; add.u32 %%r52,%%r52,%%r60; add.u32 %%r52,%%r52,%d;", mt * 16 + h * 8);
+                o(" add.u32 %%r53,%%r15,%%r63; shl.b32 %%r54,%%r61,1; add.u32 %%r53,%%r53,%%r54; add.u32 %%r53,%%r53,%d;", nt * 8);
+                o(" setp.lt.u32 %%p4,%%r52,%%r1; setp.lt.u32 %%p5,%%r53,%%r2; and.pred %%p5,%%p5,%%p4; add.u32 %%r55,%%r53,1; setp.lt.u32 %%p6,%%r55,%%r2; and.pred %%p6,%%p6,%%p4;");
+                o(" mad.lo.u32 %%r56,%%r52,%%r2,%%r53; mul.wide.u32 %%rd18,%%r56,4; add.u64 %%rd18,%%rd5,%%rd18;");
+                o(" @%%p5 st.global.f32 [%%rd18],%%c%d; @%%p6 st.global.f32 [%%rd18+4],%%c%d;", ci, ci + 1);
+            }
+    o(" ret;\n}");
+    return o.s;
+}
+
 // Tensor-core GEMMs live in their own module (needs sm_80+); older GPUs keep the SIMT versions.
 std::string gx_ptx_tc() {
-    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_lin_fast("t_linq4", false, false, 1) + gen_lin_fast("t_linq4m", false, false, 2) + gen_flash("t_fa64", 64) + gen_flash("t_fa128", 128) + gen_flash("t_fa72", 72) +
+    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") +
+           gen_mmq("t_mmq0", 0, kMmqTiles[0]) + gen_mmq("t_mmq1", 1, kMmqTiles[0]) + gen_mmq("t_mmq2", 2, kMmqTiles[0]) +
+           gen_mmq("t_mmqs0", 0, kMmqTiles[1]) + gen_mmq("t_mmqs1", 1, kMmqTiles[1]) + gen_mmq("t_mmqs2", 2, kMmqTiles[1]) +
+           gen_mmq("t_mmqg0", 0, kMmqTiles[0], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[0], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[0], true) +
+           gen_mmq("t_mmq3", 3, kMmqTiles[0]) + gen_mmq("t_mmqg3", 3, kMmqTiles[0], true) +   // 6-bit: big tile only
+           gen_flash("t_fa64", 64) + gen_flash("t_fa128", 128) + gen_flash("t_fa72", 72) +
            gen_flash_kv("t_fkv64", 64, 64) + gen_flash_kv("t_fkv80", 80, 80) + gen_flash_kv("t_fkv96", 96, 96) + gen_flash_kv("t_fkv128", 128, 128) + gen_flash_kv("t_fkv256", 256, 128) +
            gen_flash_kv("t_fkq64", 64, 64, true) + gen_flash_kv("t_fkq80", 80, 80, true) + gen_flash_kv("t_fkq96", 96, 96, true) + gen_flash_kv("t_fkq128", 128, 128, true) + gen_flash_kv("t_fkq256", 256, 128, true);
 }

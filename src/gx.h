@@ -65,7 +65,12 @@ public:
     void conv(const GT& x, int Cin, int H, int W, uint64_t Wt, int Cout, int kh, int kw, int stride, int pad, const GT* bias, GT& y, float beta = 0.f, int padw = -1);
     // Chat-engine prompt processing on tensor cores: y[M,N] = x[M,K] W^T with W in the LLM's GPU layout
     // (kind 0 = 4-bit + scale, 1 = int8 + scale, 2 = 4-bit + scale/min pairs). False if unsupported.
-    bool linear_quant(uint64_t x, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t y);
+    bool linear_quant(uint64_t x, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t y, bool same_x = false);
+    // Mixture-of-experts form: x rows grouped by expert, off[E+1] (u32, device) the row ranges; expert e's
+    // scales and quants are e * s_stride / q_stride bytes past S / Q. maxc: most rows of any expert.
+    bool can_group(int kind) const { return f_qx_ && kind >= 0 && kind < 4 && f_mmqg_[kind]; }
+    bool linear_quant_grouped(uint64_t x, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t y,
+                              uint64_t off, int E, int maxc, uint64_t s_stride, uint64_t q_stride, bool same_x = false);   // same_x: x unchanged since the last call
     // Chat-engine prompt attention from the fp16 KV cache (causal, grouped heads, optional window / non-causal block).
     bool attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, int p0, int ldq, int kvd, int heads, int grp, int hd,
                       float scale, int win, int nc, uint64_t Ks = 0, uint64_t Vs = 0);   // Ks/Vs: int8 cache scales
@@ -105,6 +110,7 @@ public:
     void print_profile();
 private:
     void launch_ew(void* fn, size_t n, std::vector<void*> args);
+    bool quantize_x(uint64_t x, int M, int K, bool same_x, uint64_t& xq, uint64_t& xd);
     void gemm(void* fn, uint64_t A, uint64_t B, uint64_t C, uint64_t bias, unsigned M, unsigned N, unsigned K, unsigned lda, unsigned ldb, unsigned ldc,
               unsigned sA, unsigned sB, unsigned sC, float alpha, float beta, unsigned flags, unsigned batch,
               unsigned H = 0, unsigned W = 0, unsigned kh = 1, unsigned kw = 1, unsigned stride = 1, unsigned pad = 0, unsigned Wo = 1, unsigned padw = 0);
@@ -127,7 +133,10 @@ private:
     bool q8_ = false;
     std::unordered_map<uint64_t, uint64_t> q8scale_;   // int8 weight ptr -> f32 row scales
     uint64_t qtmp_ = 0; size_t qtmp_cap_ = 0;
-    void *f_linq8_ = nullptr, *f_q8row_ = nullptr, *f_linh_ = nullptr, *f_linq8h_ = nullptr, *f_fa64_ = nullptr, *f_fa128_ = nullptr, *f_fa72_ = nullptr, *f_linq4_ = nullptr, *f_linq4m_ = nullptr, *f_fkv_[5] = {}, *f_fkq_[5] = {};
+    void *f_linq8_ = nullptr, *f_q8row_ = nullptr, *f_linh_ = nullptr, *f_linq8h_ = nullptr, *f_fa64_ = nullptr, *f_fa128_ = nullptr, *f_fa72_ = nullptr, *f_fkv_[5] = {}, *f_fkq_[5] = {};
+    void *f_qx_ = nullptr, *f_mmq_[4] = {}, *f_mmqs_[4] = {}, *f_mmqg_[4] = {};   // int8 prompt matmuls: big and small tiles
+    int sms_ = 28;
+    uint64_t xq_ = 0, xq_src_ = 0; size_t xq_cap_ = 0; int xq_m_ = 0, xq_k_ = 0;   // int8 prompt activations + their block scales
     bool half_ = false;
     uint64_t place(size_t bytes, bool& resident);
 };

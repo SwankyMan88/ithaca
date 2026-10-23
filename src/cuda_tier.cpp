@@ -44,14 +44,48 @@ static CUresult(CUAPI* cuEventSynchronize)(void*);
 static CUresult(CUAPI* cuLaunchKernel)(void*, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                                        unsigned, void*, void**, void**);
 
+// Q6 GPU blocks (kind K_Q6, from Q6_K): two blocks share a 48-byte unit [ql even 16][ql odd 16][qh even 8][qh odd 8].
+// ql holds the low 4 bits like Q4 (byte j: element j in the low nibble, element j+16 in the high one); qh the top 2 bits:
+// byte j of qh word t>>1 carries element 4t+j in bits s..s+1 and element 16+4t+j in bits s+2..s+3, s = (t&1)*4.
+// Scales: an f16 pair per block, one per 16 elements (Q6_K's sub-block scales times d).
+// q6_load: block `blk` into w[w0..w0+3] (ql) and h[h0], h[h0+1] (qh); zero when `pred` is false.
+static std::string q6_load(const char* Q, const char* blk, const char* pred, const char* w, int w0, const char* h, int h0,
+                           const char* t32, const char* rda, const char* rdb) {
+    char b[700];
+    snprintf(b, sizeof b,
+        " mov.b32 %%%s%d,0; mov.b32 %%%s%d,0; mov.b32 %%%s%d,0; mov.b32 %%%s%d,0; mov.b32 %%%s%d,0; mov.b32 %%%s%d,0;\n"
+        " shr.u32 %%%s,%%%s,1; mul.wide.u32 %%%s,%%%s,48; add.u64 %%%s,%%%s,%%%s; and.b32 %%%s,%%%s,1; shl.b32 %%%s,%%%s,3; cvt.u64.u32 %%%s,%%%s; add.u64 %%%s,%%%s,%%%s;\n"
+        " %s ld.global.nc.v2.u32 {%%%s%d,%%%s%d},[%%%s+32]; add.u64 %%%s,%%%s,%%%s; %s ld.global.nc.v4.u32 {%%%s%d,%%%s%d,%%%s%d,%%%s%d},[%%%s];\n",
+        w, w0, w, w0 + 1, w, w0 + 2, w, w0 + 3, h, h0, h, h0 + 1,
+        t32, blk, rda, t32, rda, Q, rda, t32, blk, t32, t32, rdb, t32, rda, rda, rdb,
+        pred, h, h0, h, h0 + 1, rda, rda, rda, rdb, pred, w, w0, w, w0 + 1, w, w0 + 2, w, w0 + 3, rda);
+    return b;
+}
+// q6_unpack: w[w0..w0+3] + h -> 8 signed int8x4 words w0..w0+7 (elements 0..15, then 16..31), each value q - 32.
+static std::string q6_unpack(const char* w, int w0, const char* h, int h0, const char* ta, const char* tb) {
+    std::string k; char b[400];
+    for (int t = 0; t < 4; t++) {
+        const int s = (t & 1) * 4, hh = h0 + t / 2, lo = w0 + t, hi = w0 + 4 + t;
+        snprintf(b, sizeof b,
+            " shr.u32 %%%s,%%%s%d,%d; and.b32 %%%s,%%%s,0x03030303; shl.b32 %%%s,%%%s,4; shr.u32 %%%s,%%%s%d,%d; and.b32 %%%s,%%%s,0x03030303; shl.b32 %%%s,%%%s,4;\n"
+            " shr.u32 %%%s%d,%%%s%d,4; and.b32 %%%s%d,%%%s%d,0x0F0F0F0F; or.b32 %%%s%d,%%%s%d,%%%s; and.b32 %%%s%d,%%%s%d,0x0F0F0F0F; or.b32 %%%s%d,%%%s%d,%%%s;\n"
+            " add.u32 %%%s%d,%%%s%d,0x60606060; xor.b32 %%%s%d,%%%s%d,0x80808080; add.u32 %%%s%d,%%%s%d,0x60606060; xor.b32 %%%s%d,%%%s%d,0x80808080;\n",
+            ta, h, hh, s, ta, ta, ta, ta, tb, h, hh, s + 2, tb, tb, tb, tb,
+            w, hi, w, lo, w, hi, w, hi, w, hi, w, hi, tb, w, lo, w, lo, w, lo, w, lo, ta,
+            w, lo, w, lo, w, lo, w, lo, w, hi, w, hi, w, hi, w, hi);
+        k += b;
+    }
+    return k;
+}
+
 // Kernels are generated as PTX text here and JIT-compiled by the driver.
-// GPU weight layout (repacked at upload): [f32 scale per block][pad][quants, 16 B (Q4) or 32 B (Q8) per block].
+// GPU weight layout (repacked at upload): [f16 scale per block, or f16 (scale, min) pair for Q4M][pad][quants, 16 B (Q4) or 32 B (Q8) per block].
 // Activations are quantized to int8 blocks on the GPU first (k_quant), then rows are dotted with dp4a.
 // 8 warps per CTA, one warp per output row, 8 tokens per CTA so small batches reuse each weight load.
 static const int kTokTile = 8;   // tokens per CTA: draft checks (<= 8 tokens) read each weight once
 static const int kRows = 4;   // output rows per warp: each activation block loaded once serves all of them
-static std::string gen_kernel(const char* name, int mode) {
-    const bool q4 = mode != 0, qm = mode == 2;
+static std::string gen_kernel(const char* name, int mode, int tt = kTokTile) {   // tt: tokens per CTA
+    const bool q4 = mode == 1 || mode == 2, qm = mode == 2, q6 = mode == 3, pair = qm || q6;
     const int NW = q4 ? 4 : 8;   // weight registers per row block (packed nibbles are unpacked in place below)
     std::string k;
     char b[400];
@@ -59,7 +93,7 @@ static std::string gen_kernel(const char* name, int mode) {
     L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
       " .param .u32 pC, .param .u32 pR, .param .u32 pN)", name);
     L("{\n .reg .pred %%p<8>; .reg .pred %%pt<8>; .reg .pred %%pr<%d>; .reg .b32 %%r<96>; .reg .b32 %%w<%d>; .reg .b32 %%x<8>; .reg .f32 %%f<16>;"
-      " .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .b64 %%rd<24>;", kRows, kRows * 8, kRows, kRows, kTokTile * kRows);
+      " .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .b64 %%rd<24>; .reg .b16 %%hs<2>; .reg .b32 %%hw; .reg .b32 %%qh<%d>;", kRows, kRows * 8, kRows, kRows, tt * kRows, kRows * 2);
     k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
     k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR]; ld.param.u32 %r3,[pN];\n";
     k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";                         // warp, lane
@@ -69,7 +103,7 @@ static std::string gen_kernel(const char* name, int mode) {
     k += " shr.u32 %r9,%r1,5;\n";                                                                    // nb
     for (int j = 0; j < kRows; j++)
         L(" add.u32 %%r%d,%%r7,%d; setp.lt.u32 %%pr%d,%%r%d,%%r2; mul.lo.u32 %%r%d,%%r%d,%%r9;", 60 + j, j, j, 60 + j, 64 + j, 60 + j);   // row j, row*nb
-    for (int t = 0; t < kTokTile; t++) {
+    for (int t = 0; t < tt; t++) {
         L(" add.u32 %%r%d,%%r8,%d; setp.lt.u32 %%pt%d,%%r%d,%%r3; mul.lo.u32 %%r%d,%%r%d,%%r9;", 40 + t, t, t, 40 + t, 50 + t, 40 + t);
         for (int j = 0; j < kRows; j++) L(" mov.f32 %%a%d,0f00000000;", t * kRows + j);
     }
@@ -79,16 +113,17 @@ static std::string gen_kernel(const char* name, int mode) {
         const int w0 = j * 8;
         L(" add.u32 %%r12,%%r%d,%%r11; mov.f32 %%sc%d,0f00000000; mov.f32 %%mn%d,0f00000000;", 64 + j, j, j);
         for (int i = 0; i < 8; i++) L(" mov.b32 %%w%d,0;", w0 + i);
-        if (qm) L(" mul.wide.u32 %%rd7,%%r12,8; add.u64 %%rd7,%%rd1,%%rd7; @%%pr%d ld.global.nc.v2.f32 {%%sc%d,%%mn%d},[%%rd7];", j, j, j);
-        else L(" mul.wide.u32 %%rd7,%%r12,4; add.u64 %%rd7,%%rd1,%%rd7; @%%pr%d ld.global.nc.f32 %%sc%d,[%%rd7];", j, j);
-        if (q4) L(" mul.wide.u32 %%rd8,%%r12,16; add.u64 %%rd8,%%rd2,%%rd8; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8];", j, w0, w0 + 1, w0 + 2, w0 + 3);
+        if (pair) L(" mul.wide.u32 %%rd7,%%r12,4; add.u64 %%rd7,%%rd1,%%rd7; mov.b32 %%hw,0; @%%pr%d ld.global.nc.b32 %%hw,[%%rd7]; mov.b32 {%%hs0,%%hs1},%%hw; cvt.f32.f16 %%sc%d,%%hs0; cvt.f32.f16 %%mn%d,%%hs1;", j, j, j);
+        else L(" mul.wide.u32 %%rd7,%%r12,2; add.u64 %%rd7,%%rd1,%%rd7; mov.b16 %%hs0,0; @%%pr%d ld.global.nc.b16 %%hs0,[%%rd7]; cvt.f32.f16 %%sc%d,%%hs0;", j, j);
+        if (q6) { char pr[16]; snprintf(pr, sizeof pr, "@%%pr%d", j); k += q6_load("rd2", "r12", pr, "w", w0, "qh", j * 2, "r90", "rd20", "rd21"); k += q6_unpack("w", w0, "qh", j * 2, "r91", "r92"); }
+        else if (q4) L(" mul.wide.u32 %%rd8,%%r12,16; add.u64 %%rd8,%%rd2,%%rd8; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8];", j, w0, w0 + 1, w0 + 2, w0 + 3);
         else L(" mul.wide.u32 %%rd8,%%r12,32; add.u64 %%rd8,%%rd2,%%rd8; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8]; @%%pr%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd8+16];",
                j, w0, w0 + 1, w0 + 2, w0 + 3, j, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
         if (q4)   // nibbles: w0-3 = low (elements 0..15), w4-7 = high (16..31)
             for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", w0 + 4 + i, w0 + i, w0 + 4 + i, w0 + 4 + i, w0 + i, w0 + i);
     }
     (void)NW;
-    for (int t = 0; t < kTokTile; t++) {
+    for (int t = 0; t < tt; t++) {
         L(" @!%%pt%d bra SKIP%d;", t, t);
         L(" add.u32 %%r13,%%r%d,%%r11;", 50 + t);
         k += " mul.wide.u32 %rd9,%r13,32; add.u64 %rd9,%rd3,%rd9; ld.global.v4.u32 {%x0,%x1,%x2,%x3},[%rd9]; ld.global.v4.u32 {%x4,%x5,%x6,%x7},[%rd9+16];\n";
@@ -96,6 +131,12 @@ static std::string gen_kernel(const char* name, int mode) {
         if (qm) k += " cvt.rn.f32.s32 %f10,%r14;\n";
         for (int j = 0; j < kRows; j++) {
             const int w0 = j * 8, acc = t * kRows + j;
+            if (q6) {   // two 16-element halves, each with its own scale
+                k += " mov.u32 %r15,0; mov.u32 %r17,0;\n";
+                for (int i = 0; i < 8; i++) L(" dp4a.s32.s32 %%r%d,%%w%d,%%x%d,%%r%d;", i < 4 ? 15 : 17, w0 + i, i, i < 4 ? 15 : 17);
+                L(" cvt.rn.f32.s32 %%f3,%%r15; cvt.rn.f32.s32 %%f4,%%r17; mul.f32 %%f3,%%f3,%%sc%d; fma.rn.f32 %%f3,%%f4,%%mn%d,%%f3; fma.rn.f32 %%a%d,%%f3,%%f2,%%a%d;", j, j, acc, acc);
+                continue;
+            }
             k += " mov.u32 %r15,0;\n";
             for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", w0 + i, i);
             if (qm) L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%sc%d; mul.f32 %%f4,%%f10,%%mn%d; sub.f32 %%f3,%%f3,%%f4; fma.rn.f32 %%a%d,%%f3,%%f2,%%a%d;", j, j, acc, acc);
@@ -107,14 +148,88 @@ static std::string gen_kernel(const char* name, int mode) {
         L("SKIP%d:", t);
     }
     k += " add.u32 %r11,%r11,32; bra LOOP;\nEND:\n";
-    for (int t = 0; t < kTokTile; t++)
+    for (int t = 0; t < tt; t++)
         for (int j = 0; j < kRows; j++)
             for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f8,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f8;", t * kRows + j, o, t * kRows + j, t * kRows + j);
     k += " setp.ne.u32 %p3,%r6,0; @%p3 bra DONE;\n";
-    for (int t = 0; t < kTokTile; t++)
+    for (int t = 0; t < tt; t++)
         for (int j = 0; j < kRows; j++)
             L(" and.pred %%p4,%%pt%d,%%pr%d; @%%p4 mad.lo.u32 %%r16,%%r%d,%%r2,%%r%d; @%%p4 mul.wide.u32 %%rd13,%%r16,4; @%%p4 add.u64 %%rd13,%%rd6,%%rd13; @%%p4 st.global.f32 [%%rd13],%%a%d;",
               t, j, 40 + t, 60 + j, t * kRows + j);
+    k += "DONE:\n ret;\n}\n";
+    return k;
+}
+
+// Single-token matvec (decode). Memory-bound, so each lane issues the loads for U blocks of all R rows
+// before using any of them; R rows per warp share each activation block.
+static const int kMv1Unroll = 2;
+static std::string gen_mv1(const char* name, int mode, int R) {   // R: rows per warp (1 for small matrices, so there are enough CTAs)
+    const bool q4 = mode == 1 || mode == 2, qm = mode == 2, q6 = mode == 3, pair = qm || q6;
+    const int U = kMv1Unroll;
+    std::string k;
+    char b[400];
+    auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
+    L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
+      " .param .u32 pC, .param .u32 pR, .param .u32 pN)", name);
+    L("{\n .reg .pred %%p<8>; .reg .pred %%pu<%d>; .reg .pred %%pr<%d>; .reg .pred %%pw<%d>; .reg .b32 %%r<32>; .reg .b32 %%ro<%d>; .reg .b32 %%w<%d>; .reg .b32 %%x<%d>;",
+      U, R, U * R, R, U * R * 8, U * 8);
+    L(" .reg .b32 %%xs<%d>; .reg .f32 %%xd<%d>; .reg .f32 %%xf<%d>; .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .f32 %%f<8>; .reg .b64 %%rd<16>; .reg .b16 %%hs<2>; .reg .b32 %%hw; .reg .b32 %%qh<%d>;",
+      U, U, U, U * R, U * R, R, U * R * 2);
+    k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
+    k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR];\n";
+    k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";   // warp, lane
+    L(" mov.u32 %%r7,%%ctaid.x; mul.lo.u32 %%r7,%%r7,%d; mad.lo.u32 %%r7,%%r5,%d,%%r7;", 8 * R, R);   // first row of this warp
+    k += " setp.ge.u32 %p1,%r7,%r2; @%p1 bra DONE;\n shr.u32 %r9,%r1,5;\n";   // nb
+    for (int j = 0; j < R; j++)
+        L(" add.u32 %%r10,%%r7,%d; setp.lt.u32 %%pr%d,%%r10,%%r2; mul.lo.u32 %%ro%d,%%r10,%%r9; mov.f32 %%a%d,0f00000000;", j, j, j, j);
+    k += " mov.u32 %r11,%r6;\nLOOP:\n setp.ge.u32 %p2,%r11,%r9; @%p2 bra END;\n";
+    for (int u = 0; u < U; u++) {   // issue every load of this step
+        L(" add.u32 %%r12,%%r11,%d; setp.lt.u32 %%pu%d,%%r12,%%r9;", u * 32, u);
+        for (int i = 0; i < 8; i++) L(" mov.b32 %%x%d,0;", u * 8 + i);
+        L(" mov.f32 %%xd%d,0f00000000; mov.b32 %%xs%d,0;", u, u);
+        L(" mul.wide.u32 %%rd7,%%r12,32; add.u64 %%rd7,%%rd3,%%rd7; @%%pu%d ld.global.nc.v4.u32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd7]; @%%pu%d ld.global.nc.v4.u32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd7+16];",
+          u, u * 8, u * 8 + 1, u * 8 + 2, u * 8 + 3, u, u * 8 + 4, u * 8 + 5, u * 8 + 6, u * 8 + 7);
+        L(" mul.wide.u32 %%rd8,%%r12,4; add.u64 %%rd9,%%rd4,%%rd8; @%%pu%d ld.global.nc.f32 %%xd%d,[%%rd9]; add.u64 %%rd9,%%rd5,%%rd8; @%%pu%d ld.global.nc.s32 %%xs%d,[%%rd9];", u, u, u, u);
+        for (int j = 0; j < R; j++) {
+            const int s = u * R + j, w0 = s * 8;
+            L(" and.pred %%pw%d,%%pu%d,%%pr%d; add.u32 %%r13,%%ro%d,%%r12; mov.f32 %%sc%d,0f00000000; mov.f32 %%mn%d,0f00000000;", s, u, j, j, s, s);
+            for (int i = 0; i < 8; i++) L(" mov.b32 %%w%d,0;", w0 + i);
+            if (pair) L(" mul.wide.u32 %%rd10,%%r13,4; add.u64 %%rd10,%%rd1,%%rd10; mov.b32 %%hw,0; @%%pw%d ld.global.nc.b32 %%hw,[%%rd10]; mov.b32 {%%hs0,%%hs1},%%hw; cvt.f32.f16 %%sc%d,%%hs0; cvt.f32.f16 %%mn%d,%%hs1;", s, s, s);
+            else L(" mul.wide.u32 %%rd10,%%r13,2; add.u64 %%rd10,%%rd1,%%rd10; mov.b16 %%hs0,0; @%%pw%d ld.global.nc.b16 %%hs0,[%%rd10]; cvt.f32.f16 %%sc%d,%%hs0;", s, s);
+            if (q6) { char pr[16]; snprintf(pr, sizeof pr, "@%%pw%d", s); k += q6_load("rd2", "r13", pr, "w", w0, "qh", s * 2, "r20", "rd13", "rd14"); }
+            else if (q4) L(" mul.wide.u32 %%rd11,%%r13,16; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11];", s, w0, w0 + 1, w0 + 2, w0 + 3);
+            else L(" mul.wide.u32 %%rd11,%%r13,32; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11]; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11+16];",
+                   s, w0, w0 + 1, w0 + 2, w0 + 3, s, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
+        }
+    }
+    for (int u = 0; u < U; u++) {   // then use them
+        if (qm) L(" cvt.rn.f32.s32 %%xf%d,%%xs%d;", u, u);
+        for (int j = 0; j < R; j++) {
+            const int s = u * R + j, w0 = s * 8;
+            if (q4)   // nibbles: w0-3 = low (elements 0..15), w4-7 = high (16..31)
+                for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", w0 + 4 + i, w0 + i, w0 + 4 + i, w0 + 4 + i, w0 + i, w0 + i);
+            if (q6) {   // two 16-element halves, each with its own scale
+                k += q6_unpack("w", w0, "qh", s * 2, "r21", "r22");
+                k += " mov.u32 %r15,0; mov.u32 %r17,0;\n";
+                for (int i = 0; i < 8; i++) L(" dp4a.s32.s32 %%r%d,%%w%d,%%x%d,%%r%d;", i < 4 ? 15 : 17, w0 + i, u * 8 + i, i < 4 ? 15 : 17);
+                L(" cvt.rn.f32.s32 %%f3,%%r15; cvt.rn.f32.s32 %%f4,%%r17; mul.f32 %%f3,%%f3,%%sc%d; fma.rn.f32 %%f3,%%f4,%%mn%d,%%f3; fma.rn.f32 %%a%d,%%f3,%%xd%d,%%a%d;", s, s, j, u, j);
+                continue;
+            }
+            k += " mov.u32 %r15,0;\n";
+            for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", w0 + i, u * 8 + i);
+            if (qm) L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%sc%d; mul.f32 %%f4,%%xf%d,%%mn%d; sub.f32 %%f3,%%f3,%%f4; fma.rn.f32 %%a%d,%%f3,%%xd%d,%%a%d;", s, u, s, j, u, j);
+            else {
+                if (q4) L(" mad.lo.s32 %%r15,%%xs%d,-8,%%r15;", u);
+                L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%xd%d; fma.rn.f32 %%a%d,%%f3,%%sc%d,%%a%d;", u, j, s, j);
+            }
+        }
+    }
+    L(" add.u32 %%r11,%%r11,%d; bra LOOP;\nEND:", 32 * U);
+    for (int j = 0; j < R; j++)
+        for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f5,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f5;", j, o, j, j);
+    k += " setp.ne.u32 %p3,%r6,0; @%p3 bra DONE;\n";
+    for (int j = 0; j < R; j++)
+        L(" add.u32 %%r16,%%r7,%d; mul.wide.u32 %%rd12,%%r16,4; add.u64 %%rd12,%%rd6,%%rd12; @%%pr%d st.global.f32 [%%rd12],%%a%d;", j, j, j);
     k += "DONE:\n ret;\n}\n";
     return k;
 }
@@ -127,12 +242,12 @@ static std::string gen_cv(int mode) {
     std::string k; char b[400];
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
     L(".visible .entry %s(.param .u64 pSrc, .param .u64 pS, .param .u64 pQ, .param .u64 pM, .param .u32 pN, .param .u32 pB0)", kCvNames[mode]);
-    k += "{\n .reg .pred %p<8>; .reg .b32 %r<64>; .reg .b64 %rd<32>; .reg .f32 %f<32>; .reg .b16 %h<4>;\n";
+    k += "{\n .reg .pred %p<8>; .reg .b32 %r<64>; .reg .b64 %rd<32>; .reg .f32 %f<32>; .reg .b16 %h<8>;\n";
     k += " ld.param.u64 %rd1,[pSrc]; ld.param.u64 %rd2,[pS]; ld.param.u64 %rd3,[pQ]; ld.param.u64 %rd4,[pM]; ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pB0];\n";
     k += " mov.u32 %r3,%tid.x; shr.u32 %r4,%r3,5; and.b32 %r5,%r3,31;\n";
     k += " mov.u32 %r6,%ctaid.x; shl.b32 %r6,%r6,3; add.u32 %r6,%r6,%r4; setp.ge.u32 %p1,%r6,%r1; @%p1 bra DONE;\n";
     k += " add.u32 %r7,%r6,%r2; setp.eq.u32 %p2,%r5,0; cvt.u64.u32 %rd30,%r5;\n";   // global block, lane 0, lane (64-bit)
-    k += " mul.wide.u32 %rd5,%r7,4; add.u64 %rd5,%rd2,%rd5;\n";                       // &S[gb]
+    k += " mul.wide.u32 %rd5,%r7,2; add.u64 %rd5,%rd2,%rd5;\n";                       // &S[gb] (f16)
     auto kscale = [&](const char* base) {   // Q4_K/Q5_K 6-bit scale and min of sub-block j (%r21) -> %r24 sc, %r25 m
         L(" add.u64 %%rd10,%s,4; and.b32 %%r22,%%r21,3; cvt.u64.u32 %%rd11,%%r21; add.u64 %%rd12,%%rd10,%%rd11; ld.global.u8 %%r26,[%%rd12]; ld.global.u8 %%r27,[%%rd12+4];", base);
         k += " cvt.u64.u32 %rd13,%r22; add.u64 %rd13,%rd10,%rd13; ld.global.u8 %r28,[%rd13];\n";   // s[j], s[j+4], s[j&3]
@@ -146,13 +261,13 @@ static std::string gen_cv(int mode) {
         L(" mul.wide.u32 %%rd6,%%r6,%d; add.u64 %%rd6,%%rd1,%%rd6;", sz);
         L(" setp.lt.u32 %%p3,%%r5,%d; @!%%p3 bra NOQ; add.u64 %%rd7,%%rd6,%%rd30; ld.global.u8 %%r8,[%%rd7+2];", nq);
         L(" mul.wide.u32 %%rd8,%%r7,%d; add.u64 %%rd8,%%rd3,%%rd8; add.u64 %%rd8,%%rd8,%%rd30; st.global.u8 [%%rd8],%%r8;", nq);
-        k += "NOQ:\n @!%p2 bra DONE; ld.global.b16 %h1,[%rd6]; cvt.f32.f16 %f1,%h1; st.global.f32 [%rd5],%f1;\n";
+        k += "NOQ:\n @!%p2 bra DONE; ld.global.b16 %h1,[%rd6]; st.global.b16 [%rd5],%h1;\n";
     } else if (mode == 8) {   // Q4_1: value = d*q + m  ->  S = d, M = -m
         k += " mul.wide.u32 %rd6,%r6,20; add.u64 %rd6,%rd1,%rd6;\n";
         k += " setp.lt.u32 %p3,%r5,16; @!%p3 bra NOQ; add.u64 %rd7,%rd6,%rd30; ld.global.u8 %r8,[%rd7+4];\n";
         k += " mul.wide.u32 %rd8,%r7,16; add.u64 %rd8,%rd3,%rd8; add.u64 %rd8,%rd8,%rd30; st.global.u8 [%rd8],%r8;\n";
         k += "NOQ:\n @!%p2 bra DONE; ld.global.b16 %h1,[%rd6]; cvt.f32.f16 %f1,%h1; ld.global.b16 %h2,[%rd6+2]; cvt.f32.f16 %f2,%h2; neg.f32 %f2,%f2;\n";
-        k += " mul.wide.u32 %rd9,%r7,8; add.u64 %rd9,%rd2,%rd9; st.global.v2.f32 [%rd9],{%f1,%f2};\n";
+        k += " cvt.rn.f16.f32 %h3,%f1; cvt.rn.f16.f32 %h4,%f2; mul.wide.u32 %rd9,%r7,4; add.u64 %rd9,%rd2,%rd9; st.global.v2.b16 [%rd9],{%h3,%h4};\n";
     } else if (mode == 2) {
         k += " shr.u32 %r20,%r6,3; and.b32 %r21,%r6,7; mul.wide.u32 %rd6,%r20,144; add.u64 %rd6,%rd1,%rd6;\n";
         k += " shr.u32 %r9,%r21,1; shl.b32 %r9,%r9,5; add.u32 %r9,%r9,%r5; cvt.u64.u32 %rd7,%r9; add.u64 %rd7,%rd6,%rd7; ld.global.u8 %r10,[%rd7+16];\n";
@@ -163,7 +278,7 @@ static std::string gen_cv(int mode) {
         kscale("%rd6");
         k += " ld.global.b16 %h1,[%rd6]; cvt.f32.f16 %f1,%h1; ld.global.b16 %h2,[%rd6+2]; cvt.f32.f16 %f2,%h2;\n";
         k += " cvt.rn.f32.u32 %f3,%r24; mul.f32 %f3,%f3,%f1; cvt.rn.f32.u32 %f4,%r25; mul.f32 %f4,%f4,%f2;\n";
-        k += " mul.wide.u32 %rd9,%r7,8; add.u64 %rd9,%rd2,%rd9; st.global.v2.f32 [%rd9],{%f3,%f4};\n";
+        k += " cvt.rn.f16.f32 %h3,%f3; cvt.rn.f16.f32 %h4,%f4; mul.wide.u32 %rd9,%r7,4; add.u64 %rd9,%rd2,%rd9; st.global.v2.b16 [%rd9],{%h3,%h4};\n";
     } else {
         // compute this lane's value into %f10
         if (mode == 3) {
@@ -177,7 +292,19 @@ static std::string gen_cv(int mode) {
             k += " shl.b32 %r16,%r22,3; shr.u32 %r17,%r5,4; add.u32 %r16,%r16,%r17; shl.b32 %r17,%r23,1; add.u32 %r16,%r16,%r17;\n";
             k += " cvt.u64.u32 %rd9,%r16; add.u64 %rd9,%rd6,%rd9; ld.global.s8 %r18,[%rd9+192];\n";
             k += " ld.global.b16 %h1,[%rd6+208]; cvt.f32.f16 %f1,%h1;\n";
-            k += " mul.lo.s32 %r19,%r18,%r11; cvt.rn.f32.s32 %f10,%r19; mul.f32 %f10,%f10,%f1;\n";
+            // native 6-bit: u = q + 32 per lane (element), scale d*sc per 16 elements
+            k += " add.s32 %r41,%r11,32; shfl.sync.down.b32 %r42,%r41,16,31,0xffffffff;\n";                // u, u of element +16
+            k += " shr.u32 %r43,%r41,4; shr.u32 %r44,%r42,4; shl.b32 %r44,%r44,2; or.b32 %r45,%r43,%r44;\n"; // top bits of both
+            k += " shfl.sync.down.b32 %r46,%r45,4,31,0xffffffff; shl.b32 %r46,%r46,4; or.b32 %r47,%r45,%r46;\n";
+            k += " cvt.rn.f32.s32 %f20,%r18; mul.f32 %f20,%f20,%f1; shfl.sync.down.b32 %f21,%f20,16,31,0xffffffff;\n";
+            k += " shr.u32 %r48,%r7,1; mul.wide.u32 %rd20,%r48,48; add.u64 %rd20,%rd3,%rd20; and.b32 %r49,%r7,1;\n";   // unit base, odd block
+            k += " setp.lt.u32 %p5,%r5,16; @!%p5 bra Q6S;\n";
+            k += " and.b32 %r50,%r41,15; and.b32 %r51,%r42,15; shl.b32 %r51,%r51,4; or.b32 %r50,%r50,%r51;\n";
+            k += " shl.b32 %r52,%r49,4; add.u32 %r52,%r52,%r5; cvt.u64.u32 %rd21,%r52; add.u64 %rd21,%rd20,%rd21; st.global.u8 [%rd21],%r50;\n";
+            k += " and.b32 %r53,%r5,4; setp.ne.u32 %p6,%r53,0; @%p6 bra Q6S;\n";
+            k += " shl.b32 %r52,%r49,3; shr.u32 %r54,%r5,3; shl.b32 %r54,%r54,2; add.u32 %r52,%r52,%r54; and.b32 %r54,%r5,3; add.u32 %r52,%r52,%r54;\n";
+            k += " cvt.u64.u32 %rd21,%r52; add.u64 %rd21,%rd20,%rd21; st.global.u8 [%rd21+32],%r47;\n";
+            k += "Q6S:\n @!%p2 bra DONE; cvt.rn.f16.f32 %h3,%f20; cvt.rn.f16.f32 %h4,%f21; mul.wide.u32 %rd22,%r7,4; add.u64 %rd22,%rd2,%rd22; st.global.v2.b16 [%rd22],{%h3,%h4}; bra DONE;\n";
         } else if (mode == 4) {
             k += " shr.u32 %r20,%r6,3; and.b32 %r21,%r6,7; mul.wide.u32 %rd6,%r20,176; add.u64 %rd6,%rd1,%rd6;\n";
             k += " shr.u32 %r9,%r21,1; shl.b32 %r9,%r9,5; add.u32 %r9,%r9,%r5; cvt.u64.u32 %rd7,%r9; add.u64 %rd7,%rd6,%rd7; ld.global.u8 %r10,[%rd7+48];\n";
@@ -210,7 +337,7 @@ static std::string gen_cv(int mode) {
         k += " mul.f32 %f13,%f11,0f3C010204; setp.gt.f32 %p4,%f11,0f00000000; div.rn.f32 %f14,0f42FE0000,%f11; selp.f32 %f14,%f14,0f00000000,%p4;\n";
         k += " mul.f32 %f15,%f10,%f14; cvt.rni.s32.f32 %r40,%f15;\n";
         k += " mul.wide.u32 %rd15,%r7,32; add.u64 %rd15,%rd3,%rd15; add.u64 %rd15,%rd15,%rd30; st.global.s8 [%rd15],%r40;\n";
-        k += " @%p2 st.global.f32 [%rd5],%f13;\n";
+        k += " cvt.rn.f16.f32 %h3,%f13; @%p2 st.global.b16 [%rd5],%h3;\n";
     }
     k += "DONE:\n ret;\n}\n";
     return k;
@@ -219,12 +346,12 @@ static std::string gen_cv(int mode) {
 // Expert matmul (decode): grid = (ceil(R/8), slots), 256 threads, one warp per output row.
 // Row r of slot s reads expert ids[s]: weight block index = (ids[s]*R + r)*nb + b; input row = s*xstep.
 static std::string gen_kernel_ex(const char* name, int mode) {
-    const bool q4 = mode != 0, qm = mode == 2;
+    const bool q4 = mode == 1 || mode == 2, qm = mode == 2, q6 = mode == 3, pair = qm || q6;
     std::string k; char b[320];
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
     L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
       " .param .u32 pC, .param .u32 pR, .param .u64 pE, .param .u32 pXST)", name);
-    k += "{\n .reg .pred %p<4>; .reg .b32 %r<40>; .reg .b32 %w<8>; .reg .b32 %x<8>; .reg .f32 %f<24>; .reg .b64 %rd<24>;\n";
+    k += "{\n .reg .pred %p<4>; .reg .b32 %r<40>; .reg .b32 %w<8>; .reg .b32 %x<8>; .reg .f32 %f<24>; .reg .b64 %rd<24>; .reg .b16 %hs<2>; .reg .b32 %qh<2>;\n";
     k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
     k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR]; ld.param.u64 %rd15,[pE]; ld.param.u32 %r3,[pXST];\n";
     k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";
@@ -236,20 +363,27 @@ static std::string gen_kernel_ex(const char* name, int mode) {
     k += " mov.f32 %f20,0f00000000; mov.u32 %r11,%r6;\n";
     k += "LOOP:\n setp.ge.u32 %p2,%r11,%r9; @%p2 bra END;\n";
     k += " add.u32 %r12,%r10,%r11;\n";
-    if (qm) k += " mul.wide.u32 %rd7,%r12,8; add.u64 %rd7,%rd1,%rd7; ld.global.nc.v2.f32 {%f1,%f9},[%rd7];\n";
-    else k += " mul.wide.u32 %rd7,%r12,4; add.u64 %rd7,%rd1,%rd7; ld.global.nc.f32 %f1,[%rd7];\n";
-    if (q4) k += " mul.wide.u32 %rd8,%r12,16; add.u64 %rd8,%rd2,%rd8; ld.global.nc.v4.u32 {%w0,%w1,%w2,%w3},[%rd8];\n";
+    if (pair) k += " mul.wide.u32 %rd7,%r12,4; add.u64 %rd7,%rd1,%rd7; ld.global.nc.v2.b16 {%hs0,%hs1},[%rd7]; cvt.f32.f16 %f1,%hs0; cvt.f32.f16 %f9,%hs1;\n";
+    else k += " mul.wide.u32 %rd7,%r12,2; add.u64 %rd7,%rd1,%rd7; ld.global.nc.b16 %hs0,[%rd7]; cvt.f32.f16 %f1,%hs0;\n";
+    if (q6) k += q6_load("rd2", "r12", "", "w", 0, "qh", 0, "r30", "rd17", "rd18") + q6_unpack("w", 0, "qh", 0, "r31", "r32");
+    else if (q4) k += " mul.wide.u32 %rd8,%r12,16; add.u64 %rd8,%rd2,%rd8; ld.global.nc.v4.u32 {%w0,%w1,%w2,%w3},[%rd8];\n";
     else k += " mul.wide.u32 %rd8,%r12,32; add.u64 %rd8,%rd2,%rd8; ld.global.nc.v4.u32 {%w0,%w1,%w2,%w3},[%rd8]; ld.global.nc.v4.u32 {%w4,%w5,%w6,%w7},[%rd8+16];\n";
     if (q4) for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", 4 + i, i, 4 + i, 4 + i, i, i);
     k += " add.u32 %r13,%r24,%r11;\n";
     k += " mul.wide.u32 %rd9,%r13,32; add.u64 %rd9,%rd3,%rd9; ld.global.v4.u32 {%x0,%x1,%x2,%x3},[%rd9]; ld.global.v4.u32 {%x4,%x5,%x6,%x7},[%rd9+16];\n";
     k += " mul.wide.u32 %rd10,%r13,4; add.u64 %rd11,%rd4,%rd10; ld.global.f32 %f2,[%rd11]; add.u64 %rd12,%rd5,%rd10; ld.global.s32 %r14,[%rd12];\n";
+    if (q6) {
+        k += " mov.u32 %r15,0; mov.u32 %r17,0;\n";
+        for (int i = 0; i < 8; i++) L(" dp4a.s32.s32 %%r%d,%%w%d,%%x%d,%%r%d;", i < 4 ? 15 : 17, i, i, i < 4 ? 15 : 17);
+        k += " cvt.rn.f32.s32 %f3,%r15; cvt.rn.f32.s32 %f4,%r17; mul.f32 %f3,%f3,%f1; fma.rn.f32 %f3,%f4,%f9,%f3; fma.rn.f32 %f20,%f3,%f2,%f20;\n";
+    } else {
     k += " mov.u32 %r15,0;\n";
     for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", i, i);
     if (qm) k += " cvt.rn.f32.s32 %f3,%r15; mul.f32 %f3,%f3,%f1; cvt.rn.f32.s32 %f10,%r14; mul.f32 %f10,%f10,%f9; sub.f32 %f3,%f3,%f10; fma.rn.f32 %f20,%f3,%f2,%f20;\n";
     else {
         if (q4) k += " mad.lo.s32 %r15,%r14,-8,%r15;\n";
         k += " cvt.rn.f32.s32 %f3,%r15; mul.f32 %f3,%f3,%f2; fma.rn.f32 %f20,%f3,%f1,%f20;\n";
+    }
     }
     k += " add.u32 %r11,%r11,32; bra LOOP;\nEND:\n";
     for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f8,%%f20,%d,31,0xffffffff; add.f32 %%f20,%%f20,%%f8;", o);
@@ -266,6 +400,8 @@ static const char* kTopkPTX =
     " mov.u32 %r1,%tid.x; setp.ne.u32 %p1,%r1,0; @%p1 bra DONE;\n"
     " ld.param.u64 %rd1,[pL]; ld.param.u32 %r2,[pE]; ld.param.u32 %r3,[pK]; ld.param.u32 %r4,[pNorm]; ld.param.f32 %f1,[pScale];\n"
     " ld.param.u64 %rd2,[pI]; ld.param.u64 %rd3,[pW];\n"
+    " mov.u32 %r20,%ctaid.x; mul.lo.u32 %r21,%r20,%r2; mul.wide.u32 %rd10,%r21,4; add.u64 %rd1,%rd1,%rd10;\n"   // token = CTA
+    " mul.lo.u32 %r21,%r20,%r3; mul.wide.u32 %rd10,%r21,4; add.u64 %rd2,%rd2,%rd10; add.u64 %rd3,%rd3,%rd10;\n"
     // max and sum of exp
     " mov.f32 %f2,0fF149F2CA; mov.u32 %r5,0;\n"
     "M1:\n setp.ge.u32 %p2,%r5,%r2; @%p2 bra M1E; mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd1,%rd5; ld.global.f32 %f3,[%rd5]; max.f32 %f2,%f2,%f3;\n"
@@ -287,6 +423,23 @@ static const char* kTopkPTX =
     " setp.ne.u32 %p6,%r4,0; selp.f32 %f8,%f5,%f4,%p6; div.rn.f32 %f9,%f1,%f8; mov.u32 %r7,0;\n"
     "K3:\n setp.ge.u32 %p3,%r7,%r3; @%p3 bra DONE; mul.wide.u32 %rd7,%r7,4; add.u64 %rd9,%rd3,%rd7; ld.global.f32 %f10,[%rd9]; mul.f32 %f10,%f10,%f9; st.global.f32 [%rd9],%f10;\n"
     " add.u32 %r7,%r7,1; bra K3;\n"
+    "DONE:\n ret;\n}\n"
+    // Counting sort of N (token, expert) pairs (token-major ids I / weights W, K per token) by expert, one CTA of 1024:
+    // Off[E+1] row ranges per expert, SI = token of each sorted row, SW its weight. E <= 256.
+    ".visible .entry k_moe_sort(.param .u64 pI, .param .u64 pW, .param .u32 pN, .param .u32 pE, .param .u32 pK, .param .u64 pOff, .param .u64 pSI, .param .u64 pSW)\n{\n"
+    " .reg .pred %p<4>; .reg .b32 %r<24>; .reg .f32 %f<4>; .reg .b64 %rd<16>; .shared .align 4 .b32 cnt[256]; .shared .align 4 .b32 cur[256];\n"
+    " ld.param.u64 %rd1,[pI]; ld.param.u64 %rd2,[pW]; ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pE]; ld.param.u32 %r3,[pK];\n"
+    " ld.param.u64 %rd3,[pOff]; ld.param.u64 %rd4,[pSI]; ld.param.u64 %rd5,[pSW]; mov.u32 %r4,%tid.x; mov.u64 %rd6,cnt; mov.u64 %rd7,cur;\n"
+    " mov.u32 %r5,%r4;\nZ:\n setp.ge.u32 %p1,%r5,%r2; @%p1 bra ZE; mul.wide.u32 %rd8,%r5,4; add.u64 %rd8,%rd6,%rd8; st.shared.u32 [%rd8],0; add.u32 %r5,%r5,1024; bra Z;\nZE:\n bar.sync 0;\n"
+    " mov.u32 %r5,%r4;\nC:\n setp.ge.u32 %p1,%r5,%r1; @%p1 bra CE; mul.wide.u32 %rd8,%r5,4; add.u64 %rd8,%rd1,%rd8; ld.global.u32 %r6,[%rd8];\n"
+    " mul.wide.u32 %rd9,%r6,4; add.u64 %rd9,%rd6,%rd9; atom.shared.add.u32 %r7,[%rd9],1; add.u32 %r5,%r5,1024; bra C;\nCE:\n bar.sync 0;\n"
+    " setp.ne.u32 %p2,%r4,0; @%p2 bra PE; mov.u32 %r8,0; mov.u32 %r5,0;\n"
+    "P:\n setp.ge.u32 %p1,%r5,%r2; @%p1 bra PD; mul.wide.u32 %rd8,%r5,4; add.u64 %rd9,%rd6,%rd8; ld.shared.u32 %r9,[%rd9]; add.u64 %rd10,%rd7,%rd8; st.shared.u32 [%rd10],%r8;\n"
+    " add.u64 %rd11,%rd3,%rd8; st.global.u32 [%rd11],%r8; add.u32 %r8,%r8,%r9; add.u32 %r5,%r5,1; bra P;\n"
+    "PD:\n mul.wide.u32 %rd8,%r2,4; add.u64 %rd11,%rd3,%rd8; st.global.u32 [%rd11],%r8;\nPE:\n bar.sync 0;\n"
+    " mov.u32 %r5,%r4;\nS:\n setp.ge.u32 %p1,%r5,%r1; @%p1 bra DONE; mul.wide.u32 %rd8,%r5,4; add.u64 %rd9,%rd1,%rd8; ld.global.u32 %r6,[%rd9]; add.u64 %rd9,%rd2,%rd8; ld.global.f32 %f1,[%rd9];\n"
+    " mul.wide.u32 %rd9,%r6,4; add.u64 %rd9,%rd7,%rd9; atom.shared.add.u32 %r10,[%rd9],1; div.u32 %r11,%r5,%r3;\n"
+    " mul.wide.u32 %rd12,%r10,4; add.u64 %rd13,%rd4,%rd12; st.global.u32 [%rd13],%r11; add.u64 %rd13,%rd5,%rd12; st.global.f32 [%rd13],%f1; add.u32 %r5,%r5,1024; bra S;\n"
     "DONE:\n ret;\n}\n"
     // X[j] += sum_s w[s]*T[s*D+j]
     ".visible .entry k_wsum(.param .u64 pX, .param .u64 pT, .param .u64 pW, .param .u32 pK, .param .u32 pD)\n{\n"
@@ -375,15 +528,19 @@ bool CudaTier::init(std::string& info) {
     int opts[2] = {5 /*CU_JIT_ERROR_LOG_BUFFER*/, 6 /*CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES*/};
     void* vals[2] = {log, (void*)(uintptr_t)sizeof(log)};
     void* mod = nullptr;
-    std::string ptx = ".version 6.0\n.target sm_61\n.address_size 64\n" + gen_kernel("mv_q4", 1) + gen_kernel("mv_q8", 0) + gen_kernel("mv_q4m", 2) + kQuantPTX + gpu_ops_ptx() +
-                      gen_kernel_ex("mx_q4", 1) + gen_kernel_ex("mx_q8", 0) + gen_kernel_ex("mx_q4m", 2) + kTopkPTX;
+    std::string ptx = ".version 6.0\n.target sm_61\n.address_size 64\n" + gen_kernel("mv_q4", 1) + gen_kernel("mv_q8", 0) + gen_kernel("mv_q4m", 2) + gen_kernel("mv_q6", 3) +
+        gen_mv1("mv1_q4", 1, 4) + gen_mv1("mv1_q8", 0, 4) + gen_mv1("mv1_q4m", 2, 4) + gen_mv1("mv1_q6", 3, 4) +
+        gen_mv1("mvs_q4", 1, 1) + gen_mv1("mvs_q8", 0, 1) + gen_mv1("mvs_q4m", 2, 1) + gen_mv1("mvs_q6", 3, 1) + kQuantPTX + gpu_ops_ptx() +
+                      gen_kernel_ex("mx_q4", 1) + gen_kernel_ex("mx_q8", 0) + gen_kernel_ex("mx_q4m", 2) + gen_kernel_ex("mx_q6", 3) + kTopkPTX;
     for (int m = 0; m < 11; m++) ptx += gen_cv(m);
     if (getenv("ITHACA_DUMP_PTX")) { FILE* f = fopen(getenv("ITHACA_DUMP_PTX"), "wb"); if (f) { fwrite(ptx.data(), 1, ptx.size(), f); fclose(f); } }
     if (cuModuleLoadDataEx(&mod, ptx.c_str(), 2, opts, vals)) { info = std::string("PTX JIT failed: ") + log; return false; }
     for (int m = 0; m < 11; m++) cuModuleGetFunction(&cv_[m], mod, kCvNames[m]);
-    cuModuleGetFunction(&fe_[K_Q4_0], mod, "mx_q4"); cuModuleGetFunction(&fe_[K_Q8_0], mod, "mx_q8"); cuModuleGetFunction(&fe_[K_Q4M], mod, "mx_q4m");
-    cuModuleGetFunction(&ftopk_, mod, "k_topk"); cuModuleGetFunction(&fwsum_, mod, "k_wsum");
-    if (cuModuleGetFunction(&fn_[K_Q4_0], mod, "mv_q4") || cuModuleGetFunction(&fn_[K_Q8_0], mod, "mv_q8") || cuModuleGetFunction(&fn_[K_Q4M], mod, "mv_q4m")) {
+    cuModuleGetFunction(&fe_[K_Q4_0], mod, "mx_q4"); cuModuleGetFunction(&fe_[K_Q8_0], mod, "mx_q8"); cuModuleGetFunction(&fe_[K_Q4M], mod, "mx_q4m"); cuModuleGetFunction(&fe_[K_Q6], mod, "mx_q6");
+    cuModuleGetFunction(&ftopk_, mod, "k_topk"); cuModuleGetFunction(&fwsum_, mod, "k_wsum"); cuModuleGetFunction(&fsort_, mod, "k_moe_sort");
+    cuModuleGetFunction(&fn1_[K_Q4_0], mod, "mv1_q4"); cuModuleGetFunction(&fn1_[K_Q8_0], mod, "mv1_q8"); cuModuleGetFunction(&fn1_[K_Q4M], mod, "mv1_q4m"); cuModuleGetFunction(&fn1_[K_Q6], mod, "mv1_q6");
+    cuModuleGetFunction(&fns_[K_Q4_0], mod, "mvs_q4"); cuModuleGetFunction(&fns_[K_Q8_0], mod, "mvs_q8"); cuModuleGetFunction(&fns_[K_Q4M], mod, "mvs_q4m"); cuModuleGetFunction(&fns_[K_Q6], mod, "mvs_q6");
+    if (cuModuleGetFunction(&fn_[K_Q4_0], mod, "mv_q4") || cuModuleGetFunction(&fn_[K_Q8_0], mod, "mv_q8") || cuModuleGetFunction(&fn_[K_Q4M], mod, "mv_q4m") || cuModuleGetFunction(&fn_[K_Q6], mod, "mv_q6")) {
         info = "kernel lookup failed"; return false;
     }
     static const char* opn[N_OPS] = {"k_add", "k_bias", "k_silu", "k_silu_split", "k_f16", "k_copy2d", "k_rmsnorm", "k_rope", "k_attn", "k_kvstore", "k_attn_comb", "k_gelu", "k_gather", "k_scatter", "k_kvstore_q8"};
@@ -538,17 +695,23 @@ bool CudaTier::reserve_act(size_t elems) {
     return true;
 }
 
-bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int n, int cols, int rows, uint64_t dY) {
+bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int n, int cols, int rows, uint64_t dY, bool same_x) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
-    if ((size_t)n * cols > cap_q_ && !reserve_act((size_t)n * cols)) return false;
+    if ((size_t)n * cols > cap_q_ && !reserve_act((size_t)n * cols)) { qx_src_ = 0; return false; }
     double t0 = g_prof ? now_sec() : 0;
     unsigned c = (unsigned)cols, r = (unsigned)rows, un = (unsigned)n;
     void* qa[5] = {&dX, &xq_, &xd_, &xs_, &c};
-    if (cuLaunchKernel(quant_, c / 32, un, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
+    if (!(same_x && qx_src_ == dX && qx_n_ == n && qx_cols_ == cols)) {   // q/k/v and gate/up share one quantized input
+        if (cuLaunchKernel(quant_, c / 32, un, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
+        qx_src_ = dX; qx_n_ = n; qx_cols_ = cols;
+    }
     uint64_t Q = W + qoff;
     void* args[9] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &un};
-    bool ok = cuLaunchKernel(fn_[kind], (r + 8 * kRows - 1) / (8 * kRows), (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
+    // Single tokens: kernels without the token tile; 4 rows per warp, or 1 when that would leave too few CTAs.
+    const bool one = n == 1 && fn1_[kind] && fns_[kind];
+    const unsigned rpw = !one ? kRows : r / (8 * 4) < 96 ? 1 : 4;
+    bool ok = cuLaunchKernel(one ? (rpw == 1 ? fns_[kind] : fn1_[kind]) : fn_[kind], (r + 8 * rpw - 1) / (8 * rpw), one ? 1 : (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
     if (g_prof) prof_end(20 + kind, t0);
     return ok;
 }
@@ -571,6 +734,17 @@ bool CudaTier::topk(uint64_t logits, int E, int K, bool norm, float scale, uint6
     unsigned e = E, k = K, nm = norm ? 1 : 0;
     void* a[7] = {&logits, &e, &k, &nm, &scale, &ids, &w};
     return ftopk_ && cuLaunchKernel(ftopk_, 1, 1, 1, 32, 1, 1, 0, st_, a, nullptr) == 0;
+}
+bool CudaTier::moe_route(uint64_t logits, int n, int E, int K, bool norm, float scale, uint64_t ids, uint64_t w,
+                         uint64_t off, uint64_t sorted_ids, uint64_t sorted_w) {
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    if (!ftopk_ || !fsort_ || E > 256) return false;
+    unsigned e = E, k = K, nm = norm ? 1 : 0, nk = (unsigned)(n * K);
+    void* a[7] = {&logits, &e, &k, &nm, &scale, &ids, &w};
+    if (cuLaunchKernel(ftopk_, n, 1, 1, 32, 1, 1, 0, st_, a, nullptr)) return false;
+    void* b[8] = {&ids, &w, &nk, &e, &k, &off, &sorted_ids, &sorted_w};
+    return cuLaunchKernel(fsort_, 1, 1, 1, 1024, 1, 1, 0, st_, b, nullptr) == 0;
 }
 bool CudaTier::wsum(uint64_t X, uint64_t T, uint64_t w, int K, int D) {
     std::lock_guard<std::recursive_mutex> l(m_);
@@ -602,9 +776,10 @@ bool CudaTier::can_load(int gtype) { return cv_mode(gtype) >= 0; }
 size_t CudaTier::gpu_bytes(int gtype, int rows, int cols) {
     size_t nblk = (size_t)rows * (cols / 32);
     int m = cv_mode(gtype);
-    if (m == 0) return (nblk * 4 + 255) / 256 * 256 + nblk * 16;
-    if (m == 2 || m == 8) return (nblk * 8 + 255) / 256 * 256 + nblk * 16;
-    return (nblk * 4 + 255) / 256 * 256 + nblk * 32;
+    if (m == 0) return (nblk * 2 + 255) / 256 * 256 + nblk * 16;
+    if (m == 2 || m == 8) return (nblk * 4 + 255) / 256 * 256 + nblk * 16;
+    if (m == 3) return (nblk * 4 + 255) / 256 * 256 + (nblk + 1) / 2 * 48;
+    return (nblk * 2 + 255) / 256 * 256 + nblk * 32;
 }
 
 uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtype, int rows, int cols, int& kind, uint64_t& qoff) {
@@ -615,8 +790,8 @@ uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtyp
     const size_t nblk = (size_t)rows * (cols / 32), units = nblk / ublk[mode];
     if (units * usrc[mode] != nbytes) return 0;
     const bool q4m = mode == 2 || mode == 8;
-    kind = mode == 0 ? K_Q4_0 : q4m ? K_Q4M : K_Q8_0;
-    qoff = (nblk * (q4m ? 8 : 4) + 255) / 256 * 256;
+    kind = mode == 0 ? K_Q4_0 : q4m ? K_Q4M : mode == 3 ? K_Q6 : K_Q8_0;
+    qoff = (nblk * (q4m || mode == 3 ? 4 : 2) + 255) / 256 * 256;
     uint64_t dst = alloc(gpu_bytes(gtype, rows, cols));
     if (!dst) return 0;
     {
@@ -630,7 +805,7 @@ uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtyp
         }
         if (!up_) { cuMemFree(dst); return 0; }
     }
-    uint64_t S = dst, Q = dst + qoff, M = dst + nblk * 4;
+    uint64_t S = dst, Q = dst + qoff, M = dst + nblk * 2;
     // Pipeline: up to kSlots chunk reads in flight (queue depth for SSDs, parallel copies out of the
     // OS cache when warm) while earlier chunks upload and convert on the GPU.
     const size_t per = kChunk / usrc[mode], nchunks = (units + per - 1) / per;

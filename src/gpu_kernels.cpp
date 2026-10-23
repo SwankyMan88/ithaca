@@ -283,14 +283,14 @@ std::string gpu_ops_ptx() {
             " mul.wide.u32 %rd3,%r8,4; add.u64 %rd3,%rd2,%rd3; ld.global.u32 %r10,[%rd3];\n"
             " mad.lo.u32 %r11,%r10,%r7,%r9; mul.wide.u32 %rd4,%r11,4; add.u64 %rd4,%rd1,%rd4; ld.global.f32 %f2,[%rd4];\n"
             " mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd6,%rd5; st.global.f32 [%rd5],%f2;\n");
-    // dst[idx[r]*D+c] += w[r] * src[r*D+c]
+    // dst[idx[r]*D+c] += w[r] * src[r*D+c], atomically (one launch may hold several rows per token)
     s += ew("k_scatter", ".param .u64 pY, .param .u64 pS, .param .u64 pI, .param .u64 pW, .param .u32 pDim",
             " ld.param.u64 %rd1,[pY]; ld.param.u64 %rd2,[pS]; ld.param.u64 %rd6,[pI]; ld.param.u64 %rd7,[pW]; ld.param.u32 %r7,[pDim];\n",
             " div.u32 %r8,%r5,%r7; mul.lo.u32 %r9,%r8,%r7; sub.u32 %r9,%r5,%r9;\n"
             " mul.wide.u32 %rd3,%r8,4; add.u64 %rd4,%rd6,%rd3; ld.global.u32 %r10,[%rd4]; add.u64 %rd8,%rd7,%rd3; ld.global.f32 %f3,[%rd8];\n"
             " mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd2,%rd5; ld.global.f32 %f2,[%rd5];\n"
-            " mad.lo.u32 %r11,%r10,%r7,%r9; mul.wide.u32 %rd9,%r11,4; add.u64 %rd9,%rd1,%rd9; ld.global.f32 %f4,[%rd9];\n"
-            " fma.rn.f32 %f4,%f2,%f3,%f4; st.global.f32 [%rd9],%f4;\n");
+            " mad.lo.u32 %r11,%r10,%r7,%r9; mul.wide.u32 %rd9,%r11,4; add.u64 %rd9,%rd1,%rd9;\n"
+            " mul.f32 %f4,%f2,%f3; red.global.add.f32 [%rd9],%f4;\n");
 
     // d[i] = (f16) s[i]
     s += ew("k_f16", ".param .u64 pS, .param .u64 pD",

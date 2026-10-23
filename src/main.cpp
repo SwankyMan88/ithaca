@@ -586,6 +586,7 @@ int main() {
                 double t2 = now_sec();
                 pp += 512 / (t1 - t0); tg += 128 / (t2 - t1);
             }
+            if (getenv("ITHACA_GXPROF")) gx().print_profile();
             printf("BENCH model=%s load_s=%.2f pp512=%.1f tg128=%.2f vram_mb=%lld\n", g_model.hp.name.c_str(), load_s, pp / 3, tg / 3, (long long)(g_model.gpu_bytes() >> 20));
             g_model.unload();
             return 0;

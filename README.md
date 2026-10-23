@@ -82,28 +82,28 @@ Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, IQ and Q2/Q3_K quan
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/bench-dark.svg">
-  <img src="docs/bench-light.svg" alt="Generation speed of Ithaca and llama.cpp on five models">
+  <img src="docs/bench-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on five models">
 </picture>
 
-Ithaca generates at 76–90% of llama.cpp's speed with its own kernels. Reading long prompts is where llama.cpp is still clearly ahead (3–8×); faster prompt kernels are the next thing on the list.
+Ithaca's own kernels generate at 96–106% of llama.cpp's speed, and read prompts at 74–130% of it: faster on the larger models, still behind on Gemma 3 and the MoE model.
 
 | Model | Generation (Ithaca / llama.cpp) | Prompt, 512 tokens (Ithaca / llama.cpp) |
 |---|---|---|
-| Granite 3.1 MoE 3B Q4_K_M | 201 / 223 tok/s | 819 / 6,584 tok/s |
-| Gemma 3 4B Q4_K_M | 70 / 92 tok/s | 1,178 / 3,717 tok/s |
-| Qwen2.5 Coder 7B Q4_0 | 56 / 68 tok/s | 673 / 2,398 tok/s |
-| Granite 4.1 8B Q4_0 | 46 / 57 tok/s | 547 / 1,661 tok/s |
-| Qwen3 14B Q4_0 | 30 / 35 tok/s | 301 / 1,019 tok/s |
+| Granite 3.1 MoE 3B Q4_K_M | 236 / 224 tok/s | 4,657 / 6,302 tok/s |
+| Gemma 3 4B Q4_K_M | 84 / 87 tok/s | 2,756 / 3,642 tok/s |
+| Qwen2.5 Coder 7B Q4_0 | 62 / 65 tok/s | 1,985 / 2,128 tok/s |
+| Granite 4.1 8B Q4_0 | 54 / 55 tok/s | 1,616 / 1,246 tok/s |
+| Qwen3 14B Q4_0 | 34 / 34 tok/s | 1,028 / 879 tok/s |
 | Qwen3 14B Q4_0, code, with Qwen3 0.6B as draft | 44 tok/s | |
 
-Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others).
+Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others).
 
 ### Why use it over llama.cpp, Ollama or LM Studio?
 
 - One 2 MB file, no install, no runtime downloads. LM Studio is several hundred MB; Ollama installs a service.
 - Images, video and speech out, and images and documents in, in the same app and the same chat.
 - Runs models larger than your VRAM by streaming from RAM and SSD, and you can type before the model has finished loading.
-- If you want the fastest raw throughput or Linux/Mac/AMD support, llama.cpp is the better choice today.
+- If you need Linux, Mac or AMD support, llama.cpp is the better choice today.
 
 - **Speculative decoding:** if a small model with the same vocabulary is installed (for example Qwen3 0.6B next to Qwen3 14B), Ithaca uses it automatically to draft tokens that the main model checks. It mostly helps code and structured text, pauses itself when it doesn't help, and only runs when there is spare VRAM. It can be turned off in Settings → Model & hardware.
 - **Long chats stay fast:** the conversation cache is stored as 8-bit in VRAM and only grows as the chat does.
@@ -137,7 +137,7 @@ Ithaca.exe --extract report.pdf
 
 ## Roadmap
 
-- Faster prompt processing (int8 tensor-core kernels).
+- Faster prompt processing for Gemma 3 and mixture-of-experts models.
 - More architectures: Mamba hybrids, Qwen2-MoE, IQ quants, split GGUFs.
 - Flux and SD3 image models, LoRAs, image-to-video.
 
