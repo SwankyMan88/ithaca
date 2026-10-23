@@ -9,71 +9,71 @@
 <text x="36" y="168" font-size="16" font-weight="600" fill="#e6edf3">Granite 3.1 MoE 3B</text>
 <text x="36" y="190" font-size="13" fill="#8b949e">Q4_K_M · 2.0 GB</text>
 <rect x="290" y="150" width="608.7" height="18" rx="4" fill="#7c6cff"/>
-<text x="906.7" y="164" font-size="13" fill="#e6edf3">236 (106%)</text>
-<rect x="290" y="174" width="576.5" height="18" rx="4" fill="#6e7681"/>
-<text x="874.5" y="188" font-size="13" fill="#e6edf3">224</text>
+<text x="906.7" y="164" font-size="13" fill="#e6edf3">268 (111%)</text>
+<rect x="290" y="174" width="548.3" height="18" rx="4" fill="#6e7681"/>
+<text x="846.3" y="188" font-size="13" fill="#e6edf3">241</text>
 <line x1="36" y1="280" x2="1064" y2="280" stroke="#21262d"/>
 <text x="36" y="242" font-size="16" font-weight="600" fill="#e6edf3">Gemma 3 4B</text>
 <text x="36" y="264" font-size="13" fill="#8b949e">Q4_K_M · 2.5 GB</text>
-<rect x="290" y="224" width="217.0" height="18" rx="4" fill="#7c6cff"/>
-<text x="515.0" y="238" font-size="13" fill="#e6edf3">84 (97%)</text>
-<rect x="290" y="248" width="224.3" height="18" rx="4" fill="#6e7681"/>
-<text x="522.3" y="262" font-size="13" fill="#e6edf3">87</text>
+<rect x="290" y="224" width="215.1" height="18" rx="4" fill="#7c6cff"/>
+<text x="513.1" y="238" font-size="13" fill="#e6edf3">95 (97%)</text>
+<rect x="290" y="248" width="222.1" height="18" rx="4" fill="#6e7681"/>
+<text x="520.1" y="262" font-size="13" fill="#e6edf3">98</text>
 <line x1="36" y1="354" x2="1064" y2="354" stroke="#21262d"/>
 <text x="36" y="316" font-size="16" font-weight="600" fill="#e6edf3">Qwen2.5 Coder 7B</text>
 <text x="36" y="338" font-size="13" fill="#8b949e">Q4_0 · 4.4 GB</text>
-<rect x="290" y="298" width="159.5" height="18" rx="4" fill="#7c6cff"/>
-<text x="457.5" y="312" font-size="13" fill="#e6edf3">62 (96%)</text>
-<rect x="290" y="322" width="166.2" height="18" rx="4" fill="#6e7681"/>
-<text x="464.2" y="336" font-size="13" fill="#e6edf3">65</text>
+<rect x="290" y="298" width="160.1" height="18" rx="4" fill="#7c6cff"/>
+<text x="458.1" y="312" font-size="13" fill="#e6edf3">70 (96%)</text>
+<rect x="290" y="322" width="166.4" height="18" rx="4" fill="#6e7681"/>
+<text x="464.4" y="336" font-size="13" fill="#e6edf3">73</text>
 <line x1="36" y1="428" x2="1064" y2="428" stroke="#21262d"/>
 <text x="36" y="390" font-size="16" font-weight="600" fill="#e6edf3">Granite 4.1 8B</text>
 <text x="36" y="412" font-size="13" fill="#8b949e">Q4_0 · 5.1 GB</text>
-<rect x="290" y="372" width="137.9" height="18" rx="4" fill="#7c6cff"/>
-<text x="435.9" y="386" font-size="13" fill="#e6edf3">54 (98%)</text>
-<rect x="290" y="396" width="140.6" height="18" rx="4" fill="#6e7681"/>
-<text x="438.6" y="410" font-size="13" fill="#e6edf3">55</text>
+<rect x="290" y="372" width="134.2" height="18" rx="4" fill="#7c6cff"/>
+<text x="432.2" y="386" font-size="13" fill="#e6edf3">59 (97%)</text>
+<rect x="290" y="396" width="138.2" height="18" rx="4" fill="#6e7681"/>
+<text x="436.2" y="410" font-size="13" fill="#e6edf3">61</text>
 <line x1="36" y1="502" x2="1064" y2="502" stroke="#21262d"/>
 <text x="36" y="464" font-size="16" font-weight="600" fill="#e6edf3">Qwen3 14B</text>
 <text x="36" y="486" font-size="13" fill="#8b949e">Q4_0 · 8.5 GB</text>
-<rect x="290" y="446" width="86.6" height="18" rx="4" fill="#7c6cff"/>
-<text x="384.6" y="460" font-size="13" fill="#e6edf3">34 (98%)</text>
-<rect x="290" y="470" width="88.6" height="18" rx="4" fill="#6e7681"/>
-<text x="386.6" y="484" font-size="13" fill="#e6edf3">34</text>
+<rect x="290" y="446" width="84.0" height="18" rx="4" fill="#7c6cff"/>
+<text x="382.0" y="460" font-size="13" fill="#e6edf3">37 (96%)</text>
+<rect x="290" y="470" width="87.5" height="18" rx="4" fill="#6e7681"/>
+<text x="385.5" y="484" font-size="13" fill="#e6edf3">38</text>
 <text x="290" y="556" font-size="14" font-weight="600" fill="#8b949e">READING A 512-TOKEN PROMPT (tokens per second, higher is better)</text>
 <line x1="36" y1="636" x2="1064" y2="636" stroke="#21262d"/>
 <text x="36" y="598" font-size="16" font-weight="600" fill="#e6edf3">Granite 3.1 MoE 3B</text>
 <text x="36" y="620" font-size="13" fill="#8b949e">Q4_K_M · 2.0 GB</text>
-<rect x="290" y="580" width="449.9" height="18" rx="4" fill="#7c6cff"/>
-<text x="747.9" y="594" font-size="13" fill="#e6edf3">4,657 (74%)</text>
+<rect x="290" y="580" width="496.4" height="18" rx="4" fill="#7c6cff"/>
+<text x="794.4" y="594" font-size="13" fill="#e6edf3">5,761 (82%)</text>
 <rect x="290" y="604" width="608.7" height="18" rx="4" fill="#6e7681"/>
-<text x="906.7" y="618" font-size="13" fill="#e6edf3">6,302</text>
+<text x="906.7" y="618" font-size="13" fill="#e6edf3">7,064</text>
 <line x1="36" y1="710" x2="1064" y2="710" stroke="#21262d"/>
 <text x="36" y="672" font-size="16" font-weight="600" fill="#e6edf3">Gemma 3 4B</text>
 <text x="36" y="694" font-size="13" fill="#8b949e">Q4_K_M · 2.5 GB</text>
-<rect x="290" y="654" width="266.2" height="18" rx="4" fill="#7c6cff"/>
-<text x="564.2" y="668" font-size="13" fill="#e6edf3">2,756 (76%)</text>
-<rect x="290" y="678" width="351.8" height="18" rx="4" fill="#6e7681"/>
-<text x="649.8" y="692" font-size="13" fill="#e6edf3">3,642</text>
+<rect x="290" y="654" width="258.8" height="18" rx="4" fill="#7c6cff"/>
+<text x="556.8" y="668" font-size="13" fill="#e6edf3">3,004 (75%)</text>
+<rect x="290" y="678" width="347.0" height="18" rx="4" fill="#6e7681"/>
+<text x="645.0" y="692" font-size="13" fill="#e6edf3">4,027</text>
 <line x1="36" y1="784" x2="1064" y2="784" stroke="#21262d"/>
 <text x="36" y="746" font-size="16" font-weight="600" fill="#e6edf3">Qwen2.5 Coder 7B</text>
 <text x="36" y="768" font-size="13" fill="#8b949e">Q4_0 · 4.4 GB</text>
-<rect x="290" y="728" width="191.8" height="18" rx="4" fill="#7c6cff"/>
-<text x="489.8" y="742" font-size="13" fill="#e6edf3">1,985 (93%)</text>
-<rect x="290" y="752" width="205.5" height="18" rx="4" fill="#6e7681"/>
-<text x="503.5" y="766" font-size="13" fill="#e6edf3">2,128</text>
+<rect x="290" y="728" width="187.7" height="18" rx="4" fill="#7c6cff"/>
+<text x="485.7" y="742" font-size="13" fill="#e6edf3">2,178 (83%)</text>
+<rect x="290" y="752" width="224.8" height="18" rx="4" fill="#6e7681"/>
+<text x="522.8" y="766" font-size="13" fill="#e6edf3">2,609</text>
 <line x1="36" y1="858" x2="1064" y2="858" stroke="#21262d"/>
 <text x="36" y="820" font-size="16" font-weight="600" fill="#e6edf3">Granite 4.1 8B</text>
 <text x="36" y="842" font-size="13" fill="#8b949e">Q4_0 · 5.1 GB</text>
-<rect x="290" y="802" width="156.1" height="18" rx="4" fill="#7c6cff"/>
-<text x="454.1" y="816" font-size="13" fill="#e6edf3">1,616 (130%)</text>
-<rect x="290" y="826" width="120.4" height="18" rx="4" fill="#6e7681"/>
-<text x="418.4" y="840" font-size="13" fill="#e6edf3">1,246</text>
+<rect x="290" y="802" width="148.2" height="18" rx="4" fill="#7c6cff"/>
+<text x="446.2" y="816" font-size="13" fill="#e6edf3">1,720 (86%)</text>
+<rect x="290" y="826" width="172.7" height="18" rx="4" fill="#6e7681"/>
+<text x="470.7" y="840" font-size="13" fill="#e6edf3">2,004</text>
 <line x1="36" y1="932" x2="1064" y2="932" stroke="#21262d"/>
 <text x="36" y="894" font-size="16" font-weight="600" fill="#e6edf3">Qwen3 14B</text>
 <text x="36" y="916" font-size="13" fill="#8b949e">Q4_0 · 8.5 GB</text>
-<rect x="290" y="876" width="99.3" height="18" rx="4" fill="#7c6cff"/>
-<text x="397.3" y="890" font-size="13" fill="#e6edf3">1,028 (117%)</text>
-<rect x="290" y="900" width="84.9" height="18" rx="4" fill="#6e7681"/>
-<text x="382.9" y="914" font-size="13" fill="#e6edf3">879</text>
+<rect x="290" y="876" width="96.0" height="18" rx="4" fill="#7c6cff"/>
+<text x="394.0" y="890" font-size="13" fill="#e6edf3">1,114 (86%)</text>
+<rect x="290" y="900" width="111.3" height="18" rx="4" fill="#6e7681"/>
+<text x="409.3" y="914" font-size="13" fill="#e6edf3">1,292</text>
 </svg>

@@ -87,15 +87,15 @@ Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, IQ and Q2/Q3_K quan
   <img src="docs/bench-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on five models">
 </picture>
 
-Ithaca's own kernels generate at 96–106% of llama.cpp's speed, and read prompts at 74–130% of it: faster on the larger models, still behind on Gemma 3 and the MoE model.
+Ithaca's own kernels generate at 96–111% of llama.cpp's speed and read prompts at 75–86% of it.
 
 | Model | Generation (Ithaca / llama.cpp) | Prompt, 512 tokens (Ithaca / llama.cpp) |
 |---|---|---|
-| Granite 3.1 MoE 3B Q4_K_M | 236 / 224 tok/s | 4,657 / 6,302 tok/s |
-| Gemma 3 4B Q4_K_M | 84 / 87 tok/s | 2,756 / 3,642 tok/s |
-| Qwen2.5 Coder 7B Q4_0 | 62 / 65 tok/s | 1,985 / 2,128 tok/s |
-| Granite 4.1 8B Q4_0 | 54 / 55 tok/s | 1,616 / 1,246 tok/s |
-| Qwen3 14B Q4_0 | 34 / 34 tok/s | 1,028 / 879 tok/s |
+| Granite 3.1 MoE 3B Q4_K_M | 268 / 241 tok/s | 5,761 / 7,064 tok/s |
+| Gemma 3 4B Q4_K_M | 95 / 98 tok/s | 3,004 / 4,027 tok/s |
+| Qwen2.5 Coder 7B Q4_0 | 70 / 73 tok/s | 2,178 / 2,609 tok/s |
+| Granite 4.1 8B Q4_0 | 59 / 61 tok/s | 1,720 / 2,004 tok/s |
+| Qwen3 14B Q4_0 | 37 / 38 tok/s | 1,114 / 1,292 tok/s |
 | Qwen3 14B Q4_0, code, with Qwen3 0.6B as draft | 44 tok/s | |
 
 Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others).

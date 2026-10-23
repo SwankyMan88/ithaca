@@ -184,7 +184,9 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         std::string p = render(msgs);
         if (p.size() >= 8 && p.compare(p.size() - 8, 8, "<think>\n") == 0) on_text("<think>\n");
     }
-    std::vector<int> recent(cache_.end() - std::min<size_t>(cache_.size(), 64), cache_.end());
+    // The repetition penalty covers only what the model writes. Including the prompt penalized the user's own words,
+    // so a reply about "sky" and "scattering" drifted to the no-space tokens ("theskyappearing").
+    std::vector<int> recent;
     // Emits one sampled token; false = stop (end token, budget, client gone).
     bool done = false;
     auto emit = [&](int id) -> bool {

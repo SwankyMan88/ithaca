@@ -761,6 +761,41 @@ std::string gen_qx(const char* name) {
     return o.s;
 }
 
+// t_actq: like t_qx, but the values are act(G) * U (act = SiLU, or tanh-GELU when pGelu != 0): the FFN's
+// activation and the down projection's input quantization in one pass, without writing the f32 product.
+std::string gen_actq(const char* name) {
+    Out o;
+    o(".visible .entry %s(.param .u64 pG, .param .u64 pU, .param .u64 pQ, .param .u64 pD, .param .u32 pN, .param .u32 pGelu)", name);
+    o("{");
+    o(" .reg .pred %%p<3>; .reg .b32 %%r<24>; .reg .b64 %%rd<8>; .reg .f32 %%f<24>;");
+    o(" ld.param.u64 %%rd1,[pG]; ld.param.u64 %%rd7,[pU]; ld.param.u64 %%rd2,[pQ]; ld.param.u64 %%rd3,[pD]; ld.param.u32 %%r3,[pN]; ld.param.u32 %%r13,[pGelu];");
+    o(" mov.u32 %%r1,%%ctaid.x; mov.u32 %%r2,%%tid.x; mad.lo.u32 %%r1,%%r1,256,%%r2; shl.b32 %%r3,%%r3,3; setp.lt.u32 %%p1,%%r1,%%r3; setp.ne.u32 %%p2,%%r13,0;");
+    o(" mov.f32 %%f0,0f00000000; mov.f32 %%f1,0f00000000; mov.f32 %%f2,0f00000000; mov.f32 %%f3,0f00000000;");
+    o(" mov.f32 %%f12,0f00000000; mov.f32 %%f13,0f00000000; mov.f32 %%f14,0f00000000; mov.f32 %%f15,0f00000000;");
+    o(" mul.wide.u32 %%rd4,%%r1,16; add.u64 %%rd5,%%rd1,%%rd4; add.u64 %%rd6,%%rd7,%%rd4;");
+    o(" @%%p1 ld.global.nc.v4.f32 {%%f0,%%f1,%%f2,%%f3},[%%rd5]; @%%p1 ld.global.nc.v4.f32 {%%f12,%%f13,%%f14,%%f15},[%%rd6];");
+    for (int j = 0; j < 4; j++) {
+        // same formulas as k_silu / k_gelu: silu(x) = x / (1 + e^-x); gelu(x) = x * sigmoid(2 * 0.79788 * (x + 0.044715 x^3))
+        o(" @!%%p2 mul.f32 %%f20,%%f%d,0fBFB8AA3B; @!%%p2 ex2.approx.f32 %%f20,%%f20; @!%%p2 add.f32 %%f20,%%f20,0f3F800000; @!%%p2 div.approx.f32 %%f21,%%f%d,%%f20;", j, j);
+        o(" @%%p2 mul.f32 %%f22,%%f%d,%%f%d; @%%p2 mul.f32 %%f22,%%f22,%%f%d; @%%p2 fma.rn.f32 %%f22,%%f22,0f3D372713,%%f%d; @%%p2 mul.f32 %%f22,%%f22,0f3F4C422A;", j, j, j, j);
+        o(" @%%p2 mul.f32 %%f23,%%f22,0fC038AA3B; @%%p2 ex2.approx.f32 %%f23,%%f23; @%%p2 add.f32 %%f23,%%f23,0f3F800000; @%%p2 div.approx.f32 %%f21,%%f%d,%%f23;", j);
+        o(" mul.f32 %%f%d,%%f21,%%f%d;", j, 12 + j);
+    }
+    o(" abs.f32 %%f4,%%f0; abs.f32 %%f5,%%f1; max.f32 %%f4,%%f4,%%f5; abs.f32 %%f5,%%f2; max.f32 %%f4,%%f4,%%f5; abs.f32 %%f5,%%f3; max.f32 %%f4,%%f4,%%f5;");
+    for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%f5,%%f4,%d,31,0xffffffff; max.f32 %%f4,%%f4,%%f5;", m);
+    o(" mul.f32 %%f6,%%f4,0f3C010204; setp.gt.f32 %%p0,%%f4,0f00000000; rcp.approx.f32 %%f7,%%f6; selp.f32 %%f7,%%f7,0f00000000,%%p0;");
+    for (int j = 0; j < 4; j++) o(" mul.f32 %%f8,%%f%d,%%f7; cvt.rni.s32.f32 %%r%d,%%f8;", j, 4 + j);
+    o(" add.s32 %%r8,%%r4,%%r5; add.s32 %%r8,%%r8,%%r6; add.s32 %%r8,%%r8,%%r7;");
+    for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%r9,%%r8,%d,31,0xffffffff; add.s32 %%r8,%%r8,%%r9;", m);
+    o(" bfi.b32 %%r10,%%r5,%%r4,8,8; bfi.b32 %%r10,%%r6,%%r10,16,8; bfi.b32 %%r10,%%r7,%%r10,24,8;");
+    o(" mul.wide.u32 %%rd5,%%r1,4; add.u64 %%rd5,%%rd2,%%rd5; @%%p1 st.global.b32 [%%rd5],%%r10;");
+    o(" and.b32 %%r11,%%r1,7; setp.eq.and.u32 %%p0,%%r11,0,%%p1;");
+    o(" cvt.rn.f32.s32 %%f9,%%r8; mul.f32 %%f9,%%f9,%%f6; shr.u32 %%r12,%%r1,3;");
+    o(" mul.wide.u32 %%rd6,%%r12,8; add.u64 %%rd6,%%rd3,%%rd6; @%%p0 st.global.v2.f32 [%%rd6],{%%f6,%%f9};");
+    o(" ret;\n}");
+    return o.s;
+}
+
 // t_mmq*: Y[M][N] = X[M][K] W^T. XQ int8 [M][K], XD float2 [M][K/32]; W rows in the chat GPU layout:
 // kind 0 = 4-bit (q-8)*d, kind 1 = int8 q*d, kind 2 = 4-bit q*d - m.
 // A block computes (WM*FM*16 tokens) x (WN*FN*8 weight rows) with WM x WN warps; big tiles
@@ -970,7 +1005,7 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
 
 // Tensor-core GEMMs live in their own module (needs sm_80+); older GPUs keep the SIMT versions.
 std::string gx_ptx_tc() {
-    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") +
+    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") + gen_actq("t_actq") +
            gen_mmq("t_mmq0", 0, kMmqTiles[0]) + gen_mmq("t_mmq1", 1, kMmqTiles[0]) + gen_mmq("t_mmq2", 2, kMmqTiles[0]) +
            gen_mmq("t_mmqs0", 0, kMmqTiles[1]) + gen_mmq("t_mmqs1", 1, kMmqTiles[1]) + gen_mmq("t_mmqs2", 2, kMmqTiles[1]) +
            gen_mmq("t_mmqg0", 0, kMmqTiles[0], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[0], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[0], true) +

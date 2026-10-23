@@ -624,8 +624,9 @@ bool Model::moe_grouped(Layer& L, int n) {
     };
     cu.ew(CudaTier::GATHER, tot * d, {&dXN_, &dSI_, &dMG_, &d});
     if (!grouped(L.gate_exps, dMG_, d, ff, dMF1_, false) || !grouped(L.up_exps, dMG_, d, ff, dMF2_, true)) return false;
-    cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
-    if (!grouped(L.down_exps, dMF1_, ff, d, dMT_, false)) return false;
+    const bool fused = gx().act_quantize(dMF1_, dMF2_, tot, ff, hp.gelu);
+    if (!fused) cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
+    if (!grouped(L.down_exps, dMF1_, ff, d, dMT_, fused)) return false;
     cu.ew(CudaTier::SCATTER, tot * d, {&dX_, &dMT_, &dSI_, &dSW_, &d});
     return true;
 }
@@ -757,9 +758,12 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         cu.ew(CudaTier::SILU_SPLIT, un * ff, {&dT_, &dF1_, &ff});
     } else {
         mm(L.gate, dXN_, dF1_); mm(L.up, dXN_, dF2_, true);
+        // prompts: the activation goes straight into the down projection's int8 input (dF1_ itself is not written)
+        if (n >= 16 && tc_prefill_ && gx().can_mmq(L.down.gkind) && gx().act_quantize(dF1_, dF2_, n, ff, hp.gelu)) { mm(L.down, dF1_, dT_, true); goto ffn_done; }
         cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, un * ff, {&dF1_, &dF2_});
     }
     mm(L.down, dF1_, dT_);
+ffn_done:
     if (L.d_pfn) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pfn, &dT_, &d, &eps});
     cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
 }
