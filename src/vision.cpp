@@ -5,7 +5,8 @@
 #include <cmath>
 
 // ---- image decode: Windows Imaging Component handles PNG, JPEG, GIF, BMP, TIFF, WebP/HEIC (with codecs) ----
-static bool decode_rgb(const std::string& bytes, int W, int H, std::vector<uint8_t>& rgb, std::string& err) {
+// W or H 0: the image's own size (written back).
+bool decode_rgb(const std::string& bytes, int& W, int& H, std::vector<uint8_t>& rgb, std::string& err) {
     HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* f = nullptr; IWICStream* s = nullptr; IWICBitmapDecoder* d = nullptr;
     IWICBitmapFrameDecode* fr = nullptr; IWICFormatConverter* cv = nullptr; IWICBitmapScaler* sc = nullptr;
@@ -17,6 +18,7 @@ static bool decode_rgb(const std::string& bytes, int W, int H, std::vector<uint8
         if (FAILED(f->CreateFormatConverter(&cv)) ||
             FAILED(cv->Initialize(fr, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) { err = "image conversion failed"; break; }
         // Fant = area averaging, close to an antialiased bilinear downscale
+        if (W <= 0 || H <= 0) { UINT w0 = 0, h0 = 0; fr->GetSize(&w0, &h0); W = (int)w0; H = (int)h0; }
         if (FAILED(f->CreateBitmapScaler(&sc)) || FAILED(sc->Initialize(cv, W, H, WICBitmapInterpolationModeFant))) { err = "image resize failed"; break; }
         rgb.resize((size_t)W * H * 3);
         if (FAILED(sc->CopyPixels(nullptr, W * 3, (UINT)rgb.size(), rgb.data()))) { err = "image read failed"; break; }
@@ -90,7 +92,8 @@ bool Vision::encode(const std::string& file, std::vector<float>& out, std::strin
     if (!ok_) { err = "no vision model loaded"; return false; }
     double t0 = now_sec();
     std::vector<uint8_t> rgb;
-    if (!decode_rgb(file, img_, img_, rgb, err)) return false;
+    int iw = img_, ih = img_;
+    if (!decode_rgb(file, iw, ih, rgb, err)) return false;
     const int P = img_ / patch_, NP = P * P, hd = dim_ / heads_;
     std::vector<float> chw((size_t)3 * img_ * img_);
     for (int c = 0; c < 3; c++)

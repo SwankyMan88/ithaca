@@ -13,6 +13,10 @@ struct ImageJob {
     std::string sampler = "dpmpp_2m";   // euler, euler_a, dpmpp_2m
     std::string scheduler = "karras";   // normal, karras
     int clip_skip = 0;                  // 0 = model default
+    // Editing: start from a picture (RGB8, width x height) instead of noise. strength = how much of it is redrawn
+    // (0 keeps it, 1 ignores it). With a mask (width x height, 255 = repaint) only the masked part changes.
+    std::vector<uint8_t> init_rgb, mask;
+    float strength = 0.6f;
 };
 
 struct SdInfo {
@@ -40,6 +44,7 @@ public:
     std::vector<float> adm_vector(const std::vector<float>& pooled, int w, int h);
     void unet(const GT& x, int H, int W, float timestep, const GT& ctx, int ntok, const GT& y, GT& out);
     bool vae_decode(const std::vector<float>& z, int h, int w, std::vector<float>& img);  // z: VAE-space latent [4][h][w]
+    bool vae_encode(const std::vector<float>& img, int H, int W, std::vector<float>& z);  // img [3][H][W] in -1..1 -> latent mean [4][H/8][W/8]
     const SafeTensors& tensors() const { return st_; }
     bool debug_clipl(const std::string& text, int run, std::vector<float>& out, std::vector<int>& ids);
     void unet_begin(int64_t budget);

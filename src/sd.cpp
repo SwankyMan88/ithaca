@@ -604,6 +604,84 @@ bool SdEngine::vae_decode(const std::vector<float>& z, int h, int w, std::vector
 }
 
 // =============================================================================================
+// VAE encoder (for editing an existing picture): returns the latent mean, in VAE space
+// =============================================================================================
+bool SdEngine::vae_encode(const std::vector<float>& img, int H, int W, std::vector<float>& z) {
+    Gx& g = gx();
+    const std::string P = vae_pfx_;
+    auto has = [&](const std::string& n) { return st_.has(P + n); };
+    auto shape = [&](const std::string& n, int i) { return (int)st_.get(P + n)->shape[i]; };
+    if (!has("encoder.conv_in.weight")) return false;
+    g.weights_begin(&st_, 1ll << 40);
+    int C = 3, h = H, w = W;
+    GT x = g.alloc((size_t)3 * h * w);
+    g.upload(x, img.data(), img.size());
+    auto conv = [&](GT& in, int Ci, int Co, const std::string& n, int k, GT& o, float beta = 0.f) {
+        GT b = g.wf32(P + n + ".bias");
+        g.conv(in, Ci, h, w, g.w16(P + n + ".weight"), Co, k, k, 1, k / 2, &b, o, beta);
+    };
+    auto res = [&](const std::string& p) {
+        int Co = shape(p + "conv1.weight", 0);
+        size_t hw = (size_t)h * w;
+        GT a = g.alloc((size_t)C * hw), b = g.alloc((size_t)Co * hw), o = g.alloc((size_t)Co * hw);
+        g.groupnorm(x, C, (int)hw, 32, g.wf32(P + p + "norm1.weight"), g.wf32(P + p + "norm1.bias"), 1e-6f, true, a);
+        conv(a, C, Co, p + "conv1", 3, b);
+        g.free(a); a = g.alloc((size_t)Co * hw);
+        g.groupnorm(b, Co, (int)hw, 32, g.wf32(P + p + "norm2.weight"), g.wf32(P + p + "norm2.bias"), 1e-6f, true, a);
+        if (has(p + "nin_shortcut.weight")) conv(x, C, Co, p + "nin_shortcut", 1, o);
+        else g.copy(o, x, (size_t)C * hw);
+        conv(a, Co, Co, p + "conv2", 3, o, 1.f);
+        g.free(a); g.free(b); g.free(x);
+        x = o; C = Co;
+    };
+    auto attn = [&](const std::string& p) {
+        const int T = h * w;
+        GT n = g.alloc((size_t)C * T), q = g.alloc((size_t)C * T), k = g.alloc((size_t)C * T), v = g.alloc((size_t)C * T);
+        GT qt = g.alloc((size_t)C * T), kt = g.alloc((size_t)C * T), vt = g.alloc((size_t)C * T);
+        g.groupnorm(x, C, T, 32, g.wf32(P + p + "norm.weight"), g.wf32(P + p + "norm.bias"), 1e-6f, false, n);
+        conv(n, C, C, p + "q", 1, q); conv(n, C, C, p + "k", 1, k); conv(n, C, C, p + "v", 1, v);
+        g.transpose(q, C, T, qt); g.transpose(k, C, T, kt); g.transpose(v, C, T, vt);
+        g.attention(qt, kt, vt, T, T, 1, C, q);
+        g.transpose(q, T, C, n);
+        conv(n, C, C, p + "proj_out", 1, x, 1.f);
+        for (GT* t : {&n, &q, &k, &v, &qt, &kt, &vt}) g.free(*t);
+    };
+    // The VAE pads only right/bottom before its stride-2 convs: pad on the host, then convolve without padding.
+    auto downsample = [&](const std::string& n) {
+        std::vector<float> a((size_t)C * h * w), b((size_t)C * (h + 1) * (w + 1), 0.f);
+        g.download(a.data(), x, a.size());
+        for (int c = 0; c < C; c++)
+            for (int y = 0; y < h; y++) memcpy(&b[((size_t)c * (h + 1) + y) * (w + 1)], &a[((size_t)c * h + y) * w], (size_t)w * 4);
+        GT pd = g.alloc(b.size()); g.upload(pd, b.data(), b.size());
+        int h2 = h / 2, w2 = w / 2;
+        GT o = g.alloc((size_t)C * h2 * w2), bias = g.wf32(P + n + ".bias");
+        g.conv(pd, C, h + 1, w + 1, g.w16(P + n + ".weight"), C, 3, 3, 2, 0, &bias, o);
+        g.free(pd); g.free(x); x = o; h = h2; w = w2;
+    };
+    int Cin = shape("encoder.conv_in.weight", 0);
+    { GT o = g.alloc((size_t)Cin * h * w); conv(x, 3, Cin, "encoder.conv_in", 3, o); g.free(x); x = o; C = Cin; }
+    for (int i = 0; has("encoder.down." + std::to_string(i) + ".block.0.conv1.weight"); i++) {
+        for (int j = 0; has("encoder.down." + std::to_string(i) + ".block." + std::to_string(j) + ".conv1.weight"); j++)
+            res("encoder.down." + std::to_string(i) + ".block." + std::to_string(j) + ".");
+        std::string d = "encoder.down." + std::to_string(i) + ".downsample.conv";
+        if (has(d + ".weight")) downsample(d);
+    }
+    res("encoder.mid.block_1.");
+    attn("encoder.mid.attn_1.");
+    res("encoder.mid.block_2.");
+    int Co = shape("encoder.conv_out.weight", 0);
+    GT a = g.alloc((size_t)C * h * w), o = g.alloc((size_t)Co * h * w);
+    g.groupnorm(x, C, h * w, 32, g.wf32(P + "encoder.norm_out.weight"), g.wf32(P + "encoder.norm_out.bias"), 1e-6f, true, a);
+    conv(a, C, Co, "encoder.conv_out", 3, o);
+    if (has("quant_conv.weight")) { GT q = g.alloc((size_t)Co * h * w); conv(o, Co, Co, "quant_conv", 1, q); g.free(o); o = q; }
+    z.resize((size_t)4 * h * w);   // first 4 channels: the mean (the rest is the log-variance)
+    g.download(z.data(), o, z.size());
+    g.free(a); g.free(o); g.free(x);
+    g.weights_end();
+    return true;
+}
+
+// =============================================================================================
 // Sampling
 // =============================================================================================
 bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::string& err,
@@ -649,7 +727,32 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
     std::mt19937_64 rng(j.seed ? j.seed : std::random_device{}());
     std::normal_distribution<float> nd(0.f, 1.f);
     std::vector<float> x(n), den(n), old(n), noise(n), eu(n), ec(n);
-    for (auto& v : x) v = nd(rng) * sig[0];
+    for (auto& v : noise) v = nd(rng);
+    // Editing: encode the start picture and begin part-way down the schedule from it, noised to that level.
+    const bool edit = j.init_rgb.size() == (size_t)j.width * j.height * 3;
+    int first = 0;
+    std::vector<float> z0, mk;   // start latent (model space), latent-resolution mask
+    if (edit) {
+        if (!progress("Reading your picture", 0, j.steps)) { err = "cancelled"; return false; }
+        const size_t px = (size_t)j.width * j.height;
+        std::vector<float> im(3 * px);
+        for (size_t p = 0; p < px; p++) for (int c = 0; c < 3; c++) im[c * px + p] = j.init_rgb[p * 3 + c] / 127.5f - 1.f;
+        if (!vae_encode(im, j.height, j.width, z0)) { err = "this checkpoint's VAE has no encoder, so it can't edit pictures"; return false; }
+        for (auto& v : z0) v *= vae_scale_;
+        first = std::max(0, std::min(j.steps - 1, (int)std::lround(j.steps * (1.0 - std::max(0.f, std::min(1.f, j.strength))))));
+        if (j.mask.size() == px) {   // mask at latent resolution: any repaint inside an 8x8 cell repaints the cell
+            mk.assign((size_t)lh * lw, 0.f);
+            for (int y = 0; y < j.height; y++) for (int xx = 0; xx < j.width; xx++)
+                mk[(size_t)(y / 8) * lw + xx / 8] = std::max(mk[(size_t)(y / 8) * lw + xx / 8], j.mask[(size_t)y * j.width + xx] / 255.f);
+        }
+    }
+    for (int q = 0; q < n; q++) x[q] = edit ? z0[q] + noise[q] * sig[first] : noise[q] * sig[0];
+    // keeps the unmasked part on the start picture's own path through the schedule
+    auto keep = [&](float s) {
+        if (mk.empty()) return;
+        const size_t hw = (size_t)lh * lw;
+        for (int c = 0; c < 4; c++) for (size_t p = 0; p < hw; p++) { float m = mk[p]; size_t q = c * hw + p; x[q] = m * x[q] + (1 - m) * (z0[q] + noise[q] * s); }
+    };
 
     // Leave room for activations; whatever doesn't fit stays in RAM and is streamed each step.
     int64_t act = (int64_t)lh * lw * 64 * 1024 * (info_.arch == "sdxl" ? 3 : 2) + (512ll << 20);
@@ -669,8 +772,8 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
         }
     };
     bool have_old = false;
-    for (int i = 0; i < j.steps; i++) {
-        if (!progress("Generating", i, j.steps)) { err = "cancelled"; break; }
+    for (int i = first; i < j.steps; i++) {
+        if (!progress(edit ? "Editing" : "Generating", i - first, j.steps - first)) { err = "cancelled"; break; }
         float s = sig[i], sn = sig[i + 1];
         model(s, den);
         if (on_preview) {
@@ -706,6 +809,7 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
             }
             old = den; have_old = true;
         }
+        keep(sig[i + 1]);
     }
     unet_end();
     for (GT* t : {&xg, &og, &cg, &ug, &yc, &yu}) g.free(*t);
@@ -722,6 +826,25 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
             float v = (img[(size_t)c * W * H + p] + 1.f) * 127.5f;
             rgb[(size_t)p * 3 + c] = (uint8_t)std::min(255.f, std::max(0.f, v + 0.5f));
         }
+    if (edit && !mk.empty()) {   // outside the mask the original pixels come back exactly; a soft 12 px edge blends the seam
+        const int R = 12;
+        std::vector<float> m((size_t)W * H), t((size_t)W * H);
+        for (size_t p = 0; p < m.size(); p++) m[p] = j.mask[p] / 255.f;
+        // box blur of radius R along one line (prefix sums; the window is clipped at the image edge)
+        auto blur = [R](const float* in, float* out, int len, size_t step) {
+            std::vector<double> ps(len + 1, 0.0);
+            for (int i = 0; i < len; i++) ps[i + 1] = ps[i] + in[i * step];
+            for (int i = 0; i < len; i++) { int a = std::max(0, i - R), b = std::min(len, i + R + 1); out[i * step] = (float)((ps[b] - ps[a]) / (b - a)); }
+        };
+        for (int pass = 0; pass < 2; pass++) {   // rows then columns, twice: close to a Gaussian edge
+            for (int y = 0; y < H; y++) blur(&m[(size_t)y * W], &t[(size_t)y * W], W, 1);
+            for (int xx = 0; xx < W; xx++) blur(&t[xx], &m[xx], H, (size_t)W);
+        }
+        for (size_t p = 0; p < m.size(); p++) {
+            float a = std::min(1.f, m[p] * 1.6f);
+            for (int c = 0; c < 3; c++) rgb[p * 3 + c] = (uint8_t)std::lround(a * rgb[p * 3 + c] + (1 - a) * j.init_rgb[p * 3 + c]);
+        }
+    }
     return true;
 }
 

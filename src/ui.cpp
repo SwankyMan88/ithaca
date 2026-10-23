@@ -277,6 +277,13 @@ input[type=file]{color:var(--dim)}
 @keyframes slidein{from{opacity:0;transform:translateX(-14px);max-height:0}to{opacity:1;transform:none;max-height:40px}}
 .viewin{animation:viewin .32s cubic-bezier(.2,.9,.3,1) both}
 @keyframes viewin{from{opacity:0;transform:translateY(8px) scale(.995)}to{opacity:1;transform:none}}
+/* start picture + mask painting */
+.startpic{margin:4px 0 12px}.startpic .hint{margin-left:8px}
+.spwrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;animation:rise .35s cubic-bezier(.2,.9,.3,1) both}
+.spimg{position:relative;max-width:360px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
+.spimg img{display:block;width:100%;height:auto}.spmask{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
+.spside{display:flex;flex-direction:column;gap:8px;min-width:200px;flex:1}.spside .hint{font-size:12.5px;color:var(--faint)}
+.galimg{position:relative}.galedit{position:absolute;right:8px;bottom:8px;opacity:0;transition:opacity .2s;padding:4px 10px;font-size:12px}.galimg:hover .galedit{opacity:1}
 /* studios */
 .hero textarea,.sizerow input[type=number]{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
 .hero textarea{width:100%;font-size:15px;min-height:84px;resize:vertical;padding:12px 14px;border-radius:12px;transition:border-color .2s,box-shadow .2s}
@@ -503,7 +510,7 @@ function systemPrompt(extra,lastUser){
 
 # Tools
 Call a tool by writing its tag in your final answer. Tags are invisible to the user; results come back to you automatically and you then continue the reply.
-- <generate_image width="W" height="H">detailed visual description</generate_image>: make ONE image when the user asks for one. Set width and height to the shape they need (phone wallpaper width="1170" height="2532", desktop wallpaper width="1920" height="1080", portrait width="832" height="1216", otherwise width="1024" height="1024"). Ithaca renders the closest size the image model handles well. Write the tag once, with plain text inside and nothing else. Order: one or two sentences saying what you are making, then the tag, then one short line after it (the picture appears between them).
+- <generate_image width="W" height="H">detailed visual description</generate_image>: make ONE image when the user asks for one. Set width and height to the shape they need (phone wallpaper width="1170" height="2532", desktop wallpaper width="1920" height="1080", portrait width="832" height="1216", otherwise width="1024" height="1024"). Ithaca renders the closest size the image model handles well. Write the tag once, with plain text inside and nothing else. Order: one or two sentences saying what you are making, then the tag, then one short line after it (the picture appears between them). To change the picture you made before instead of making a new one, add edit="true".
 - <generate_video seconds="5">detailed description of subject, action, camera and style</generate_video>: make a short video.
 - <generate_audio kind="speech">exact text to speak</generate_audio>: say something out loud in the user's chosen voice (when they ask you to speak, read aloud or make a voice clip).
 If a tool reports a problem (for example that no model is loaded), explain it to the user in your own words and suggest what they can do.`;
@@ -545,8 +552,17 @@ function apiMessages(msgs,extra,noReminder){const lastUser=[...msgs].reverse().f
   if(!noReminder&&lastUser&&asksForMedia(lastUser.content)){for(let i=out.length-1;i>0;i--)if(out[i].role=='user'){if(!out[i].images&&!lastUser.docs)out[i]=Object.assign({},out[i],{content:out[i].content+REMINDER});break}}
   return out}
 // Recognizes clear requests for media so Ithaca can make them directly instead of hoping the model writes a tag.
+// The most recent picture in the chat (with the prompt it was made from), if it is recent enough to be "that picture".
+function lastImage(msgs){for(let i=msgs.length-1;i>=0&&i>=msgs.length-6;i--){const m=msgs[i];if(m.role=='assistant'&&m.media){const x=[...m.media].reverse().find(y=>y.kind=='image'&&y.url);if(x)return x}}return null}
+// How much of the picture to redraw: style and colour changes keep the layout, adding or removing things needs more freedom.
+function editStrength(t){return /\b(add|remove|replace|put|insert|swap|get rid of|take out)\b/i.test(t)?0.75:/\b(filter|style|look|colou?r|tone|brighter|darker|warmer|cooler|vintage|retro|80s|90s|film|sepia|black and white|grain|lighting|night|sunset|winter|summer|photo|painting|cartoon|anime|sketch)\b/i.test(t)?0.62:0.65}
 function mediaIntent(msgs){
   const last=msgs[msgs.length-1].content;
+  // editing the last picture: "make it look like an 80s photo", "change the sky to night", "add a boat", "remove the people"
+  const li=lastImage(msgs.slice(0,-1));
+  if(li&&!/\b(new|another|different|second|separate|fresh)\b[^.?!\n]{0,20}\b(image|picture|photo|pic|one)\b/i.test(last)&&!/\b(video|clip|animation|out loud|aloud)\b/i.test(last)&&
+     /\b(make (it|that|this|the (image|picture|photo|pic))|change|edit|turn (it|that|this|the)|add|remove|replace|put|give (it|that|this|the (image|picture|photo))|recolou?r|brighter|darker|warmer|cooler|instead|filter|look (like|more)|same (image|picture|photo)|(that|this|the) (image|picture|photo|pic|one))\b/i.test(last))
+    return{kind:'edit',request:last,url:li.url,orig:li.prompt||'',strength:editStrength(last)};
   const verbs='make|generate|create|draw|paint|render|produce|design|show me|give me|craft|sketch|animate|film|can you (?:make|do|create|generate)';
   const img=new RegExp(`\\b(${verbs})\\b[^.?!\\n]{0,60}\\b(image|picture|photo|pic|drawing|painting|artwork|art|illustration|wallpaper|logo|portrait|poster|icon)s?\\b`,'i');
   const vid=new RegExp(`\\b(${verbs})\\b[^.?!\\n]{0,60}\\b(video|clip|animation|movie|film)s?\\b`,'i');
@@ -557,18 +573,22 @@ function mediaIntent(msgs){
     for(let i=msgs.length-2;i>=0&&i>=msgs.length-7;i--)if(msgs[i].role=='user'){const k=detect(msgs[i].content);if(k){kind=k;request=msgs[i].content+'\n'+last;break}}}
   return kind?{kind,request}:null}
 async function writeMediaPrompt(it,el,history){
-  const what={image:'an image generator',video:'a text-to-video generator',audio:'a text-to-speech voice'}[it.kind];
+  const what={image:'an image generator',edit:'an image editor',video:'a text-to-video generator',audio:'a text-to-speech voice'}[it.kind];
   const guide=it.kind=='audio'?'Reply with ONLY the exact words to speak, nothing else.'
+    :it.kind=='edit'?`The user wants to change a picture you made${it.orig?`, described as: "${it.orig}"`:''}. Write ONE prompt describing the whole new picture with their change applied and everything else kept the same. Under 70 words. Reply with the prompt ONLY.`
     :it.kind=='video'?'Write ONE vivid prompt describing a single continuous shot: subject, one clear action, setting, camera movement, lighting and style. Under 80 words. Reply with the prompt ONLY.'
     :'Write ONE vivid, specific prompt: subject, setting, composition, lighting, style and medium. Under 70 words. Reply with the prompt ONLY.';
   const ctx=history.slice(-6).map(m=>`${m.role=='user'?'User':'Assistant'}: ${stripTags(splitThink(m.content).body).slice(0,400)}`).join('\n');
-  el.innerHTML='<span class="memchip">'+ico(it.kind=='audio'?'audio':it.kind)+'Planning the '+(it.kind=='audio'?'script':it.kind)+'…</span>';
+  el.innerHTML='<span class="memchip">'+ico(it.kind=='audio'?'audio':it.kind=='edit'?'image':it.kind)+(it.kind=='edit'?'Planning the edit…':'Planning the '+(it.kind=='audio'?'script':it.kind)+'…')+'</span>';
   const r=await stream([{role:'system',content:`You write inputs for ${what}. Turn the user's request into the input. If they leave the subject up to you, pick something beautiful and specific. ${guide} No quotes, no code, no explanations.`},
     {role:'user',content:`Conversation so far:\n${ctx}\n\nRequest: ${it.request}\n\nWrite the input now. /no_think`}],{max_tokens:220,temperature:0.7});
   let prompt=stripTags(splitThink(r.text).body).replace(/```[a-z]*|```/g,'').replace(/^\s*(prompt|input|text)\s*:\s*/i,'').replace(/^["'“]|["'”]$/g,'').trim();
   el.innerHTML='';
+  // edits: the user's own words go in too, so the change itself can't get lost in the rewrite
+  if(it.kind=='edit')prompt=(prompt?prompt.replace(/[.\s]+$/,'')+'. ':'')+it.request.replace(/^(please\s+)?(can you\s+)?/i,'');
   return prompt||it.request}
 function mediaNote(it,prompt){const k=it.kind=='audio'?'audio':it.kind;
+  if(it.kind=='edit')return `# What is happening (written by Ithaca, not the user)\nIthaca's built-in image engine is editing the previous picture right now, toward: "${prompt}". The new version will appear directly below your reply when it is ready.\nReply in 1-2 friendly sentences saying what you are changing. Do NOT write code, tags, links, markdown images, or instructions for running anything.`;
   return `# What is happening (written by Ithaca, not the user)\nIthaca's built-in ${it.kind=='audio'?'speech':it.kind} engine is creating the ${k} right now from this ${it.kind=='audio'?'script':'prompt'}: "${prompt}". It will appear directly below your reply when it is ready.\nReply in 1-2 friendly sentences describing what you are making. Do NOT write code, tags, links, markdown images, or instructions for running anything.`}
 
 // Copies a generated image to the clipboard as PNG, so it can be pasted into another chat or app.
@@ -678,7 +698,7 @@ function renderAI(m,live){
     h+=`<span class="waiting"><span class="dots" style="--ph:-${Math.round(performance.now()%1000)}ms"><span></span><span></span><span></span></span><span class="wl" style="${phase(1800)}">${esc(m.wait||'')}</span></span>`;
   if(m.error)h+=`<div class="err">${esc(m.error)}</div>`;
   return h}
-function mediaHtml(x){return x.url?(x.kind=='image'?`<div class="gwrap${justMade.has(x.url)?' justmade':''}"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):''}
+function mediaHtml(x){return x.url?(x.kind=='image'?`<div class="gwrap${justMade.has(x.url)?' justmade':''}"><img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)" title="Click to view"><div class="gbtns"><button onclick="copyImg('${esc(x.url)}')" title="Copy image">${ico('copy')}</button><button onclick="viewImg('${esc(x.url)}')" title="View full size">${ico('expand')}</button><button onclick="editInStudio('${esc(x.url)}')" title="Edit in the Image studio">${ico('edit')}</button><a href="${esc(x.url)}" download title="Save image">${ico('dl')}</a></div></div>`:x.kind=='video'?`<video class="genimg" controls src="${esc(x.url)}"></video>`:`<audio controls src="${esc(x.url)}"></audio>`):''}
 const justMade=new Set();   // pictures that finished during this reply get the reveal once
 // Animations keep their phase when the element is rebuilt (replies re-render on every token), so nothing restarts.
 const phase=ms=>`animation-delay:-${Math.round(performance.now()%ms)}ms`;
@@ -754,10 +774,11 @@ async function runTools(tools){const results=[],chips=[],media=[];
     else{const kind=t.tag.slice(9);const holder=document.querySelector('.msg.ai:last-child .content');
       liveCard=document.createElement('div');if(holder)(holder.querySelector('.mslot')||holder).appendChild(liveCard);const stop=watchProgress(liveCard);
       // tag attributes (like kind="speech") must not override which engine is called; images get a size that fits the request
-      const size=kind=='image'?Object.assign(pickSize(t.a,lastRequest),{fit:true}):{};
+      if(kind=='image'&&t.a.edit&&!t.a.init_url){const li=lastImage(chat.messages.slice(0,-1));if(li)t.a.init_url=li.url}   // model-written edit tag
+      const size=kind=='image'&&!t.a.init_url?Object.assign(pickSize(t.a,lastRequest),{fit:true}):{};
       const r=await api('/api/media/generate',Object.assign({},t.a,size,{kind,prompt:t.val,mode:t.a.kind||t.a.mode||''}));stop();liveCard=null;
-      results.push(`${t.tag} → `+(r.error?'FAILED: '+r.error:`done. The ${kind} is already displayed to the user right below your message, so do not add links, file names or markdown images; just describe it briefly or offer changes.`));chips.push({i:kind=='audio'?'audio':kind=='video'?'video':'image',k:`${kind[0].toUpperCase()+kind.slice(1)} request`,t:r.error?'not available':'created'});
-      if(r.url){media.push({kind,url:r.url});justMade.add(r.url);setTimeout(()=>justMade.delete(r.url),2500)}}}
+      results.push(`${t.tag} → `+(r.error?'FAILED: '+r.error:`done. The ${kind} is already displayed to the user right below your message, so do not add links, file names or markdown images; just describe it briefly or offer changes.`));chips.push({i:kind=='audio'?'audio':kind=='video'?'video':'image',k:t.a.init_url?'Image edit':`${kind[0].toUpperCase()+kind.slice(1)} request`,t:r.error?'not available':'created'});
+      if(r.url){media.push({kind,url:r.url,prompt:t.val});justMade.add(r.url);setTimeout(()=>justMade.delete(r.url),2500)}}}
   return{results,chips,media}}
 // Width and height for an image: from the tag (width/height, size="WxH", aspect="16:9"), else from the words of the request.
 // The engine keeps the shape and renders at the model's native pixel count.
@@ -811,8 +832,8 @@ async function generate(){
     const r=await stream(apiMessages(history,extra,!!intent),{},t=>{ai.content=t;paint(el,ai);scrollDown()});
     ai.content=r.text;ai.stats=r.stats;if(r.error)ai.error=r.error;
     // the reply text comes first; then the media renders live underneath it
-    if(mediaPrompt&&!stopped){ai.content=splitThink(ai.content).body.trim().split(/\n\s*(?:-{3,}|\n)/)[0].trim();ai.pendingMedia=true;paint(el,ai);   // small models ramble after the intro
-      const tr=await runTools([{tag:'generate_'+intent.kind,a:intent.kind=='audio'?{kind:'speech'}:{},val:mediaPrompt}]);ai.pendingMedia=false;
+    if(mediaPrompt&&!stopped){ai.content=stripTags(splitThink(ai.content).body).trim().split(/\n\s*(?:-{3,}|\n)/)[0].trim()||(intent.kind=='edit'?'Here’s the edited version.':'Here you go.');ai.pendingMedia=true;paint(el,ai);   // small models ramble after the intro
+      const tr=await runTools([{tag:'generate_'+(intent.kind=='edit'?'image':intent.kind),a:intent.kind=='audio'?{kind:'speech'}:intent.kind=='edit'?{init_url:intent.url,strength:intent.strength}:{},val:mediaPrompt}]);ai.pendingMedia=false;
       ai.tools=(ai.tools||[]).concat(tr.chips);ai.media=(ai.media||[]).concat(tr.media);
       if(!tr.media.length)ai.content+='\n\n*Sorry, that didn\'t work: '+tr.results.join(' ').replace(/^.*FAILED:\s*/,'')+'*';
       paint(el,ai)}
@@ -1158,6 +1179,8 @@ async function drawStudio(){
    <div class="sizerow"><label>Size</label><input id="p_w" type="number" min="256" max="2048" step="8" value="${prefs.img_width||1024}"><span class="x">×</span><input id="p_h" type="number" min="256" max="2048" step="8" value="${prefs.img_height||1024}">
    <button class="btn" id="p_swap" title="Swap width and height">⇄</button><label class="chk"><input type="checkbox" id="p_auto" ${prefs.img_auto!==false?'checked':''}>Pick from the description</label>
    <label class="chk"><input type="checkbox" id="p_fit" ${prefs.img_fit!==false?'checked':''}>Best quality for this model</label><span class="hint" id="p_hint"></span></div>
+   <div class="startpic" id="sp"><button class="btn" id="spPick">${ico('image')} Start from a picture</button><input type="file" id="spFile" accept="image/*" style="display:none">
+   <span class="hint">Optional: edit a picture instead of starting from noise.</span></div>
    <div class="row"><button class="btn" id="polish">${ico('wand')} Improve prompt</button><button class="btn pri" id="gen">Generate image</button></div>
    <div class="preview" id="pv" style="margin-top:12px;display:none"></div><div class="result" id="res"></div></div>
    ${adv(`<div class="field"><label>Model</label>${modelSelect('image')}</div>
@@ -1203,7 +1226,9 @@ async function drawStudio(){
       if(!prefs.voice){prefs.voice=name;savePrefs()}toast('Voice added');drawVoices()}}
   const promptEl=$(kind=='video'?'v_text':'p_text');
   $('polish').onclick=()=>{const pv=$('pv');pv.style.display='block';polish(kind,promptEl.value||'',pv)};
-  if(kind=='image'){drawGallery();
+  if(kind=='image'){drawGallery();drawStartPic();
+    $('spPick').onclick=()=>$('spFile').click();
+    $('spFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;setStartPic(await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(f)}));e.target.value=''};
     // the size follows the description ("...for my iPhone") until it is typed in by hand; the hint shows what will be rendered
     const hint=()=>{const w=+$('p_w').value||1024,h=+$('p_h').value||1024;let rw=w,rh=h;
       if($('p_fit').checked){const a=w/h,res=1024;rw=Math.round(Math.sqrt(res*res*a)/64)*64;rh=Math.round(rw/a/64)*64}
@@ -1226,7 +1251,8 @@ async function drawStudio(){
     if(!prompt.trim()){toast('Write a prompt first');return}
     const extra={};
     if(kind=='image'){Object.assign(extra,{width:+$('p_w').value,height:+$('p_h').value,fit:$('p_fit').checked,steps:+$('p_steps').value,cfg:+$('p_cfg').value,
-      sampler:$('p_sampler').value,scheduler:$('p_sched').value,negative:$('p_neg').value,vae:$('p_vae').value.trim()});if($('p_seed').value)extra.seed=+$('p_seed').value}
+      sampler:$('p_sampler').value,scheduler:$('p_sched').value,negative:$('p_neg').value,vae:$('p_vae').value.trim()});if($('p_seed').value)extra.seed=+$('p_seed').value;
+      if(startPic){delete extra.width;delete extra.height;extra.init_image=startPic.src;extra.strength=startPic.strength;if(startPic.painted)extra.mask=startPic.mask.toDataURL('image/png')}}
     if(kind=='audio'){Object.assign(extra,{speed:+$('a_speed').value})}
     if(kind=='video'){const r32=v=>Math.max(256,Math.round(v/32)*32);Object.assign(extra,{width:r32(+$('v_w').value),height:r32(+$('v_h').value),steps:+$('v_steps').value,cfg:+$('v_cfg').value,seconds:+$('v_len').value})}
     const b=$('gen');b.disabled=true;const stop=watchProgress($('res'));
@@ -1235,6 +1261,30 @@ async function drawStudio(){
     const media=r.url?(kind=='video'?`<video class="genimg" controls autoplay loop src="${esc(r.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(r.url)}"></audio>`:`<div class="gwrap"><img class="genimg" src="${esc(r.url)}" onclick="viewImg(this.src)"></div>`):'';
     $('res').innerHTML=r.url?`${media}<div class="meta" style="margin:0">${r.width?r.width+' × '+r.height+' · ':''}seed ${r.seed} · ${r.seconds} s</div>`:`<span class="err">${esc(r.error)}</span>`;
     if(r.url)drawGallery()}}
+// ---- Image studio: a start picture with an optional painted mask (white = repaint)
+let startPic=null;
+function setStartPic(src){const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.naturalWidth;c.height=im.naturalHeight;
+  const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,c.width,c.height);startPic={src,w:c.width,h:c.height,mask:c,painted:false,strength:startPic?startPic.strength:0.6,brush:startPic?startPic.brush:48};drawStartPic()};im.src=src}
+function drawStartPic(){const sp=$('sp');if(!sp||!startPic)return;
+  sp.innerHTML=`<div class="spwrap"><div class="spimg"><img src="${startPic.src}"><canvas class="spmask"></canvas></div>
+    <div class="spside"><b>Start picture</b><span class="hint">Paint over the parts to change. Leave it unpainted to restyle the whole picture.</span>
+    <label class="hint">How much to change: <b id="spSv">${Math.round(startPic.strength*100)}%</b></label><input type="range" id="spS" min="5" max="100" value="${Math.round(startPic.strength*100)}">
+    <label class="hint">Brush size</label><input type="range" id="spB" min="8" max="160" value="${startPic.brush}">
+    <div class="row"><button class="btn" id="spClear">Clear paint</button><button class="btn" id="spRm">${ico('x')} Remove</button></div></div></div>`;
+  const cv=sp.querySelector('.spmask'),img=sp.querySelector('.spimg img');cv.width=startPic.w;cv.height=startPic.h;
+  const view=cv.getContext('2d'),mg=startPic.mask.getContext('2d');
+  const redraw=()=>{view.clearRect(0,0,cv.width,cv.height);view.globalAlpha=.55;view.drawImage(startPic.mask,0,0);view.globalCompositeOperation='source-in';view.fillStyle='#8b6cff';view.fillRect(0,0,cv.width,cv.height);view.globalCompositeOperation='source-over';view.globalAlpha=1};
+  redraw();let down=false,lp=null;
+  const at=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*cv.width/r.width,(e.clientY-r.top)*cv.height/r.height]};
+  const stroke=e=>{const p=at(e),k=cv.width/cv.getBoundingClientRect().width;mg.strokeStyle='#fff';mg.lineCap='round';mg.lineJoin='round';mg.lineWidth=startPic.brush*k;
+    mg.beginPath();mg.moveTo(...(lp||p));mg.lineTo(...p);mg.stroke();lp=p;startPic.painted=true;redraw()};
+  cv.onpointerdown=e=>{down=true;lp=null;cv.setPointerCapture(e.pointerId);stroke(e)};cv.onpointermove=e=>{if(down)stroke(e)};cv.onpointerup=()=>{down=false;lp=null};
+  $('spS').oninput=e=>{startPic.strength=e.target.value/100;$('spSv').textContent=e.target.value+'%'};
+  $('spB').oninput=e=>{startPic.brush=+e.target.value};
+  $('spClear').onclick=()=>{mg.fillStyle='#000';mg.fillRect(0,0,startPic.w,startPic.h);startPic.painted=false;redraw()};
+  $('spRm').onclick=()=>{startPic=null;drawStudio()}}
+window.editInStudio=async url=>{const b=await (await fetch(url)).blob();const src=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(b)});
+  if(view!='image')setView('image');setStartPic(src);document.querySelector('.studio').scrollTo?.(0,0);window.scrollTo(0,0)};
 async function drawVoices(){const el=$('voices');if(!el)return;const list=await api('/api/voices');
   el.innerHTML=list.length?list.map(v=>`<div class="memrow"><span><b>${esc(v.name)}</b>${prefs.voice==v.name?' <small style="display:inline;color:var(--ok)">(default)</small>':''}<small>"${esc(v.text.slice(0,90))}"</small></span>
     <audio controls src="${esc(v.url)}" style="height:32px;width:180px"></audio><button class="btn" data-def="${esc(v.name)}">${prefs.voice==v.name?'Default':'Use'}</button><button class="tbtn" data-del="${esc(v.name)}" title="Delete">${ico('trash')}</button></div>`).join('')
@@ -1245,7 +1295,7 @@ async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api
   const st='width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px';
   g.innerHTML=list.length?list.map(x=>x.kind=='video'?`<video src="${esc(x.url)}" title="${esc(x.prompt)}" muted loop onmouseover="this.play()" onmouseout="this.pause()" controls style="${st}"></video>`
     :x.kind=='audio'?`<div title="${esc(x.prompt)}"><audio controls src="${esc(x.url)}" style="width:100%"></audio><small>${esc((x.prompt||'').slice(0,60))}</small></div>`
-    :`<a href="${esc(x.url)}" target="_blank" title="${esc(x.prompt)}"><img src="${esc(x.url)}" loading="lazy" style="${st}"></a>`).join(''):`<div class="ph">Nothing yet</div>`}
+    :`<div class="galimg"><a href="${esc(x.url)}" target="_blank" title="${esc(x.prompt)}"><img src="${esc(x.url)}" loading="lazy" style="${st}"></a><button class="btn galedit" onclick="editInStudio('${esc(x.url)}')">${ico('edit')} Edit</button></div>`).join(''):`<div class="ph">Nothing yet</div>`}
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.
 function watchProgress(el){let on=true,seen=-1;

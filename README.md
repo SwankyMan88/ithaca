@@ -30,6 +30,8 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 - **Reads images.** Paste or drop a picture into the chat (needs a vision model like Gemma 3).
 - **Reads files.** PDF, Word, PowerPoint, Excel, text and code. Short files go in whole; long ones are searched so the model gets the relevant passages and cites the page.
 - **Makes images, video and speech** from a normal chat message, with a live preview while the image renders. Click an image to view it full size, or use the buttons on it to copy or save it.
+- **Edits pictures.** Ask "make it look like an 80s photo" or "add a boat" after an image, or open any picture in the Image studio and paint over the part to change.
+- **Works as a server.** `Ithaca.exe --server` runs an OpenAI-compatible API (chat, vision, images, image edits, speech, video) for your own scripts and apps, with no window.
 - **Remembers you.** A long-term memory the model can save to, search, edit and delete, which you can manage in Settings.
 - **Downloads models** from GPT4All's list or any Hugging Face GGUF repo, and benchmarks your PC so it can tell you how fast each model will run.
 
@@ -111,6 +113,33 @@ Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, avera
 - Reading an image takes about 0.7 s.
 - A 1024 px SDXL image at 20 steps takes about a minute.
 
+## Use it as a server
+
+`Ithaca.exe --server --model file.gguf` starts an OpenAI-compatible API on port 8080 with no app window, like llama.cpp's server. Anything that talks to the OpenAI API can use it: point the base URL at `http://127.0.0.1:8080/v1`.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /v1/models` | The loaded model and every GGUF Ithaca can find |
+| `POST /v1/chat/completions` | Chat, streaming or not. Images as `image_url` data URLs (vision models), `stop` strings, and `"model"` switches to another local model. Reasoning models return their thinking in `reasoning_content`. |
+| `POST /v1/completions` | A single prompt |
+| `POST /v1/images/generations` | Images from text: `size`, `n`, `steps`, `guidance_scale`, `negative_prompt`, `seed`, `response_format` |
+| `POST /v1/images/edits` | Edit a picture: `image` (base64 or multipart), optional `mask` (white = change), `strength` |
+| `POST /v1/audio/speech` | Text to speech in one of your voices (returns WAV) |
+| `POST /v1/videos/generations` | Text to video (Wan 2.2): `prompt`, `seconds`, `size` |
+| `GET /health` | Status |
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -d '{"messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")
+print(client.chat.completions.create(model="default", messages=[{"role": "user", "content": "Hello!"}]).choices[0].message.content)
+```
+
+Options: `--port 8080`, `--host 0.0.0.0` to serve other devices on your network, and `--api-key KEY` (or the `ITHACA_API_KEY` variable) to require `Authorization: Bearer KEY`. In server mode only the API is reachable; the app's own endpoints are switched off.
+
 ## How the memory tiers work
 
 | Tier | What goes there |
@@ -133,6 +162,7 @@ Ithaca.exe [--model file.gguf] [--ctx N] [--vram MB|0] [--ram MB] [--threads N] 
 Ithaca.exe --model file.gguf --prompt "Hello" [--image photo.jpg] [-n 128]
 Ithaca.exe --bench --model file.gguf
 Ithaca.exe --extract report.pdf
+Ithaca.exe --server [--model file.gguf] [--host 0.0.0.0] [--port 8080] [--api-key KEY]
 ```
 
 ## Roadmap
@@ -140,6 +170,7 @@ Ithaca.exe --extract report.pdf
 - Faster prompt processing for Gemma 3 and mixture-of-experts models.
 - More architectures: Mamba hybrids, Qwen2-MoE, IQ quants, split GGUFs.
 - Flux and SD3 image models, LoRAs, image-to-video.
+- AMD and Intel GPUs (Vulkan).
 
 ## Building
 

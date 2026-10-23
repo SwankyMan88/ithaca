@@ -4,6 +4,7 @@
 #include "sd.h"
 #include "tts.h"
 #include "wan.h"
+#include "vision.h"
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -19,6 +20,7 @@ static int g_preview_n = 0;      // bumps on every new preview
 static std::atomic<bool> g_media_busy{false}, g_media_cancel{false};
 bool media_busy() { return g_media_busy; }
 
+std::string b64decode(const std::string& in);
 void chat_model_release();
 void chat_model_restore_later();
 // Frees the chat model's VRAM when a job needs more than is free; restores it when the job ends.
@@ -88,11 +90,36 @@ std::string media_generate_image(const J& req) {
     int def = e.info().default_res;
     j.width = (int)req["width"].num(prefs["img_width"].num(def));
     j.height = (int)req["height"].num(prefs["img_height"].num(def));
+    // Editing: the start picture comes as base64 (init_image, a data URL is fine) or as one of our outputs (init_url).
+    std::string init_bytes, mask_bytes;
+    auto from_b64 = [](const std::string& s) { size_t c = s.find("base64,"); return b64decode(c == std::string::npos ? s : s.substr(c + 7)); };
+    if (!req["init_image"].str().empty()) init_bytes = from_b64(req["init_image"].str());
+    else if (req["init_url"].str().rfind("/outputs/", 0) == 0) {
+        std::string nm = req["init_url"].str().substr(9);
+        if (nm.find_first_of("\\/:") == std::string::npos && nm.find("..") == std::string::npos) init_bytes = read_text(g_store_dir + L"\\outputs\\" + utf8_to_w(nm));
+        if (init_bytes.empty()) return "{\"error\":" + json_esc("The picture to edit wasn't found.") + "}";
+    }
+    if (!req["mask"].str().empty()) mask_bytes = from_b64(req["mask"].str());
+    bool fit = req["fit"].t == J::BOOL && req["fit"].b;
+    if (!init_bytes.empty()) {
+        int iw = 0, ih = 0; std::vector<uint8_t> probe; std::string e2;
+        if (!decode_rgb(init_bytes, iw, ih, probe, e2)) return "{\"error\":" + json_esc("Could not read the picture: " + e2) + "}";
+        if (req["width"].t != J::NUM) { j.width = iw; j.height = ih; fit = true; }   // same shape as the picture
+    }
     {   // "fit": keep the requested shape but render at the model's native pixel count (SDXL ~1 MP); always multiples of 64
         double w = std::max(1, j.width), h = std::max(1, j.height), a = std::max(0.25, std::min(4.0, w / h));
-        if (req["fit"].t == J::BOOL && req["fit"].b) { w = std::sqrt((double)def * def * a); h = w / a; }
+        if (fit) { w = std::sqrt((double)def * def * a); h = w / a; }
         j.width = std::max(256, std::min(2048, (int)std::lround(w / 64) * 64));
         j.height = std::max(256, std::min(2048, (int)std::lround(h / 64) * 64));
+    }
+    if (!init_bytes.empty()) {
+        std::string e2; int w = j.width, h = j.height;
+        if (!decode_rgb(init_bytes, w, h, j.init_rgb, e2)) return "{\"error\":" + json_esc("Could not read the picture: " + e2) + "}";
+        if (!mask_bytes.empty()) {   // white = repaint
+            std::vector<uint8_t> m; w = j.width; h = j.height;
+            if (decode_rgb(mask_bytes, w, h, m, e2)) { j.mask.resize((size_t)w * h); for (size_t p = 0; p < j.mask.size(); p++) j.mask[p] = m[p * 3]; }
+        }
+        j.strength = (float)std::max(0.05, std::min(1.0, req["strength"].num(j.mask.empty() ? 0.6 : 0.9)));
     }
     j.steps = std::max(1, std::min(150, (int)req["steps"].num(prefs["img_steps"].num(25))));
     j.cfg = (float)req["cfg"].num(prefs["img_cfg"].num(e.info().arch == "sdxl" ? 6.0 : 7.0));

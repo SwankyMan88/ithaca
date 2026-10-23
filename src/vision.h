@@ -6,6 +6,9 @@
 #include "gx.h"
 #include <deque>
 
+// PNG/JPEG/... bytes -> RGB8, resized to W x H (0 x 0: native size, written back).
+bool decode_rgb(const std::string& bytes, int& W, int& H, std::vector<uint8_t>& rgb, std::string& err);
+
 class Vision {
 public:
     bool load(const std::wstring& mmproj, int llm_embd, std::string& err);
