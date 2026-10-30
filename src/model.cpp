@@ -558,9 +558,9 @@ void Model::moe_cpu(Layer& L, int n) {
 // Expert slice of a stacked GPU weight: rows [e*R, (e+1)*R).
 static void expert_slice(const Lin& l, int e, int ne, uint64_t& W, uint64_t& qoff) {
     const size_t nb = l.cols / 32, R = l.rows / ne, boff = (size_t)e * R * nb;
-    const size_t sb = l.gkind == CudaTier::K_Q4M || l.gkind == CudaTier::K_Q6 ? 4 : 2, qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
-    W = l.dptr.load() + boff * sb;
-    qoff = l.gqoff + boff * qb - boff * sb;
+    const size_t sbytes = CudaTier::scale_bytes(l.gkind, boff), qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
+    W = l.dptr.load() + sbytes;
+    qoff = l.gqoff + boff * qb - sbytes;
 }
 
 // Mixture-of-experts FFN on the GPU. Routing is read back to the host (one small sync per layer),
@@ -618,9 +618,9 @@ bool Model::moe_grouped(Layer& L, int n) {
     if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
     auto grouped = [&](const Lin& l, uint64_t x, unsigned K_, unsigned N, uint64_t y, bool same_x) {
         const size_t nb = l.cols / 32, R = l.rows / E;
-        const size_t sb = l.gkind == CudaTier::K_Q4M || l.gkind == CudaTier::K_Q6 ? 4 : 2, qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
+        const size_t qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
         uint64_t S = l.dptr.load();
-        return gx().linear_quant_grouped(x, tot, K_, S, S + l.gqoff, l.gkind, N, y, dOff_, E, n, R * nb * sb, R * nb * qb, same_x);
+        return gx().linear_quant_grouped(x, tot, K_, S, S + l.gqoff, l.gkind, N, y, dOff_, E, n, CudaTier::scale_bytes(l.gkind, R * nb), R * nb * qb, same_x);
     };
     cu.ew(CudaTier::GATHER, tot * d, {&dXN_, &dSI_, &dMG_, &d});
     if (!grouped(L.gate_exps, dMG_, d, ff, dMF1_, false) || !grouped(L.up_exps, dMG_, d, ff, dMF2_, true)) return false;
@@ -784,7 +784,7 @@ void Model::bench_gpu() {
     Lin* big = L.gate.t ? &L.gate : &L.gateup;
     Lin* down = &L.down;
     Lin* kk = L.k.t ? &L.k : &L.qkv;
-    auto cost = [](Lin* l) { return (double)l->rows * (l->cols / 32) * (l->gkind == CudaTier::K_Q4_0 ? 18 : l->gkind == CudaTier::K_Q4M ? 20 : l->gkind == CudaTier::K_Q6 ? 28 : 34); };
+    auto cost = [](Lin* l) { return (double)l->rows * (l->cols / 32) * (l->gkind == CudaTier::K_Q4_0 ? 18 : l->gkind == CudaTier::K_Q4M ? 20 : l->gkind == CudaTier::K_Q4K ? 18.5 : l->gkind == CudaTier::K_Q6 ? 28 : 34); };
     timeit("mm gate/up", cost(big), [&] { cu.matmul_dev(big->dptr.load(), big->gqoff, big->gkind, dXN_, 1, big->cols, big->rows, dT_); });
     timeit("mm down", cost(down), [&] { cu.matmul_dev(down->dptr.load(), down->gqoff, down->gkind, dF1_, 1, down->cols, down->rows, dT_); });
     timeit("mm k", cost(kk), [&] { cu.matmul_dev(kk->dptr.load(), kk->gqoff, kk->gkind, dXN_, 1, kk->cols, kk->rows, dK_); });

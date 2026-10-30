@@ -805,13 +805,14 @@ std::string gen_actq(const char* name) {
 // weights sit e * stride bytes further on (quants pQs, scales pSs).
 std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = false) {   // tile: warps M, warps N, fragments M, fragments N
     Out o;
-    const bool q4 = kind == 0 || kind == 2, q6 = kind == 3, pair = kind == 2 || kind == 3;
+    const bool qk = kind == 4, qm = kind == 2 || qk, q4 = kind == 0 || qm, q6 = kind == 3, pair = qm || q6;
     const int WM = tile[0], WN = tile[1], FM = tile[2], FN = tile[3], T = 32 * WM * WN, BM = 16 * FM * WM, BN = 8 * FN * WN, BK = 128, NB = BK / 32;
     const int SA = BK + 16, RB = q4 ? BK / 2 : q6 ? BK / 4 * 3 : BK, SB = RB + 16;   // shared row strides (bytes), padded against bank conflicts
     const int CA = BK / 16, CB = RB / 16;                          // 16-byte chunks per row
     const int EA = BM * CA / T, EB = (BN * CB + T - 1) / T;        // chunks per thread (weights: the last may be partial)
     const int WB = pair ? 8 : 4, SSA = NB * 8 + 8, SSB = NB * WB + WB;   // scale tiles (f32): (d, d*sum) per token row; d or (d, m) per weight row
-    const int WG = WB / 2;                                         // weight scales in VRAM are f16
+    const int WG = qk ? 1 : WB / 2;   // qk: gsb holds a block index (scales are in 20-byte records)
+    (void)0;                                         // weight scales in VRAM are f16
     const int ESA = BM * NB / T, ESB = BN * NB / T;                // scale entries per thread
     const int NC = FM * FN * 4, NR = FM * 2, NW = FN * 2;          // f32 sums, token rows and weight columns per thread
     o(".visible .entry %s(.param .u64 pX, .param .u64 pXD, .param .u64 pW, .param .u64 pS, .param .u64 pY, .param .u32 pM, .param .u32 pN, .param .u32 pK%s)", name,
@@ -871,7 +872,8 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
     }
     for (int i = 0; i < ESB; i++) {
         o(" add.u32 %%r30,%%r12,%d; div.u32 %%r31,%%r30,%d; rem.u32 %%jb%d,%%r30,%d;", i * T, NB, i, NB);
-        o(" add.u32 %%r29,%%r31,%%r15; min.u32 %%r29,%%r29,%%r6; mad.lo.u32 %%r29,%%r29,%%r4,%%jb%d; mul.wide.u32 %%gsb%d,%%r29,%d; add.u64 %%gsb%d,%%rd4,%%gsb%d;", i, i, WG, i, i);
+        o(" add.u32 %%r29,%%r31,%%r15; min.u32 %%r29,%%r29,%%r6; mad.lo.u32 %%r29,%%r29,%%r4,%%jb%d; mul.wide.u32 %%gsb%d,%%r29,%d;", i, i, WG);
+        if (!qk) o(" add.u64 %%gsb%d,%%rd4,%%gsb%d;", i, i);
         o(" mov.u64 %%ssb%d,sSB; mul.lo.u32 %%r29,%%r31,%d; mad.lo.u32 %%r37,%%jb%d,%d,%%r29; cvt.u64.u32 %%rd14,%%r37; add.u64 %%ssb%d,%%ssb%d,%%rd14;", i, SSB, i, WB, i, i);
     }
     // compute-side scale bases: A row wm+g, B row wn+2t
@@ -891,6 +893,13 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
             o(" mov.f32 %%ya%d,0f00000000; mov.f32 %%ya%d,0f00000000; @%%p2 ld.global.nc.v2.f32 {%%ya%d,%%ya%d},[%%rd17];", i * 2, i * 2 + 1, i * 2, i * 2 + 1);
         }
         for (int i = 0; i < ESB; i++) {
+            if (qk) {   // record of this block: [d, dmin, 8 x (sc, m)] -> (sc*d, m*dmin)
+                o(" add.u32 %%r43,%%r42,%%jb%d; setp.lt.u32 %%p2,%%r43,%%r4; cvt.u64.u32 %%rd17,%%r42; add.u64 %%rd17,%%gsb%d,%%rd17; cvt.u32.u64 %%r44,%%rd17;", i, i);
+                o(" shr.u32 %%r45,%%r44,3; mul.wide.u32 %%rd17,%%r45,20; add.u64 %%rd17,%%rd4,%%rd17; and.b32 %%r44,%%r44,7; shl.b32 %%r44,%%r44,1; cvt.u64.u32 %%rd16,%%r44; add.u64 %%rd16,%%rd17,%%rd16;");
+                o(" mov.b16 %%h0,0; mov.b16 %%h1,0; mov.u32 %%r46,0; mov.u32 %%r47,0; @%%p2 ld.global.nc.v2.b16 {%%h0,%%h1},[%%rd17]; @%%p2 ld.global.nc.u8 %%r46,[%%rd16+4]; @%%p2 ld.global.nc.u8 %%r47,[%%rd16+5];");
+                o(" cvt.f32.f16 %%yb%d,%%h0; cvt.f32.f16 %%yb%d,%%h1; cvt.rn.f32.u32 %%f2,%%r46; mul.f32 %%yb%d,%%yb%d,%%f2; cvt.rn.f32.u32 %%f2,%%r47; mul.f32 %%yb%d,%%yb%d,%%f2;", i * 2, i * 2 + 1, i * 2, i * 2, i * 2 + 1, i * 2 + 1);
+                continue;
+            }
             o(" add.u32 %%r43,%%r42,%%jb%d; setp.lt.u32 %%p2,%%r43,%%r4; mul.wide.u32 %%rd17,%%r42,%d; add.u64 %%rd17,%%gsb%d,%%rd17;", i, WG, i);
             o(" mov.b16 %%h0,0; mov.b16 %%h1,0;");
             if (pair) o(" @%%p2 ld.global.nc.v2.b16 {%%h0,%%h1},[%%rd17];");
@@ -946,7 +955,7 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
         for (int k = 0; k < NR; k++) o(" ld.shared.v2.f32 {%%dx%d,%%xs%d},[%%rd15+%d];", k, k, ((k / 2) * 16 + (k % 2) * 8) * SSA + b * 8);
         for (int k = 0; k < NW; k++) {
             int off = ((k / 2) * 8 + k % 2) * SSB + b * WB;
-            if (kind == 2) o(" ld.shared.v2.f32 {%%dw%d,%%mw%d},[%%rd10+%d]; neg.f32 %%mw%d,%%mw%d;", k, k, off, k, k);
+            if (qm) o(" ld.shared.v2.f32 {%%dw%d,%%mw%d},[%%rd10+%d]; neg.f32 %%mw%d,%%mw%d;", k, k, off, k, k);
             else if (q6) o(" ld.shared.v2.f32 {%%dw%d,%%mw%d},[%%rd10+%d];", k, k, off);   // scales of elements 0..15 and 16..31
             else o(" ld.shared.f32 %%dw%d,[%%rd10+%d];", k, off);
         }
@@ -978,7 +987,7 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
                     for (int j = 0; j < 2; j++) {
                         int ii = nt * 4 + h * 2 + j, ci = (mt * FN + nt) * 4 + h * 2 + j, r = mt * 2 + h, w = nt * 2 + j;
                         o(" cvt.rn.f32.s32 %%f0,%%i%d; mul.f32 %%f0,%%f0,%%dx%d; fma.rn.f32 %%c%d,%%f0,%%dw%d,%%c%d;", ii, r, ci, w, ci);
-                        if (kind == 2) o(" fma.rn.f32 %%c%d,%%xs%d,%%mw%d,%%c%d;", ci, r, w, ci);
+                        if (qm) o(" fma.rn.f32 %%c%d,%%xs%d,%%mw%d,%%c%d;", ci, r, w, ci);
                     }
         }
         o("SKIP%d:", b);
@@ -1009,6 +1018,7 @@ std::string gx_ptx_tc() {
            gen_mmq("t_mmq0", 0, kMmqTiles[0]) + gen_mmq("t_mmq1", 1, kMmqTiles[0]) + gen_mmq("t_mmq2", 2, kMmqTiles[0]) +
            gen_mmq("t_mmqs0", 0, kMmqTiles[1]) + gen_mmq("t_mmqs1", 1, kMmqTiles[1]) + gen_mmq("t_mmqs2", 2, kMmqTiles[1]) +
            gen_mmq("t_mmqg0", 0, kMmqTiles[0], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[0], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[0], true) +
+           gen_mmq("t_mmq4", 4, kMmqTiles[0]) + gen_mmq("t_mmqs4", 4, kMmqTiles[1]) + gen_mmq("t_mmqg4", 4, kMmqTiles[0], true) +
            gen_mmq("t_mmq3", 3, kMmqTiles[0]) + gen_mmq("t_mmqg3", 3, kMmqTiles[0], true) +   // 6-bit: big tile only
            gen_flash("t_fa64", 64) + gen_flash("t_fa128", 128) + gen_flash("t_fa72", 72) +
            gen_flash_kv("t_fkv64", 64, 64) + gen_flash_kv("t_fkv80", 80, 80) + gen_flash_kv("t_fkv96", 96, 96) + gen_flash_kv("t_fkv128", 128, 128) + gen_flash_kv("t_fkv256", 256, 128) +

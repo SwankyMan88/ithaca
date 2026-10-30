@@ -79,7 +79,7 @@ bool Gx::init(std::string& err) {
     if (tm) {
         void *a = cu().function(tm, "t_lin"), *b = cu().function(tm, "t_nt"), *c = cu().function(tm, "t_nn"), *d = cu().function(tm, "t_conv");
         if (a && b && c && d) { f_lin_ = a; f_nt_ = b; f_nn_ = c; f_conv_ = d; tc_ = true; f_linf_ = cu().function(tm, "t_linf"); f_linq8_ = cu().function(tm, "t_linq8"); f_linh_ = cu().function(tm, "t_linh"); f_linq8h_ = cu().function(tm, "t_linq8h"); f_fa64_ = cu().function(tm, "t_fa64"); f_fa128_ = cu().function(tm, "t_fa128"); f_fa72_ = cu().function(tm, "t_fa72");
-            f_qx_ = cu().function(tm, "t_qx"); f_actq_ = cu().function(tm, "t_actq"); for (int i = 0; i < 4; i++) { f_mmq_[i] = cu().function(tm, ("t_mmq" + std::to_string(i)).c_str()); f_mmqs_[i] = cu().function(tm, ("t_mmqs" + std::to_string(i)).c_str()); f_mmqg_[i] = cu().function(tm, ("t_mmqg" + std::to_string(i)).c_str()); }
+            f_qx_ = cu().function(tm, "t_qx"); f_actq_ = cu().function(tm, "t_actq"); for (int i = 0; i < 5; i++) { f_mmq_[i] = cu().function(tm, ("t_mmq" + std::to_string(i)).c_str()); f_mmqs_[i] = cu().function(tm, ("t_mmqs" + std::to_string(i)).c_str()); f_mmqg_[i] = cu().function(tm, ("t_mmqg" + std::to_string(i)).c_str()); }
             {   // SM count, for choosing int8 matmul tile sizes
                 typedef int (__stdcall *DA)(int*, int, int); DA da = (DA)GetProcAddress(GetModuleHandleA("nvcuda.dll"), "cuDeviceGetAttribute");
                 int v = 0; if (da && da(&v, 16, 0) == 0 && v > 0) sms_ = v;

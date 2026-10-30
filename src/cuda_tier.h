@@ -9,7 +9,9 @@
 class CudaTier {
 public:
     // GPU weight kinds: Q4 (scale, 4-bit), Q8 (scale, int8), Q4M (scale + min, 4-bit: exact for Q4_K)
-    enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2, K_Q6 = 3, N_KINDS = 4 };
+    enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2, K_Q6 = 3, K_Q4K = 4, N_KINDS = 5 };
+    // bytes of the scale area for `blocks` blocks of 32 (K_Q4K: blocks must be a multiple of 8)
+    static size_t scale_bytes(int kind, size_t blocks) { return kind == K_Q4K ? blocks / 8 * 20 : blocks * (kind == K_Q4M || kind == K_Q6 ? 4 : 2); }
     enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, N_OPS };
     bool init(std::string& info);   // safe to call when no NVIDIA GPU: returns false
     bool ok() const { return ok_; }
