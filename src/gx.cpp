@@ -382,8 +382,9 @@ bool Gx::linear_quant_grouped(uint64_t X, int M, int K, uint64_t S, uint64_t Q, 
     if (!f_mmqg_[kind] || !quantize_x(X, M, K, same_x, XQ, XD)) return false;
     unsigned M_ = M, N_ = N, K_ = K;
     void* a[] = {&XQ, &XD, &Q, &S, &Y, &M_, &N_, &K_, &off, &q_stride, &s_stride};
-    const int bm = 16 * kMmqTiles[0][2] * kMmqTiles[0][0], bn = 8 * kMmqTiles[0][3] * kMmqTiles[0][1];
-    prof_launch(f_mmqg_[kind], (N + bn - 1) / bn, (maxc + bm - 1) / bm, E, 32 * kMmqTiles[0][0] * kMmqTiles[0][1], 0, a);
+    const int* tl = kMmqTiles[kind == 3 ? 0 : 1];
+    const int bm = 16 * tl[2] * tl[0], bn = 8 * tl[3] * tl[1];
+    prof_launch(f_mmqg_[kind], (N + bn - 1) / bn, (maxc + bm - 1) / bm, E, 32 * tl[0] * tl[1], 0, a);
     return true;
 }
 bool Gx::linear_quant(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y, bool same_x) {
@@ -394,21 +395,12 @@ bool Gx::linear_quant(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind
         if (f_mmq_[kind] && quantize_x(X, M, K, same_x, XQ, XD)) {
             unsigned M_ = M, N_ = N, K_ = K;
             void* a[] = {&XQ, &XD, &Q, &S, &Y, &M_, &N_, &K_};
-            // Big tiles reuse more of every load, but a matrix with few tiles leaves SMs idle in the last wave.
-            // Pick the tile whose waves are fuller (the big tile gets a 10% edge for its better reuse).
-            auto grid = [&](int t, unsigned& gx_, unsigned& gy) {
-                int bm = 16 * kMmqTiles[t][2] * kMmqTiles[t][0], bn = 8 * kMmqTiles[t][3] * kMmqTiles[t][1];
-                gx_ = (N + bn - 1) / bn; gy = (M + bm - 1) / bm;
-                double slots = sms_ * (t ? 2.0 : 1.0), blocks = (double)gx_ * gy;   // resident blocks per SM: 1 big, 2 small
-                return blocks / (std::ceil(blocks / slots) * slots);
-            };
-            unsigned gb[2], gs[2];
-            double fb = grid(0, gb[0], gb[1]), fs = grid(1, gs[0], gs[1]);
             static const char* force = getenv("ITHACA_MMQ_TILE");
-            int t = force ? atoi(force) : (fb * 1.1 >= fs ? 0 : 1);
+            int t = force ? atoi(force) : 1;
             void* fn = t ? f_mmqs_[kind] : f_mmq_[kind];
             if (!fn) { t = 0; fn = f_mmq_[kind]; }
-            prof_launch(fn, t ? gs[0] : gb[0], t ? gs[1] : gb[1], 1, 32 * kMmqTiles[t][0] * kMmqTiles[t][1], 0, a);
+            const int bm = 16 * kMmqTiles[t][2] * kMmqTiles[t][0], bn = 8 * kMmqTiles[t][3] * kMmqTiles[t][1];
+            prof_launch(fn, (N + bn - 1) / bn, (M + bm - 1) / bm, 1, 32 * kMmqTiles[t][0] * kMmqTiles[t][1], 0, a);
             return true;
         }
     }

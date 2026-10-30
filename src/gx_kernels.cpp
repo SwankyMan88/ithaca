@@ -6,8 +6,9 @@
 std::string gx_ptx();
 std::string gx_ptx_tc();
 // int8 prompt matmul tiles {warps along tokens, warps along weight rows, 16-token and 8-row mma fragments per warp}:
-// [0] 128 x 128 for big matrices, [1] 128 tokens x 64 rows when the big tile would leave SMs idle. gx.cpp sizes grids from these.
-extern const int kMmqTiles[2][4] = {{2, 4, 4, 4}, {2, 4, 4, 2}};
+// [0] 128 x 128, kept for 6-bit weights; [1] 128 tokens x 64 rows, the fastest measured everywhere else. gx.cpp sizes grids from these.
+// Every shape must give at least one weight scale per thread: BN * 4 >= 32 * WM * WN.
+extern const int kMmqTiles[2][4] = {{2, 4, 4, 4}, {2, 2, 4, 4}};
 static const int kMmqRegs = 0;   // register cap for the int8 matmuls (0 = none)
 
 namespace {
@@ -1017,8 +1018,8 @@ std::string gx_ptx_tc() {
     return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") + gen_actq("t_actq") +
            gen_mmq("t_mmq0", 0, kMmqTiles[0]) + gen_mmq("t_mmq1", 1, kMmqTiles[0]) + gen_mmq("t_mmq2", 2, kMmqTiles[0]) +
            gen_mmq("t_mmqs0", 0, kMmqTiles[1]) + gen_mmq("t_mmqs1", 1, kMmqTiles[1]) + gen_mmq("t_mmqs2", 2, kMmqTiles[1]) +
-           gen_mmq("t_mmqg0", 0, kMmqTiles[0], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[0], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[0], true) +
-           gen_mmq("t_mmq4", 4, kMmqTiles[0]) + gen_mmq("t_mmqs4", 4, kMmqTiles[1]) + gen_mmq("t_mmqg4", 4, kMmqTiles[0], true) +
+           gen_mmq("t_mmqg0", 0, kMmqTiles[1], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[1], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[1], true) +
+           gen_mmq("t_mmq4", 4, kMmqTiles[0]) + gen_mmq("t_mmqs4", 4, kMmqTiles[1]) + gen_mmq("t_mmqg4", 4, kMmqTiles[1], true) +
            gen_mmq("t_mmq3", 3, kMmqTiles[0]) + gen_mmq("t_mmqg3", 3, kMmqTiles[0], true) +   // 6-bit: big tile only
            gen_flash("t_fa64", 64) + gen_flash("t_fa128", 128) + gen_flash("t_fa72", 72) +
            gen_flash_kv("t_fkv64", 64, 64) + gen_flash_kv("t_fkv80", 80, 80) + gen_flash_kv("t_fkv96", 96, 96) + gen_flash_kv("t_fkv128", 128, 128) + gen_flash_kv("t_fkv256", 256, 128) +
