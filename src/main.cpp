@@ -861,6 +861,7 @@ int main() {
         else if (k == "--wait") wait = true;
         else if (k == "--gpubench") { wait = true; gpubench = true; }
         else if (k == "--quanttest") { extern int quant_selftest(const std::wstring&); return quant_selftest(utf8_to_w(nx())); }
+        else if (k == "--vktest") { extern int vk_selftest(); return vk_selftest(); }
         else if (k == "--fatest") { extern int fa_selftest(); return fa_selftest(); }
         else if (k == "--extract") {   // --extract <file>: print the text Ithaca would read from a document
             extern std::string doc_extract_json(const std::string&, const std::string&);

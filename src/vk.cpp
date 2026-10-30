@@ -314,7 +314,7 @@ std::vector<uint32_t> vk_kernel_add() {
     s.push_block({false, true});
     s.begin_main();
     uint32_t i = s.invocation(), n = s.pushu(0), a = s.pushf(1), then = s.id(), merge = s.id();
-    s.o(247, {merge, 0}); s.o(250, {s.ult(i, n), then, merge}); s.o(248, {then});
+    uint32_t in = s.ult(i, n); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
     s.storef(y, i, s.fadd(s.loadf(y, i), s.fmul(a, s.loadf(x, i))));
     s.o(249, {merge}); s.o(248, {merge});
     s.end_main();
@@ -328,7 +328,7 @@ std::vector<uint32_t> vk_kernel_mv_q4() {
     s.begin_main();
     uint32_t vb = s.r(59, s.tPuV, {7}), vj = s.r(59, s.tPuV, {7}), vacc = s.r(59, s.tPfV, {7}), vblk = s.r(59, s.tPfV, {7});
     uint32_t r = s.invocation(), rows = s.pushu(0), nb = s.pushu(1), then = s.id(), merge = s.id();
-    s.o(247, {merge, 0}); s.o(250, {s.ult(r, rows), then, merge}); s.o(248, {then});
+    uint32_t in = s.ult(r, rows); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
     s.o(62, {vacc, s.cf(0.f)});
     s.loop(vb, nb, [&] {
         uint32_t b = s.r(61, s.tU, {vb}), wb = s.add(s.mul(r, nb), b), xb = s.mul(b, s.cu(32));
