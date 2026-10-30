@@ -38,7 +38,8 @@ struct VkFenceInfo { int sType; const void* next; uint32_t flags; };
 struct VkBarrier { int sType; const void* next; uint32_t src, dst; };
 struct VkCopy { uint64_t src, dst, size; };
 
-struct Pipe { VkN dsl, layout, pipe, pool; int bindings, push; };
+struct Pipe { VkN dsl, layout, pipe, pool; int bindings, push; uint32_t used; };
+static const uint32_t kSetsPerPipe = 256;
 struct Vk::Impl {
     HMODULE lib = nullptr;
     VkH inst = nullptr, phys = nullptr, dev = nullptr, queue = nullptr, cmd = nullptr;
@@ -46,6 +47,7 @@ struct Vk::Impl {
     VkMemProps mem{};
     std::map<VkN, VkN> mems;   // buffer -> memory
     std::vector<Pipe> pipes;
+    bool batching = false, batch_ok = true;
 #define VKF(n) VkFn n = nullptr;
     VKF(vkCreateDevice) VKF(vkGetDeviceQueue) VKF(vkCreateBuffer) VKF(vkGetBufferMemoryRequirements) VKF(vkAllocateMemory) VKF(vkBindBufferMemory)
     VKF(vkMapMemory) VKF(vkUnmapMemory) VKF(vkDestroyBuffer) VKF(vkFreeMemory) VKF(vkCreateShaderModule) VKF(vkDestroyShaderModule) VKF(vkCreateDescriptorSetLayout)
@@ -88,7 +90,13 @@ struct Vk::Impl {
         VkBarrier b{46, nullptr, 0x40 | 0x1000, 0x20 | 0x40 | 0x800 | 0x1000};
         ((void(*)(VkH, uint32_t, uint32_t, uint32_t, uint32_t, const VkBarrier*, uint32_t, const void*, uint32_t, const void*))vkCmdPipelineBarrier)(cmd, 0x800 | 0x1000, 0x800 | 0x1000, 0, 1, &b, 0, nullptr, 0, nullptr);
     }
+    void open_batch() {
+        for (auto& x : pipes) if (x.used) { ((int(*)(VkH, VkN, uint32_t))vkResetDescriptorPool)(dev, x.pool, 0); x.used = 0; }
+        begin();
+    }
     bool copy(VkN src, VkN dst, size_t bytes) {
+        if (batching) { batch_ok = submit() && batch_ok; open_batch(); }   // a transfer inside a batch sees everything recorded before it
+        struct Reopen { Impl* d; ~Reopen() { if (d->batching) d->open_batch(); } } reopen{this};
         begin(); VkCopy c{0, 0, bytes};
         ((void(*)(VkH, VkN, VkN, uint32_t, const VkCopy*))vkCmdCopyBuffer)(cmd, src, dst, 1, &c);
         barrier();
@@ -188,8 +196,8 @@ uint64_t Vk::pipeline(const std::vector<uint32_t>& code, int bindings, int push)
     int r = ((int(*)(VkH, VkN, uint32_t, const VkCompInfo*, const void*, VkN*))d->vkCreateComputePipelines)(d->dev, 0, 1, &ci, nullptr, &x.pipe);
     ((void(*)(VkH, VkN, const void*))d->vkDestroyShaderModule)(d->dev, mod, nullptr);
     if (r) return 0;
-    VkPoolSize ps{7, (uint32_t)bindings};
-    VkPoolInfo po{33, nullptr, 0, 1, 1, &ps};
+    VkPoolSize ps{7, (uint32_t)bindings * kSetsPerPipe};
+    VkPoolInfo po{33, nullptr, 0, kSetsPerPipe, 1, &ps};
     ((int(*)(VkH, const VkPoolInfo*, const void*, VkN*))d->vkCreateDescriptorPool)(d->dev, &po, nullptr, &x.pool);
     d->pipes.push_back(x);
     return d->pipes.size();   // handle = index + 1
@@ -198,7 +206,10 @@ bool Vk::dispatch(uint64_t pipe, const std::vector<uint64_t>& bufs, const void* 
     Impl* d = p_;
     if (!pipe || pipe > d->pipes.size()) return false;
     Pipe& x = d->pipes[pipe - 1];
-    ((int(*)(VkH, VkN, uint32_t))d->vkResetDescriptorPool)(d->dev, x.pool, 0);
+    const bool solo = !d->batching;
+    if (solo) begin_batch();
+    else if (x.used == kSetsPerPipe) { d->batch_ok = d->submit() && d->batch_ok; d->open_batch(); }   // out of descriptor sets: run what is recorded
+    x.used++;
     VkSetAlloc sa{34, nullptr, x.pool, 1, &x.dsl};
     VkN set = 0;
     if (((int(*)(VkH, const VkSetAlloc*, VkN*))d->vkAllocateDescriptorSets)(d->dev, &sa, &set)) return false;
@@ -206,14 +217,15 @@ bool Vk::dispatch(uint64_t pipe, const std::vector<uint64_t>& bufs, const void* 
     bi.reserve(bufs.size());
     for (size_t i = 0; i < bufs.size(); i++) { bi.push_back({bufs[i], 0, ~0ull}); w.push_back({35, nullptr, set, (uint32_t)i, 0, 1, 7, nullptr, &bi[i], nullptr}); }
     ((void(*)(VkH, uint32_t, const VkWrite*, uint32_t, const void*))d->vkUpdateDescriptorSets)(d->dev, (uint32_t)w.size(), w.data(), 0, nullptr);
-    d->begin();
     ((void(*)(VkH, int, VkN))d->vkCmdBindPipeline)(d->cmd, 1, x.pipe);
     ((void(*)(VkH, int, VkN, uint32_t, uint32_t, const VkN*, uint32_t, const uint32_t*))d->vkCmdBindDescriptorSets)(d->cmd, 1, x.layout, 0, 1, &set, 0, nullptr);
     if (x.push) ((void(*)(VkH, VkN, uint32_t, uint32_t, uint32_t, const void*))d->vkCmdPushConstants)(d->cmd, x.layout, 0x20, 0, x.push, push);
     ((void(*)(VkH, uint32_t, uint32_t, uint32_t))d->vkCmdDispatch)(d->cmd, gx, 1, 1);
     d->barrier();
-    return d->submit();
+    return solo ? end_batch() : true;
 }
+void Vk::begin_batch() { p_->batching = true; p_->batch_ok = true; p_->open_batch(); }
+bool Vk::end_batch() { p_->batching = false; return p_->submit() && p_->batch_ok; }
 void Vk::shutdown() {
     if (!p_) return;
     if (p_->dev) {
@@ -231,7 +243,7 @@ namespace {
 struct Sp {
     std::vector<uint32_t> head, deco, types, body;
     uint32_t next = 1;
-    uint32_t tVoid, tBool, tU, tF, tV3, tPIn, tPU32F, tPU32FV, tPPush, tFn, gid;
+    uint32_t tVoid, tBool, tU, tF, tV3, tPIn, tPU32F, tPU32FV, tPPush, tFn, gid, ext;
     std::vector<uint32_t> ifaces;
     static void op(std::vector<uint32_t>& v, uint32_t code, std::initializer_list<uint32_t> a) { v.push_back((uint32_t)(a.size() + 1) << 16 | code); v.insert(v.end(), a); }
     uint32_t id() { return next++; }
@@ -240,7 +252,7 @@ struct Sp {
     uint32_t cf(float x) { uint32_t b; memcpy(&b, &x, 4); auto it = kf.find(b); if (it != kf.end()) return it->second; uint32_t i = id(); op(types, 43, {tF, i, b}); return kf[b] = i; }
     uint32_t tPu, tPf, tPuE, tPfE, tPfV, tPuV;
     explicit Sp(unsigned local) {
-        tVoid = id(); tBool = id(); tU = id(); tF = id(); tV3 = id(); tPIn = id(); tFn = id();
+        tVoid = id(); tBool = id(); tU = id(); tF = id(); tV3 = id(); tPIn = id(); tFn = id(); ext = id();
         op(types, 19, {tVoid}); op(types, 20, {tBool}); op(types, 21, {tU, 32, 0}); op(types, 22, {tF, 32});
         op(types, 23, {tV3, tU, 3}); op(types, 32, {tPIn, 1, tV3}); op(types, 33, {tFn, tVoid});
         tPuE = id(); tPfE = id(); tPuV = id(); tPfV = id();
@@ -282,6 +294,10 @@ struct Sp {
     uint32_t band(uint32_t a, uint32_t b) { return r(199, tU, {a, b}); }
     uint32_t fadd(uint32_t a, uint32_t b) { return r(129, tF, {a, b}); }
     uint32_t fmul(uint32_t a, uint32_t b) { return r(133, tF, {a, b}); }
+    uint32_t fdiv(uint32_t a, uint32_t b) { return r(136, tF, {a, b}); }
+    uint32_t bxor(uint32_t a, uint32_t b) { return r(198, tU, {a, b}); }
+    uint32_t tof(uint32_t a) { return r(112, tF, {a}); }
+    uint32_t glsl(uint32_t inst, uint32_t a) { return r(12, tF, {ext, inst, a}); }   // 21 tanh, 27 exp, 31 sqrt
     uint32_t ult(uint32_t a, uint32_t b) { return r(176, tBool, {a, b}); }
     // for (var = 0; var < n; var++) body()
     template <class F> void loop(uint32_t var, uint32_t n, F inner) {
@@ -293,7 +309,7 @@ struct Sp {
     }
     std::vector<uint32_t> finish() {
         std::vector<uint32_t> w = {0x07230203, 0x00010000, 0, next + 1, 0};
-        op(w, 17, {1}); op(w, 14, {0, 1});
+        op(w, 17, {1}); op(w, 11, {ext, 0x4C534C47, 0x6474732E, 0x3035342E, 0}); op(w, 14, {0, 1});
         std::vector<uint32_t> ep = {5, main_, 0x6E69616D, 0}; ep.insert(ep.end(), ifaces.begin(), ifaces.end());
         w.push_back((uint32_t)(ep.size() + 1) << 16 | 15); w.insert(w.end(), ep.begin(), ep.end());
         op(w, 16, {main_, 17, local_, 1, 1});
@@ -351,6 +367,77 @@ std::vector<uint32_t> vk_kernel_mv_q4() {
     return s.finish();
 }
 
+// Q8_0: a f32 scale per block, then 32 int8 weights.
+std::vector<uint32_t> vk_kernel_mv_q8() {
+    Sp s(64);
+    uint32_t S = s.buffer(0, true), Q = s.buffer(1, false), X = s.buffer(2, true), Y = s.buffer(3, true);
+    s.push_block({false, false});
+    s.begin_main();
+    uint32_t vb = s.r(59, s.tPuV, {7}), vacc = s.r(59, s.tPfV, {7});
+    uint32_t r = s.invocation(), rows = s.pushu(0), nb = s.pushu(1), then = s.id(), merge = s.id();
+    uint32_t in = s.ult(r, rows); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
+    s.o(62, {vacc, s.cf(0.f)});
+    s.loop(vb, nb, [&] {
+        uint32_t b = s.r(61, s.tU, {vb}), wb = s.add(s.mul(r, nb), b), xb = s.mul(b, s.cu(32));
+        uint32_t blk = s.cf(0.f), wb8 = s.mul(wb, s.cu(8));
+        for (uint32_t w = 0; w < 8; w++) {
+            uint32_t word = s.loadu(Q, s.add(wb8, s.cu(w)));
+            for (uint32_t k = 0; k < 4; k++) {   // flipping the top bit makes the signed byte an unsigned one offset by 128
+                uint32_t q = s.bxor(s.band(s.shr(word, s.cu(k * 8)), s.cu(255)), s.cu(128));
+                blk = s.fadd(blk, s.fmul(s.fadd(s.tof(q), s.cf(-128.f)), s.loadf(X, s.add(xb, s.cu(w * 4 + k)))));
+            }
+        }
+        s.o(62, {vacc, s.fadd(s.r(61, s.tF, {vacc}), s.fmul(blk, s.loadf(S, wb)))});
+    });
+    s.storef(Y, r, s.r(61, s.tF, {vacc}));
+    s.o(249, {merge}); s.o(248, {merge});
+    s.end_main();
+    return s.finish();
+}
+std::vector<uint32_t> vk_kernel_rmsnorm() {
+    Sp s(16);
+    uint32_t X = s.buffer(0, true), W = s.buffer(1, true), Y = s.buffer(2, true);
+    s.push_block({false, false, true});
+    s.begin_main();
+    uint32_t vi = s.r(59, s.tPuV, {7}), vss = s.r(59, s.tPfV, {7});
+    uint32_t t = s.invocation(), n = s.pushu(0), dim = s.pushu(1), eps = s.pushf(2), then = s.id(), merge = s.id();
+    uint32_t in = s.ult(t, n); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
+    uint32_t base = s.mul(t, dim);
+    s.o(62, {vss, s.cf(0.f)});
+    s.loop(vi, dim, [&] {
+        uint32_t a = s.loadf(X, s.add(base, s.r(61, s.tU, {vi})));
+        s.o(62, {vss, s.fadd(s.r(61, s.tF, {vss}), s.fmul(a, a))});
+    });
+    uint32_t k = s.fdiv(s.cf(1.f), s.glsl(31, s.fadd(s.fdiv(s.r(61, s.tF, {vss}), s.tof(dim)), eps)));
+    s.loop(vi, dim, [&] {
+        uint32_t i = s.r(61, s.tU, {vi}), at = s.add(base, i);
+        s.storef(Y, at, s.fmul(s.fmul(s.loadf(X, at), k), s.loadf(W, i)));
+    });
+    s.o(249, {merge}); s.o(248, {merge});
+    s.end_main();
+    return s.finish();
+}
+std::vector<uint32_t> vk_kernel_act(bool gelu) {
+    Sp s(256);
+    uint32_t A = s.buffer(0, true), B = s.buffer(1, true);
+    s.push_block({false});
+    s.begin_main();
+    uint32_t i = s.invocation(), n = s.pushu(0), then = s.id(), merge = s.id();
+    uint32_t in = s.ult(i, n); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
+    uint32_t x = s.loadf(A, i), v;
+    if (gelu) {
+        uint32_t cube = s.fmul(s.fmul(x, x), x);
+        uint32_t th = s.glsl(21, s.fmul(s.cf(0.7978845608f), s.fadd(x, s.fmul(s.cf(0.044715f), cube))));
+        v = s.fmul(s.fmul(s.cf(0.5f), x), s.fadd(s.cf(1.f), th));
+    } else {
+        v = s.fdiv(x, s.fadd(s.cf(1.f), s.glsl(27, s.fmul(s.cf(-1.f), x))));
+    }
+    s.storef(A, i, s.fmul(v, s.loadf(B, i)));
+    s.o(249, {merge}); s.o(248, {merge});
+    s.end_main();
+    return s.finish();
+}
+
 // --vktest: proves the path end to end against values computed on the CPU.
 int vk_selftest() {
     Vk v; std::string info;
@@ -399,5 +486,81 @@ int vk_selftest() {
     }
     double err = std::sqrt(num / std::max(den, 1e-30));
     printf("  Q4_0 matvec (%u x %u): %s, rel.err %.2e, %.1f ms, %.0f GB/s of weights\n", rows, cols, ok && err < 1e-3 ? "OK" : "BAD", err, sec * 1e3, nblk * 20 / sec / 1e9);
-    return ok && err < 1e-3 ? 0 : 1;
+    bool all = ok && err < 1e-3;
+    {   // a batch longer than the descriptor limit: every dispatch must see the one before, with its own push constants
+        const unsigned n = 4096, cnt = 1000; std::vector<float> a(n), b(n), o(n);
+        for (unsigned i = 0; i < n; i++) { a[i] = u(g); b[i] = u(g); }
+        uint64_t A = v.alloc(n * 4), B = v.alloc(n * 4), Pa = v.pipeline(vk_kernel_add(), 2, 8);
+        v.upload(A, a.data(), n * 4); v.upload(B, b.data(), n * 4);
+        double t1 = now_sec();
+        v.begin_batch();
+        for (unsigned i = 0; i < cnt; i++) { struct { uint32_t n; float k; } c{n, i % 2 ? 0.003f : -0.001f}; v.dispatch(Pa, {A, B}, &c, (n + 255) / 256); }
+        bool bok = v.end_batch();
+        double per = (now_sec() - t1) / cnt;
+        bok = bok && v.download(o.data(), A, n * 4);
+        double e = 0; for (unsigned i = 0; i < n; i++) e = std::max(e, (double)std::fabs(o[i] - (a[i] + b[i])));
+        bok = bok && e < 1e-3;
+        printf("  batch of %u: %s, max error %.2e, %.1f us per dispatch\n", cnt, bok ? "OK" : "BAD", e, per * 1e6);
+        all = all && bok; v.free(A); v.free(B);
+    }
+    {
+        const unsigned qr = 2000, qb = 20; const size_t qn = (size_t)qr * qb;
+        std::vector<float> s8(qn), x8(qb * 32), y8(qr); std::vector<uint32_t> q8(qn * 8);
+        for (auto& x : s8) x = 0.001f + std::fabs(u(g)) * 0.01f;
+        for (auto& x : x8) x = u(g);
+        for (auto& x : q8) x = g();
+        uint64_t a = v.alloc(qn * 4), b = v.alloc(q8.size() * 4), c = v.alloc(x8.size() * 4), d = v.alloc(qr * 4), Pq = v.pipeline(vk_kernel_mv_q8(), 4, 8);
+        v.upload(a, s8.data(), qn * 4); v.upload(b, q8.data(), q8.size() * 4); v.upload(c, x8.data(), x8.size() * 4);
+        uint32_t qc[2] = {qr, qb};
+        bool qok = v.dispatch(Pq, {a, b, c, d}, qc, (qr + 63) / 64) && v.download(y8.data(), d, qr * 4);
+        double n2 = 0, d2 = 0;
+        for (unsigned i = 0; i < qr; i++) {
+            double acc = 0;
+            for (unsigned k = 0; k < qb; k++) {
+                const int8_t* q = (const int8_t*)&q8[((size_t)i * qb + k) * 8]; double t = 0;
+                for (int j = 0; j < 32; j++) t += q[j] * (double)x8[k * 32 + j];
+                acc += t * s8[(size_t)i * qb + k];
+            }
+            n2 += (y8[i] - acc) * (y8[i] - acc); d2 += acc * acc;
+        }
+        double qe = std::sqrt(n2 / std::max(d2, 1e-30)); qok = qok && qe < 1e-3;
+        printf("  Q8_0 matvec: %s, rel.err %.2e\n", qok ? "OK" : "BAD", qe);
+        all = all && qok;
+    }
+    {
+        const unsigned tn = 100, dim = 768; const float eps = 1e-5f;
+        std::vector<float> x(tn * dim), w(dim), y(tn * dim);
+        for (auto& e : x) e = u(g) * 3.f;
+        for (auto& e : w) e = u(g);
+        uint64_t a = v.alloc(x.size() * 4), b = v.alloc(dim * 4), c = v.alloc(y.size() * 4), Pr = v.pipeline(vk_kernel_rmsnorm(), 3, 12);
+        v.upload(a, x.data(), x.size() * 4); v.upload(b, w.data(), dim * 4);
+        struct { uint32_t n, d; float e; } rc{tn, dim, eps};
+        bool rok = v.dispatch(Pr, {a, b, c}, &rc, (tn + 15) / 16) && v.download(y.data(), c, y.size() * 4);
+        double e = 0;
+        for (unsigned t = 0; t < tn; t++) {
+            double ss = 0; for (unsigned i = 0; i < dim; i++) ss += (double)x[t * dim + i] * x[t * dim + i];
+            double k = 1.0 / std::sqrt(ss / dim + eps);
+            for (unsigned i = 0; i < dim; i++) e = std::max(e, std::fabs(y[t * dim + i] - x[t * dim + i] * k * w[i]));
+        }
+        rok = rok && e < 1e-3;
+        printf("  RMS norm: %s, max error %.2e\n", rok ? "OK" : "BAD", e);
+        all = all && rok;
+    }
+    for (int gelu = 0; gelu < 2; gelu++) {
+        const unsigned n = 100000; std::vector<float> a(n), b(n), o(n);
+        for (unsigned i = 0; i < n; i++) { a[i] = u(g) * 6.f; b[i] = u(g); }
+        uint64_t A = v.alloc(n * 4), B = v.alloc(n * 4), Pc = v.pipeline(vk_kernel_act(gelu), 2, 4);
+        v.upload(A, a.data(), n * 4); v.upload(B, b.data(), n * 4);
+        uint32_t ac = n;
+        bool aok = v.dispatch(Pc, {A, B}, &ac, (n + 255) / 256) && v.download(o.data(), A, n * 4);
+        double e = 0;
+        for (unsigned i = 0; i < n; i++) {
+            const double x = a[i], f = gelu ? 0.5 * x * (1 + std::tanh(0.7978845608 * (x + 0.044715 * x * x * x))) : x / (1 + std::exp(-x));
+            e = std::max(e, std::fabs(o[i] - f * b[i]));
+        }
+        aok = aok && e < 1e-3;
+        printf("  %s: %s, max error %.2e\n", gelu ? "GELU" : "SiLU", aok ? "OK" : "BAD", e);
+        all = all && aok;
+    }
+    return all ? 0 : 1;
 }
