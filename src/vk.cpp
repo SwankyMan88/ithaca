@@ -326,22 +326,24 @@ std::vector<uint32_t> vk_kernel_mv_q4() {
     uint32_t S = s.buffer(0, true), Q = s.buffer(1, false), X = s.buffer(2, true), Y = s.buffer(3, true);
     s.push_block({false, false});
     s.begin_main();
-    uint32_t vb = s.r(59, s.tPuV, {7}), vj = s.r(59, s.tPuV, {7}), vacc = s.r(59, s.tPfV, {7}), vblk = s.r(59, s.tPfV, {7});
+    uint32_t vb = s.r(59, s.tPuV, {7}), vacc = s.r(59, s.tPfV, {7});
     uint32_t r = s.invocation(), rows = s.pushu(0), nb = s.pushu(1), then = s.id(), merge = s.id();
     uint32_t in = s.ult(r, rows); s.o(247, {merge, 0}); s.o(250, {in, then, merge}); s.o(248, {then});
     s.o(62, {vacc, s.cf(0.f)});
     s.loop(vb, nb, [&] {
         uint32_t b = s.r(61, s.tU, {vb}), wb = s.add(s.mul(r, nb), b), xb = s.mul(b, s.cu(32));
-        s.o(62, {vblk, s.cf(0.f)});
-        s.loop(vj, s.cu(32), [&] {
-            uint32_t j = s.r(61, s.tU, {vj}), lo = s.band(j, s.cu(15));
-            uint32_t word = s.loadu(Q, s.add(s.mul(wb, s.cu(4)), s.shr(lo, s.cu(2))));
-            uint32_t sh = s.add(s.mul(s.band(lo, s.cu(3)), s.cu(8)), s.mul(s.shr(j, s.cu(4)), s.cu(4)));
-            uint32_t q = s.band(s.shr(word, sh), s.cu(15));
-            uint32_t fq = s.fadd(s.r(112, s.tF, {q}), s.cf(-8.f));
-            s.o(62, {vblk, s.fadd(s.r(61, s.tF, {vblk}), s.fmul(fq, s.loadf(X, s.add(xb, j))))});
-        });
-        s.o(62, {vacc, s.fadd(s.r(61, s.tF, {vacc}), s.fmul(s.r(61, s.tF, {vblk}), s.loadf(S, wb)))});
+        // unrolled: each weight word and each x are loaded once, then 8 multiply-adds per word
+        uint32_t blk = s.cf(0.f), wb4 = s.mul(wb, s.cu(4));
+        for (uint32_t w = 0; w < 4; w++) {
+            uint32_t word = s.loadu(Q, s.add(wb4, s.cu(w)));
+            for (uint32_t k = 0; k < 8; k++) {   // bytes low nibble: element 4w+k; high nibble: element 16+4w+k-4
+                const uint32_t byte = k & 3, high = k >> 2, j = 4 * w + byte + 16 * high;
+                uint32_t q = s.band(s.shr(word, s.cu(byte * 8 + high * 4)), s.cu(15));
+                uint32_t fq = s.fadd(s.r(112, s.tF, {q}), s.cf(-8.f));
+                blk = s.fadd(blk, s.fmul(fq, s.loadf(X, s.add(xb, s.cu(j)))));
+            }
+        }
+        s.o(62, {vacc, s.fadd(s.r(61, s.tF, {vacc}), s.fmul(blk, s.loadf(S, wb)))});
     });
     s.storef(Y, r, s.r(61, s.tF, {vacc}));
     s.o(249, {merge}); s.o(248, {merge});
@@ -379,6 +381,11 @@ int vk_selftest() {
     double t0 = now_sec(); bool ok = true; const int it = 20;
     for (int i = 0; i < it; i++) ok = ok && v.dispatch(P, {bs, bq, bx, by}, pc, (rows + 63) / 64);
     double sec = (now_sec() - t0) / it;
+    {   // the cost of one submit-and-wait with almost no work: real use must batch dispatches into one command buffer
+        uint32_t one[2] = {1, nb}; double t1 = now_sec();
+        for (int i = 0; i < it; i++) v.dispatch(P, {bs, bq, bx, by}, one, 1);
+        printf("  submit and wait: %.0f us per dispatch\n", (now_sec() - t1) / it * 1e6);
+    }
     ok = ok && v.download(Y.data(), by, rows * 4);
     double num = 0, den = 0;
     for (unsigned r = 0; r < rows; r++) {
