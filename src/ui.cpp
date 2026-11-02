@@ -1264,7 +1264,7 @@ async function drawStudio(){
 // ---- Image studio: a start picture with an optional painted mask (white = repaint)
 let startPic=null;
 function setStartPic(src){const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.naturalWidth;c.height=im.naturalHeight;
-  const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,c.width,c.height);startPic={src,w:c.width,h:c.height,mask:c,painted:false,strength:startPic?startPic.strength:0.6,brush:startPic?startPic.brush:48};drawStartPic()};im.src=src}
+  const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,c.width,c.height);const paint=document.createElement('canvas');paint.width=c.width;paint.height=c.height;startPic={src,w:c.width,h:c.height,mask:c,paint,painted:false,strength:startPic?startPic.strength:0.6,brush:startPic?startPic.brush:48};drawStartPic();$('sp')?.scrollIntoView({block:'center'})};im.src=src}
 function drawStartPic(){const sp=$('sp');if(!sp||!startPic)return;
   sp.innerHTML=`<div class="spwrap"><div class="spimg"><img src="${startPic.src}"><canvas class="spmask"></canvas></div>
     <div class="spside"><b>Start picture</b><span class="hint">Paint over the parts to change. Leave it unpainted to restyle the whole picture.</span>
@@ -1272,19 +1272,20 @@ function drawStartPic(){const sp=$('sp');if(!sp||!startPic)return;
     <label class="hint">Brush size</label><input type="range" id="spB" min="8" max="160" value="${startPic.brush}">
     <div class="row"><button class="btn" id="spClear">Clear paint</button><button class="btn" id="spRm">${ico('x')} Remove</button></div></div></div>`;
   const cv=sp.querySelector('.spmask'),img=sp.querySelector('.spimg img');cv.width=startPic.w;cv.height=startPic.h;
-  const view=cv.getContext('2d'),mg=startPic.mask.getContext('2d');
-  const redraw=()=>{view.clearRect(0,0,cv.width,cv.height);view.globalAlpha=.55;view.drawImage(startPic.mask,0,0);view.globalCompositeOperation='source-in';view.fillStyle='#8b6cff';view.fillRect(0,0,cv.width,cv.height);view.globalCompositeOperation='source-over';view.globalAlpha=1};
+  const view=cv.getContext('2d'),mg=startPic.mask.getContext('2d'),pg=startPic.paint.getContext('2d');   // mask: opaque, sent to the engine; paint: the same strokes on transparent, for the overlay
+  const redraw=()=>{view.clearRect(0,0,cv.width,cv.height);view.globalAlpha=.55;view.drawImage(startPic.paint,0,0);view.globalCompositeOperation='source-in';view.fillStyle='#8b6cff';view.fillRect(0,0,cv.width,cv.height);view.globalCompositeOperation='source-over';view.globalAlpha=1};
   redraw();let down=false,lp=null;
   const at=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*cv.width/r.width,(e.clientY-r.top)*cv.height/r.height]};
-  const stroke=e=>{const p=at(e),k=cv.width/cv.getBoundingClientRect().width;mg.strokeStyle='#fff';mg.lineCap='round';mg.lineJoin='round';mg.lineWidth=startPic.brush*k;
-    mg.beginPath();mg.moveTo(...(lp||p));mg.lineTo(...p);mg.stroke();lp=p;startPic.painted=true;redraw()};
-  cv.onpointerdown=e=>{down=true;lp=null;cv.setPointerCapture(e.pointerId);stroke(e)};cv.onpointermove=e=>{if(down)stroke(e)};cv.onpointerup=()=>{down=false;lp=null};
+  const stroke=e=>{const p=at(e),k=cv.width/cv.getBoundingClientRect().width;
+    for(const g of [mg,pg]){g.strokeStyle='#fff';g.lineCap='round';g.lineJoin='round';g.lineWidth=startPic.brush*k;g.beginPath();g.moveTo(...(lp||p));g.lineTo(...p);g.stroke()}
+    lp=p;startPic.painted=true;redraw()};
+  cv.onpointerdown=e=>{down=true;lp=null;cv.setPointerCapture(e.pointerId);stroke(e)};cv.onpointermove=e=>{if(down)stroke(e)};cv.onpointerup=cv.onpointercancel=()=>{down=false;lp=null};
   $('spS').oninput=e=>{startPic.strength=e.target.value/100;$('spSv').textContent=e.target.value+'%'};
   $('spB').oninput=e=>{startPic.brush=+e.target.value};
-  $('spClear').onclick=()=>{mg.fillStyle='#000';mg.fillRect(0,0,startPic.w,startPic.h);startPic.painted=false;redraw()};
+  $('spClear').onclick=()=>{mg.fillStyle='#000';mg.fillRect(0,0,startPic.w,startPic.h);pg.clearRect(0,0,startPic.w,startPic.h);startPic.painted=false;redraw()};
   $('spRm').onclick=()=>{startPic=null;drawStudio()}}
 window.editInStudio=async url=>{const b=await (await fetch(url)).blob();const src=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(b)});
-  if(view!='image')setView('image');setStartPic(src);document.querySelector('.studio').scrollTo?.(0,0);window.scrollTo(0,0)};
+  if(view!='image')setView('image');setStartPic(src)};
 async function drawVoices(){const el=$('voices');if(!el)return;const list=await api('/api/voices');
   el.innerHTML=list.length?list.map(v=>`<div class="memrow"><span><b>${esc(v.name)}</b>${prefs.voice==v.name?' <small style="display:inline;color:var(--ok)">(default)</small>':''}<small>"${esc(v.text.slice(0,90))}"</small></span>
     <audio controls src="${esc(v.url)}" style="height:32px;width:180px"></audio><button class="btn" data-def="${esc(v.name)}">${prefs.voice==v.name?'Default':'Use'}</button><button class="tbtn" data-del="${esc(v.name)}" title="Delete">${ico('trash')}</button></div>`).join('')
