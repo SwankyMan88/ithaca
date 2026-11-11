@@ -890,6 +890,21 @@ int main() {
         else if (k == "--quanttest") { extern int quant_selftest(const std::wstring&); return quant_selftest(utf8_to_w(nx())); }
         else if (k == "--vktest") { extern int vk_selftest(); return vk_selftest(); }
         else if (k == "--fatest") { extern int fa_selftest(); return fa_selftest(); }
+        else if (k == "--dqdump") {   // --dqdump <file.gguf> <out.bin> [rows]: first rows of one tensor per quant type, as f32 (for reference checks)
+            std::wstring f = utf8_to_w(nx()); std::string out = nx(); int rows = atoi(nx().c_str()); if (rows <= 0) rows = 4;
+            GGUF g; std::string err; if (!g.open(f, err)) { printf("%s\n", err.c_str()); return 1; }
+            FILE* o = fopen(out.c_str(), "wb"); std::vector<int> seen;
+            for (auto& t : g.tensors) {
+                if (t.nd != 2 || std::find(seen.begin(), seen.end(), t.type) != seen.end()) continue;
+                seen.push_back(t.type);
+                int cols = (int)t.ne[0], n = (int)std::min<int64_t>(rows, t.ne[1]);
+                std::vector<float> y((size_t)cols * n);
+                for (int r = 0; r < n; r++) dequant_row(t.type, t.data + r * gtype_row_bytes(t.type, cols), y.data() + (size_t)r * cols, cols);
+                printf("%s %s %d %d\n", t.name.c_str(), gtype_name(t.type), n, cols);
+                fwrite(y.data(), 4, y.size(), o);
+            }
+            fclose(o); return 0;
+        }
         else if (k == "--extract") {   // --extract <file>: print the text Ithaca would read from a document
             extern std::string doc_extract_json(const std::string&, const std::string&);
             std::string p = nx(), b; FILE* f = _wfopen(utf8_to_w(p).c_str(), L"rb"); char buf[65536]; size_t r;

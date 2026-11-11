@@ -16,6 +16,15 @@ static TypeInfo tinfo(int t) {
     case GT_Q4_K: return {256, 144, "Q4_K"};
     case GT_Q5_K: return {256, 176, "Q5_K"};
     case GT_Q6_K: return {256, 210, "Q6_K"};
+    case GT_IQ2_XXS: return {256, 66, "IQ2_XXS"};
+    case GT_IQ2_XS: return {256, 74, "IQ2_XS"};
+    case GT_IQ2_S: return {256, 82, "IQ2_S"};
+    case GT_IQ3_XXS: return {256, 98, "IQ3_XXS"};
+    case GT_IQ3_S: return {256, 110, "IQ3_S"};
+    case GT_IQ1_S: return {256, 50, "IQ1_S"};
+    case GT_IQ1_M: return {256, 56, "IQ1_M"};
+    case GT_IQ4_NL: return {32, 18, "IQ4_NL"};
+    case GT_IQ4_XS: return {256, 136, "IQ4_XS"};
     default: return {0, 0, "?"};
     }
 }
@@ -23,7 +32,9 @@ const char* gtype_name(int t) { return tinfo(t).name; }
 bool gtype_supported(int t) {
     switch (t) {
     case GT_F32: case GT_F16: case GT_BF16: case GT_Q4_0: case GT_Q4_1: case GT_Q5_0:
-    case GT_Q5_1: case GT_Q8_0: case GT_Q4_K: case GT_Q5_K: case GT_Q6_K: return true;
+    case GT_Q5_1: case GT_Q8_0: case GT_Q2_K: case GT_Q3_K: case GT_Q4_K: case GT_Q5_K: case GT_Q6_K: return true;
+    case GT_IQ2_XXS: case GT_IQ2_XS: case GT_IQ2_S: case GT_IQ3_XXS: case GT_IQ3_S: case GT_IQ1_S: case GT_IQ1_M:
+    case GT_IQ4_NL: case GT_IQ4_XS: return true;
     default: return false;
     }
 }
