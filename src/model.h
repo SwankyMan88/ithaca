@@ -101,6 +101,7 @@ private:
     void ensure_buffers(int n);
     bool alloc_dev_buffers();
     void gpu_layer(Layer& L, int n, unsigned nc = 0);
+    Layer* xn_ready_ = nullptr; int xn_n_ = 0, xn_past_ = -1;   // prompts: this layer's input norm + int8 input were made by the layer before
     bool ensure_kv(int need);
     void* f_gqa_ = nullptr;
     bool kvq8_ = false;      // VRAM KV cache stored as int8 + scales (half the memory of fp16)

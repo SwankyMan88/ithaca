@@ -769,16 +769,22 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         if (ppn) { cu.sync(); t_mm += now_sec() - t; }
     };
     double T0 = ppn ? (cu.sync(), now_sec()) : 0;
-    cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
+    // Prompts whose matmuls all take the int8 path: norm (and the residual add before it) quantizes straight into
+    // the int8 input, so the matmuls skip their own quantize pass.
+    auto int8 = [&](Lin& w) { return n >= 16 && tc_prefill_ && (w.gkind >= CudaTier::K_IQ ? gx().can_mmq(CudaTier::K_Q8_0) : gx().can_mmq(w.gkind)); };
+    auto attn8 = [&](Layer& l) { return l.qkv.t ? int8(l.qkv) : int8(l.q) && int8(l.k) && int8(l.v); };
+    const bool fa = (xn_ready_ == &L && xn_n_ == n && xn_past_ == n_past) || (attn8(L) && gx().add_norm_quant(dX_, 0, 0, 0.f, L.d_an, dXN_, n, d, eps));   // xn_ready_: the last layer already did it
+    xn_ready_ = nullptr;
+    if (!fa) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
     if (L.qkv.t) {
-        mm(L.qkv, dXN_, dT_);
+        mm(L.qkv, dXN_, dT_, fa);
         unsigned W = qd + 2 * kvd;
         uint64_t sk = dT_ + qd * 4ull, sv = dT_ + (qd + kvd) * 4ull;
         cu.ew(CudaTier::COPY2D, un * qd, {&dT_, &W, &dQ_, &qd, &qd});
         cu.ew(CudaTier::COPY2D, un * kvd, {&sk, &W, &dK_, &kvd, &kvd});
         cu.ew(CudaTier::COPY2D, un * kvd, {&sv, &W, &dV_, &kvd, &kvd});
     } else {
-        mm(L.q, dXN_, dQ_); mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
+        mm(L.q, dXN_, dQ_, fa); mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
     }
     if (L.d_bq) cu.ew(CudaTier::BIAS, un * qd, {&dQ_, &L.d_bq, &qd});
     if (L.d_bk) cu.ew(CudaTier::BIAS, un * kvd, {&dK_, &L.d_bk, &kvd});
@@ -814,21 +820,30 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     mm(L.o, dATT_, dT_);
     if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
     struct PP { bool on; double t0; double& acc; ~PP() { if (on) { cuda().sync(); acc += now_sec() - t0; } } } pp_guard{ppn, T0, t_all};
-    if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
-    cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
-    cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
+    const bool ff8 = !L.gate_exps.t && (L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up));
+    const bool fb = ff8 && gx().add_norm_quant(dX_, dT_, L.d_pan, res, L.d_fn, dXN_, n, d, eps);
+    if (!fb) {
+        if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
+        cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
+        cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
+    }
     if (L.gate_exps.t) { moe_gpu(L, n); return; }
     if (L.gateup.t) {
-        mm(L.gateup, dXN_, dT_);
+        mm(L.gateup, dXN_, dT_, fb);
         cu.ew(CudaTier::SILU_SPLIT, un * ff, {&dT_, &dF1_, &ff});
     } else {
-        mm(L.gate, dXN_, dF1_); mm(L.up, dXN_, dF2_, true);
+        mm(L.gate, dXN_, dF1_, fb); mm(L.up, dXN_, dF2_, true);
         // prompts: the activation goes straight into the down projection's int8 input (dF1_ itself is not written)
         if (n >= 16 && tc_prefill_ && gx().can_mmq(L.down.gkind) && gx().act_quantize(dF1_, dF2_, n, ff, hp.gelu)) { mm(L.down, dF1_, dT_, true); goto ffn_done; }
         cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, un * ff, {&dF1_, &dF2_});
     }
     mm(L.down, dF1_, dT_);
 ffn_done:
+    {   // prompts: this residual add and the next layer's input norm + quantize in one pass
+        const size_t li = &L - layers_.data();
+        Layer* nx = li + 1 < layers_.size() ? &layers_[li + 1] : nullptr;
+        if (nx && nx->state == TIER_GPU && nx->d_an && attn8(*nx) && gx().add_norm_quant(dX_, dT_, L.d_pfn, res, nx->d_an, dXN_, n, d, eps)) { xn_ready_ = nx; xn_n_ = n; xn_past_ = n_past; return; }
+    }
     if (L.d_pfn) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pfn, &dT_, &d, &eps});
     cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
 }
@@ -1200,6 +1215,21 @@ int quant_selftest(const std::wstring& path) {
             }
             double e2 = std::sqrt(n2 / std::max(d2, 1e-30));
             printf("  %-6s %-28s %d tokens: %s rel.err %.5f  %s\n", gtype_name(t.type), t.name.c_str(), T, ran ? "ran," : "LAUNCH FAILED,", e2, ran && e2 < 0.02 ? "OK" : "BAD");
+        }
+        if (getenv("ITHACA_PPBENCH")) {   // full-size tensor, a 512-token prompt through the int8 tensor-core matmul
+            int R = (int)t.ne[1]; size_t nb2 = gtype_row_bytes(t.type, cols) * R; int k2; uint64_t q2;
+            uint64_t W2 = cu.load_weight(fh, (uint64_t)(t.data - g.base), nb2, t.type, R, cols, k2, q2);
+            std::string ge; if (!gx().ok()) gx().init(ge);
+            const int M = 512; uint64_t X = cu.alloc((size_t)M * cols * 4), Y = cu.alloc((size_t)M * R * 4);
+            std::vector<float> hx((size_t)M * cols); for (auto& v : hx) { s = s * 1664525 + 1013904223; v = ((s >> 8) & 0xFFFF) / 32768.f - 1.f; }
+            cu.htod(X, hx.data(), hx.size() * 4);
+            if (W2 && X && Y && gx().can_mmq(k2) && gx().linear_quant(X, M, cols, W2, W2 + q2, k2, R, Y)) {
+                cu.sync(); const int it = 20; double t0 = now_sec();
+                for (int i = 0; i < it; i++) gx().linear_quant(X, M, cols, W2, W2 + q2, k2, R, Y, true);
+                cu.sync(); double us = (now_sec() - t0) / it * 1e6;
+                printf("      prompt 512 x %d x %d: %8.1f us  %.1f TOPS\n", R, cols, us, 2.0 * M * R * cols / (us * 1e6));
+            } else printf("      prompt: no int8 tensor-core path for this type\n");
+            cu.free(X); cu.free(Y); cu.free(W2);
         }
         if (getenv("ITHACA_MMBENCH")) {   // full-size tensor, time n = 1..8 tokens
             int R = (int)t.ne[1]; size_t nb2 = gtype_row_bytes(t.type, cols) * R; int k2; uint64_t q2;

@@ -70,6 +70,9 @@ public:
     // scales and quants are e * s_stride / q_stride bytes past S / Q. maxc: most rows of any expert.
     // Prompts: y = act(g) * u quantized straight into the int8 input of the next linear_quant(g, ..., same_x = true).
     bool act_quantize(uint64_t g, uint64_t u, int M, int K, bool gelu);
+    // Prompts: X += res * T (T rmsnorm'd with Wp first when Wp != 0; no add when T == 0), then XN = rmsnorm(X) * Wn,
+    // quantized straight into the int8 input of the next linear_quant(XN, ..., same_x = true). XN may be 0.
+    bool add_norm_quant(uint64_t X, uint64_t T, uint64_t Wp, float res, uint64_t Wn, uint64_t XN, int M, int D, float eps);
     bool can_mmq(int kind) const { return f_qx_ && f_actq_ && kind >= 0 && kind < 5 && f_mmq_[kind]; }
     bool can_group(int kind) const { return f_qx_ && kind >= 0 && kind < 5 && f_mmqg_[kind]; }
     bool linear_quant_grouped(uint64_t x, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t y,
@@ -137,7 +140,7 @@ private:
     std::unordered_map<uint64_t, uint64_t> q8scale_;   // int8 weight ptr -> f32 row scales
     uint64_t qtmp_ = 0; size_t qtmp_cap_ = 0;
     void *f_linq8_ = nullptr, *f_q8row_ = nullptr, *f_linh_ = nullptr, *f_linq8h_ = nullptr, *f_fa64_ = nullptr, *f_fa128_ = nullptr, *f_fa72_ = nullptr, *f_fkv_[5] = {}, *f_fkq_[5] = {};
-    void *f_actq_ = nullptr, *f_qx_ = nullptr, *f_mmq_[5] = {}, *f_mmqs_[5] = {}, *f_mmqg_[5] = {};   // int8 prompt matmuls: big and small tiles
+    void *f_anq_ = nullptr, *f_actq_ = nullptr, *f_qx_ = nullptr, *f_mmq_[5] = {}, *f_mmqs_[5] = {}, *f_mmqg_[5] = {};   // int8 prompt matmuls: big and small tiles
     int sms_ = 28;
     uint64_t xq_ = 0, xq_src_ = 0; size_t xq_cap_ = 0; int xq_m_ = 0, xq_k_ = 0;   // int8 prompt activations + their block scales
     bool half_ = false;

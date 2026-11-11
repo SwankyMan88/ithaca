@@ -6,6 +6,7 @@
 
 std::string gx_ptx();
 std::string gx_ptx_tc();
+extern const int kMmqTiles[2][4];
 
 Gx& gx() { static Gx g; return g; }
 static void prof_launch(void* fn, unsigned gx_, unsigned gy, unsigned gz, unsigned b, unsigned sh, void** a);
@@ -79,7 +80,19 @@ bool Gx::init(std::string& err) {
     if (tm) {
         void *a = cu().function(tm, "t_lin"), *b = cu().function(tm, "t_nt"), *c = cu().function(tm, "t_nn"), *d = cu().function(tm, "t_conv");
         if (a && b && c && d) { f_lin_ = a; f_nt_ = b; f_nn_ = c; f_conv_ = d; tc_ = true; f_linf_ = cu().function(tm, "t_linf"); f_linq8_ = cu().function(tm, "t_linq8"); f_linh_ = cu().function(tm, "t_linh"); f_linq8h_ = cu().function(tm, "t_linq8h"); f_fa64_ = cu().function(tm, "t_fa64"); f_fa128_ = cu().function(tm, "t_fa128"); f_fa72_ = cu().function(tm, "t_fa72");
-            f_qx_ = cu().function(tm, "t_qx"); f_actq_ = cu().function(tm, "t_actq"); for (int i = 0; i < 5; i++) { f_mmq_[i] = cu().function(tm, ("t_mmq" + std::to_string(i)).c_str()); f_mmqs_[i] = cu().function(tm, ("t_mmqs" + std::to_string(i)).c_str()); f_mmqg_[i] = cu().function(tm, ("t_mmqg" + std::to_string(i)).c_str()); }
+            f_qx_ = cu().function(tm, "t_qx"); f_actq_ = cu().function(tm, "t_actq"); f_anq_ = cu().function(tm, "t_anq"); for (int i = 0; i < 5; i++) { f_mmq_[i] = cu().function(tm, ("t_mmq" + std::to_string(i)).c_str()); f_mmqs_[i] = cu().function(tm, ("t_mmqs" + std::to_string(i)).c_str()); f_mmqg_[i] = cu().function(tm, ("t_mmqg" + std::to_string(i)).c_str()); }
+            if (getenv("ITHACA_KINFO")) {   // registers, spills and shared memory of the int8 matmuls
+                typedef int (__stdcall *FA)(int*, int, void*); FA fa = (FA)GetProcAddress(GetModuleHandleA("nvcuda.dll"), "cuFuncGetAttribute");
+                const char* nm[] = {"t_mmq0", "t_mmq1", "t_mmq2", "t_mmq3", "t_mmq4", "t_mmqs0", "t_mmqs1", "t_mmqs2", "t_mmqs4"};
+                for (const char* n : nm) {
+                    void* f = cu().function(tm, n); if (!f || !fa) continue;
+                    int regs = 0, local = 0, shared = 0; fa(&regs, 4, f); fa(&local, 3, f); fa(&shared, 1, f);
+                    typedef int (__stdcall *FO)(int*, void*, int, size_t); FO fo = (FO)GetProcAddress(GetModuleHandleA("nvcuda.dll"), "cuOccupancyMaxActiveBlocksPerMultiprocessor");
+                    const bool big = n[5] != 's'; const int kd = n[strlen(n) - 1] - '0'; const int* tl = kMmqTiles[big ? 0 : 1]; int occ = -1;
+                    if (fo) fo(&occ, f, 32 * tl[0] * tl[1], (size_t)0); (void)kd;
+                    fprintf(stderr, "[kinfo] %-8s %3d registers, %5d B spilled, %6d B static + %6d B dynamic shared, %d blocks/SM\n", n, regs, local, shared, 0, occ);
+                }
+            }
             {   // SM count, for choosing int8 matmul tile sizes
                 typedef int (__stdcall *DA)(int*, int, int); DA da = (DA)GetProcAddress(GetModuleHandleA("nvcuda.dll"), "cuDeviceGetAttribute");
                 int v = 0; if (da && da(&v, 16, 0) == 0 && v > 0) sms_ = v;
@@ -362,6 +375,19 @@ bool Gx::quantize_x(uint64_t X, int M, int K, bool same_x, uint64_t& XQ, uint64_
         prof_launch(f_qx_, (n * 8 + 255) / 256, 1, 1, 256, 0, qa);
         xq_src_ = X; xq_m_ = M; xq_k_ = K;
     }
+    return true;
+}
+bool Gx::add_norm_quant(uint64_t X, uint64_t T, uint64_t Wp, float res, uint64_t Wn, uint64_t XN, int M, int D, float eps) {
+    static bool off = getenv("ITHACA_NO_ANQ") != nullptr;
+    if (off || !f_anq_ || D % 32 || D > 8192) return false;
+    size_t nb = (size_t)M * D / 32, need = nb * 40;   // same buffer as quantize_x
+    if (need > xq_cap_) { cu().sync(); if (xq_) cu().free(xq_); xq_ = cu().alloc(need); xq_cap_ = xq_ ? need : 0; xq_src_ = 0; }
+    if (!xq_) return false;
+    uint64_t XQ = xq_, XD = xq_ + nb * 32;
+    unsigned m = M, d = D;
+    void* a[] = {&X, &T, &Wp, &res, &Wn, &XN, &XQ, &XD, &d, &eps};
+    prof_launch(f_anq_, m, 1, 1, 256, 0, a);
+    xq_src_ = XN ? XN : X; xq_m_ = M; xq_k_ = D;
     return true;
 }
 bool Gx::act_quantize(uint64_t G, uint64_t U, int M, int K, bool gelu) {

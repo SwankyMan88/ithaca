@@ -797,6 +797,86 @@ std::string gen_actq(const char* name) {
     return o.s;
 }
 
+// t_anq: the residual step and the next norm of a prompt in one pass, one CTA (256 threads) per row:
+//   if T: t = T (rmsnorm'd with Wp first when Wp != 0); X += res * t
+//   xn = rmsnorm(X) * Wn -> XN (f32, when XN != 0) and the int8 matmul input Q / D, like t_qx.
+// Same math as k_rmsnorm + k_add + t_qx. D % 32 == 0, D <= 8192.
+std::string gen_anq(const char* name) {
+    Out o;
+    const int NJ = 8;
+    o(".visible .entry %s(.param .u64 pX, .param .u64 pT, .param .u64 pWp, .param .f32 pR, .param .u64 pWn, .param .u64 pXN, .param .u64 pQ, .param .u64 pD, .param .u32 pDim, .param .f32 pE)", name);
+    o("{");
+    o(" .reg .pred %%p<8>; .reg .pred %%pj<%d>; .reg .b32 %%r<32>; .reg .b64 %%rd<24>; .reg .f32 %%f<24>; .reg .f32 %%x<%d>; .reg .f32 %%t<%d>;", NJ, NJ * 4, NJ * 4);
+    o(" .shared .align 4 .f32 red[8];");
+    o(" ld.param.u64 %%rd1,[pX]; ld.param.u64 %%rd2,[pT]; ld.param.u64 %%rd3,[pWp]; ld.param.f32 %%f1,[pR]; ld.param.u64 %%rd4,[pWn];");
+    o(" ld.param.u64 %%rd5,[pXN]; ld.param.u64 %%rd6,[pQ]; ld.param.u64 %%rd7,[pD]; ld.param.u32 %%r1,[pDim]; ld.param.f32 %%f2,[pE];");
+    o(" mov.u32 %%r2,%%ctaid.x; mov.u32 %%r3,%%tid.x; shr.u32 %%r4,%%r1,2;");   // r4: 4-value chunks per row
+    o(" setp.ne.u64 %%p1,%%rd2,0; setp.ne.u64 %%p2,%%rd3,0; setp.ne.u64 %%p3,%%rd5,0;");
+    o(" mul.wide.u32 %%rd8,%%r2,%%r1; shl.b64 %%rd8,%%rd8,2; mul.wide.u32 %%rd9,%%r3,16;");   // row bytes, this thread's first chunk
+    o(" add.u64 %%rd10,%%rd1,%%rd8; add.u64 %%rd10,%%rd10,%%rd9;");   // X
+    o(" add.u64 %%rd11,%%rd2,%%rd8; add.u64 %%rd11,%%rd11,%%rd9;");   // T
+    o(" add.u64 %%rd12,%%rd3,%%rd9; add.u64 %%rd13,%%rd4,%%rd9;");    // Wp, Wn
+    o(" add.u64 %%rd14,%%rd5,%%rd8; add.u64 %%rd14,%%rd14,%%rd9;");   // XN
+    o(" mov.u32 %%r20,red; and.b32 %%r21,%%r3,31; setp.eq.u32 %%p5,%%r21,0; shr.u32 %%r22,%%r3,5; shl.b32 %%r22,%%r22,2; add.u32 %%r22,%%r20,%%r22;");
+    for (int j = 0; j < NJ; j++) o(" add.u32 %%r5,%%r3,%d; setp.lt.u32 %%pj%d,%%r5,%%r4;", j * 256, j);
+    auto v4 = [&](const char* r, int j) { static char b[96]; snprintf(b, sizeof b, "{%%%s%d,%%%s%d,%%%s%d,%%%s%d}", r, j * 4, r, j * 4 + 1, r, j * 4 + 2, r, j * 4 + 3); return std::string(b); };
+    auto bsum = [&](const char* f) {   // block-wide sum of f into every thread
+        for (int m = 16; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%f9,%s,%d,31,0xffffffff; add.f32 %s,%s,%%f9;", f, m, f, f);
+        o(" @%%p5 st.shared.f32 [%%r22],%s; bar.sync 0; ld.shared.f32 %s,[%%r20];", f, f);
+        for (int w = 1; w < 8; w++) o(" ld.shared.f32 %%f9,[%%r20+%d]; add.f32 %s,%s,%%f9;", w * 4, f, f);
+        o(" bar.sync 0;");
+    };
+    auto rnorm = [&](const char* f) {   // f = sum of squares -> 1 / rms, as k_rmsnorm
+        o(" cvt.rn.f32.u32 %%f10,%%r1; div.rn.f32 %s,%s,%%f10; add.f32 %s,%s,%%f2; rsqrt.approx.f32 %s,%s;", f, f, f, f, f, f);
+    };
+    for (int j = 0; j < NJ; j++) {
+        for (int i = 0; i < 4; i++) o(" mov.f32 %%x%d,0f00000000; mov.f32 %%t%d,0f00000000;", j * 4 + i, j * 4 + i);
+        o(" @%%pj%d ld.global.v4.f32 %s,[%%rd10+%d];", j, v4("x", j).c_str(), j * 4096);
+    }
+    o(" @!%%p1 bra NOT;");
+    for (int j = 0; j < NJ; j++) o(" @%%pj%d ld.global.v4.f32 %s,[%%rd11+%d];", j, v4("t", j).c_str(), j * 4096);
+    o(" @!%%p2 bra NOPN;");
+    o(" mov.f32 %%f3,0f00000000;");
+    for (int i = 0; i < NJ * 4; i++) o(" fma.rn.f32 %%f3,%%t%d,%%t%d,%%f3;", i, i);
+    bsum("%f3"); rnorm("%f3");
+    for (int j = 0; j < NJ; j++) {
+        o(" mov.f32 %%f11,0f00000000; mov.f32 %%f12,0f00000000; mov.f32 %%f13,0f00000000; mov.f32 %%f14,0f00000000;");
+        o(" @%%pj%d ld.global.nc.v4.f32 {%%f11,%%f12,%%f13,%%f14},[%%rd12+%d];", j, j * 4096);
+        for (int i = 0; i < 4; i++) o(" mul.f32 %%t%d,%%t%d,%%f3; mul.f32 %%t%d,%%t%d,%%f%d;", j * 4 + i, j * 4 + i, j * 4 + i, j * 4 + i, 11 + i);
+    }
+    o("NOPN:");
+    for (int j = 0; j < NJ; j++) {
+        for (int i = 0; i < 4; i++) o(" fma.rn.f32 %%x%d,%%t%d,%%f1,%%x%d;", j * 4 + i, j * 4 + i, j * 4 + i);
+        o(" @%%pj%d st.global.v4.f32 [%%rd10+%d],%s;", j, j * 4096, v4("x", j).c_str());
+    }
+    o("NOT:");
+    o(" mov.f32 %%f4,0f00000000;");
+    for (int i = 0; i < NJ * 4; i++) o(" fma.rn.f32 %%f4,%%x%d,%%x%d,%%f4;", i, i);
+    bsum("%f4"); rnorm("%f4");
+    for (int j = 0; j < NJ; j++) {
+        o(" mov.f32 %%f11,0f00000000; mov.f32 %%f12,0f00000000; mov.f32 %%f13,0f00000000; mov.f32 %%f14,0f00000000;");
+        o(" @%%pj%d ld.global.nc.v4.f32 {%%f11,%%f12,%%f13,%%f14},[%%rd13+%d];", j, j * 4096);
+        for (int i = 0; i < 4; i++) o(" mul.f32 %%x%d,%%x%d,%%f4; mul.f32 %%x%d,%%x%d,%%f%d;", j * 4 + i, j * 4 + i, j * 4 + i, j * 4 + i, 11 + i);
+        o(" and.pred %%p4,%%pj%d,%%p3; @%%p4 st.global.v4.f32 [%%rd14+%d],%s;", j, j * 4096, v4("x", j).c_str());
+        // int8 blocks of 32 = 8 neighbouring threads, as t_qx
+        const int a = j * 4;
+        o(" abs.f32 %%f5,%%x%d; abs.f32 %%f6,%%x%d; max.f32 %%f5,%%f5,%%f6; abs.f32 %%f6,%%x%d; max.f32 %%f5,%%f5,%%f6; abs.f32 %%f6,%%x%d; max.f32 %%f5,%%f5,%%f6;", a, a + 1, a + 2, a + 3);
+        for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%f6,%%f5,%d,31,0xffffffff; max.f32 %%f5,%%f5,%%f6;", m);
+        o(" mul.f32 %%f7,%%f5,0f3C010204; setp.gt.f32 %%p0,%%f5,0f00000000; rcp.approx.f32 %%f8,%%f7; selp.f32 %%f8,%%f8,0f00000000,%%p0;");
+        for (int i = 0; i < 4; i++) o(" mul.f32 %%f15,%%x%d,%%f8; cvt.rni.s32.f32 %%r%d,%%f15;", a + i, 6 + i);
+        o(" add.s32 %%r10,%%r6,%%r7; add.s32 %%r10,%%r10,%%r8; add.s32 %%r10,%%r10,%%r9;");
+        for (int m = 4; m >= 1; m /= 2) o(" shfl.sync.bfly.b32 %%r11,%%r10,%d,31,0xffffffff; add.s32 %%r10,%%r10,%%r11;", m);
+        o(" bfi.b32 %%r12,%%r7,%%r6,8,8; bfi.b32 %%r12,%%r8,%%r12,16,8; bfi.b32 %%r12,%%r9,%%r12,24,8;");
+        o(" add.u32 %%r13,%%r3,%d; mad.lo.u32 %%r14,%%r2,%%r4,%%r13;", j * 256);   // global chunk index
+        o(" mul.wide.u32 %%rd15,%%r14,4; add.u64 %%rd15,%%rd6,%%rd15; @%%pj%d st.global.b32 [%%rd15],%%r12;", j);
+        o(" and.b32 %%r15,%%r3,7; setp.eq.and.u32 %%p6,%%r15,0,%%pj%d;", j);
+        o(" cvt.rn.f32.s32 %%f16,%%r10; mul.f32 %%f16,%%f16,%%f7; shr.u32 %%r16,%%r14,3;");
+        o(" mul.wide.u32 %%rd16,%%r16,8; add.u64 %%rd16,%%rd7,%%rd16; @%%p6 st.global.v2.f32 [%%rd16],{%%f7,%%f16};");
+    }
+    o(" ret;\n}");
+    return o.s;
+}
+
 // t_mmq*: Y[M][N] = X[M][K] W^T. XQ int8 [M][K], XD float2 [M][K/32]; W rows in the chat GPU layout:
 // kind 0 = 4-bit (q-8)*d, kind 1 = int8 q*d, kind 2 = 4-bit q*d - m.
 // A block computes (WM*FM*16 tokens) x (WN*FN*8 weight rows) with WM x WN warps; big tiles
@@ -1015,7 +1095,7 @@ std::string gen_mmq(const char* name, int kind, const int* tile, bool grouped = 
 
 // Tensor-core GEMMs live in their own module (needs sm_80+); older GPUs keep the SIMT versions.
 std::string gx_ptx_tc() {
-    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") + gen_actq("t_actq") +
+    return ".version 7.0\n.target sm_80\n.address_size 64\n" + gen_gemm_tc("t_lin", 0) + gen_gemm_tc("t_nt", 1) + gen_gemm_tc("t_nn", 2) + gen_gemm_tc("t_conv", 3) + gen_lin_fast("t_linf", false) + gen_lin_fast("t_linq8", true) + gen_lin_fast("t_linh", false, true) + gen_lin_fast("t_linq8h", true, true) + gen_qx("t_qx") + gen_actq("t_actq") + gen_anq("t_anq") +
            gen_mmq("t_mmq0", 0, kMmqTiles[0]) + gen_mmq("t_mmq1", 1, kMmqTiles[0]) + gen_mmq("t_mmq2", 2, kMmqTiles[0]) +
            gen_mmq("t_mmqs0", 0, kMmqTiles[1]) + gen_mmq("t_mmqs1", 1, kMmqTiles[1]) + gen_mmq("t_mmqs2", 2, kMmqTiles[1]) +
            gen_mmq("t_mmqg0", 0, kMmqTiles[1], true) + gen_mmq("t_mmqg1", 1, kMmqTiles[1], true) + gen_mmq("t_mmqg2", 2, kMmqTiles[1], true) +
