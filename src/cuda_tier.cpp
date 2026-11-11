@@ -563,7 +563,7 @@ bool CudaTier::init(std::string& info) {
     if (cuModuleLoadDataEx(&mod, ptx.c_str(), 2, opts, vals)) { info = std::string("PTX JIT failed: ") + log; return false; }
     for (int m = 0; m < 11; m++) cuModuleGetFunction(&cv_[m], mod, kCvNames[m]);
     cuModuleGetFunction(&fe_[K_Q4_0], mod, "mx_q4"); cuModuleGetFunction(&fe_[K_Q8_0], mod, "mx_q8"); cuModuleGetFunction(&fe_[K_Q4M], mod, "mx_q4m"); cuModuleGetFunction(&fe_[K_Q6], mod, "mx_q6"); cuModuleGetFunction(&fe_[K_Q4K], mod, "mx_q4k");
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < N_IQ; i++) {
         const char* v[3] = {"4_1", "1_1", "2_8"};
         for (int j = 0; j < 3; j++) cuModuleGetFunction(&fiq_[i][j], mod, (std::string("iqmv_") + iq_name(i) + "_" + v[j]).c_str());
         cuModuleGetFunction(&fiqq8_[i], mod, (std::string("iqq8_") + iq_name(i)).c_str());
@@ -819,7 +819,7 @@ static int cv_mode(int gtype) {
 }
 bool CudaTier::iq_to_q8(uint64_t W, int kind, int cols, int rows, uint64_t S, uint64_t Q) {
     const int i = kind - K_IQ;
-    if (i < 0 || i >= 9 || !fiqq8_[i] || !iqtab_) return false;
+    if (i < 0 || i >= N_IQ || !fiqq8_[i] || !iqtab_) return false;
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     uint64_t T = iqtab_; unsigned c = cols, r = rows, blocks = (unsigned)(((size_t)rows * (cols / 32) + 255) / 256);

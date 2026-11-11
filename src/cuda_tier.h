@@ -77,8 +77,9 @@ private:
     void* fns_[N_KINDS] = {};   // n == 1, 1 row per warp (small matrices)
     uint64_t qx_src_ = 0; int qx_n_ = 0, qx_cols_ = 0;   // input of the last activation quantization
     void* fe_[N_KINDS] = {};
-    void* fiq_[9][3] = {};
-    void* fiqq8_[9] = {};    // IQ matrix -> the Q8_0 layout, for prompts on the int8 tensor cores   // per IQ type: 4 rows x 1 token, 1 row x 1 token, 2 rows x 8 tokens
+    static const int N_IQ = 11;   // IQ types plus Q2_K, Q3_K (see iq_index)
+    void* fiq_[N_IQ][3] = {};      // per type: 4 rows x 1 token, 1 row x 1 token, 2 rows x 8 tokens
+    void* fiqq8_[N_IQ] = {};       // the matrix -> the Q8_0 layout, for prompts on the int8 tensor cores
     uint64_t iqtab_ = 0;     // their lookup grids
     void* ftopk_ = nullptr; void* fwsum_ = nullptr; void* fsort_ = nullptr;
     void* cv_[11] = {};
