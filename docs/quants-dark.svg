@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1062" viewBox="0 0 1100 1062" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+<style>
+.bar{transform-box:fill-box;transform-origin:left center;transform:scaleX(0);animation:grow 1.1s cubic-bezier(.2,.8,.2,1) forwards}
+.num{opacity:0;animation:show .5s ease-out forwards}
+@keyframes grow{to{transform:scaleX(1)}}
+@keyframes show{to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.bar{animation:none;transform:none}.num{animation:none;opacity:1}}
+</style>
+<rect width="1100" height="1062" rx="16" fill="#0d1117"/>
+<text x="36" y="48" font-size="22" font-weight="600" fill="#e6edf3">Every quant type, on the GPU</text>
+<text x="36" y="76" font-size="15" fill="#8b949e">Gemma 3 4B on an RTX 3060 12 GB. Ithaca and llama.cpp build 11146 (CUDA), same files, back to back.</text>
+<rect x="830" y="36" width="14" height="14" rx="3" fill="#7c6cff"/><text x="852" y="48" font-size="14" fill="#e6edf3">Ithaca</text>
+<rect x="930" y="36" width="14" height="14" rx="3" fill="#6e7681"/><text x="952" y="48" font-size="14" fill="#e6edf3">llama.cpp</text>
+<text x="330" y="126" font-size="14" font-weight="600" fill="#8b949e">GENERATING (tokens/s)</text>
+<text x="720" y="126" font-size="14" font-weight="600" fill="#8b949e">READING A 512-TOKEN PROMPT (tokens/s)</text>
+<rect x="24" y="154" width="1052" height="26" rx="8" fill="#161b22"/>
+<text x="36" y="172" font-size="13" font-weight="600" fill="#8b949e">4-BIT</text>
+<text x="36" y="203" font-size="16" font-weight="600" fill="#e6edf3">Q4_K_M</text>
+<text x="36" y="221" font-size="12.5" fill="#8b949e">2.3 GB file · 2.4 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.10s" x="330" y="190" width="216.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.90s" x="554.8" y="201" font-size="12.5" fill="#e6edf3">85 <tspan fill="#8b949e" font-weight="600">96%</tspan></text>
+<rect class="bar" style="animation-delay:0.18s" x="330" y="206" width="226.2" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.90s" x="564.2" y="217" font-size="12.5" fill="#8b949e">88</text>
+<rect class="bar" style="animation-delay:0.10s" x="720" y="190" width="209.6" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.90s" x="937.6" y="201" font-size="12.5" fill="#e6edf3">2,911 <tspan fill="#8b949e" font-weight="600">84%</tspan></text>
+<rect class="bar" style="animation-delay:0.18s" x="720" y="206" width="250.6" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.90s" x="978.6" y="217" font-size="12.5" fill="#8b949e">3,480</text>
+<line x1="36" y1="228" x2="1064" y2="228" stroke="#21262d"/>
+<text x="36" y="249" font-size="16" font-weight="600" fill="#e6edf3">IQ4_XS</text>
+<text x="36" y="267" font-size="12.5" fill="#8b949e">2.1 GB file · 2.1 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.14s" x="330" y="236" width="238.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.94s" x="576.8" y="247" font-size="12.5" fill="#e6edf3">93 <tspan fill="#8b949e" font-weight="600">97%</tspan></text>
+<rect class="bar" style="animation-delay:0.22s" x="330" y="252" width="245.7" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.94s" x="583.7" y="263" font-size="12.5" fill="#8b949e">96</text>
+<rect class="bar" style="animation-delay:0.14s" x="720" y="236" width="205.4" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.94s" x="933.4" y="247" font-size="12.5" fill="#e6edf3">2,852 <tspan fill="#8b949e" font-weight="600">72%</tspan></text>
+<rect class="bar" style="animation-delay:0.22s" x="720" y="252" width="287.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.94s" x="1015.0" y="263" font-size="12.5" fill="#8b949e">3,986</text>
+<line x1="36" y1="274" x2="1064" y2="274" stroke="#21262d"/>
+<text x="36" y="295" font-size="16" font-weight="600" fill="#e6edf3">IQ4_NL</text>
+<text x="36" y="313" font-size="12.5" fill="#8b949e">2.2 GB file · 2.2 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.17s" x="330" y="282" width="236.1" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.97s" x="574.1" y="293" font-size="12.5" fill="#e6edf3">92 <tspan fill="#3fb950" font-weight="600">101%</tspan></text>
+<rect class="bar" style="animation-delay:0.25s" x="330" y="298" width="233.1" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.97s" x="571.1" y="309" font-size="12.5" fill="#8b949e">91</text>
+<rect class="bar" style="animation-delay:0.17s" x="720" y="282" width="193.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:0.97s" x="921.8" y="293" font-size="12.5" fill="#e6edf3">2,692 <tspan fill="#8b949e" font-weight="600">65%</tspan></text>
+<rect class="bar" style="animation-delay:0.25s" x="720" y="298" width="300.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:0.97s" x="1028.0" y="309" font-size="12.5" fill="#8b949e">4,166</text>
+<line x1="36" y1="320" x2="1064" y2="320" stroke="#21262d"/>
+<rect x="24" y="326" width="1052" height="26" rx="8" fill="#161b22"/>
+<text x="36" y="344" font-size="13" font-weight="600" fill="#8b949e">3-BIT</text>
+<text x="36" y="375" font-size="16" font-weight="600" fill="#e6edf3">Q3_K_M</text>
+<text x="36" y="393" font-size="12.5" fill="#8b949e">2.0 GB file · 2.0 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.21s" x="330" y="362" width="222.3" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.01s" x="560.3" y="373" font-size="12.5" fill="#e6edf3">87 <tspan fill="#3fb950" font-weight="600">114%</tspan></text>
+<rect class="bar" style="animation-delay:0.29s" x="330" y="378" width="195.2" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.01s" x="533.2" y="389" font-size="12.5" fill="#8b949e">76</text>
+<rect class="bar" style="animation-delay:0.21s" x="720" y="362" width="207.6" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.01s" x="935.6" y="373" font-size="12.5" fill="#e6edf3">2,883 <tspan fill="#8b949e" font-weight="600">81%</tspan></text>
+<rect class="bar" style="animation-delay:0.29s" x="720" y="378" width="255.4" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.01s" x="983.4" y="389" font-size="12.5" fill="#8b949e">3,546</text>
+<line x1="36" y1="400" x2="1064" y2="400" stroke="#21262d"/>
+<text x="36" y="421" font-size="16" font-weight="600" fill="#e6edf3">Q3_K_S</text>
+<text x="36" y="439" font-size="12.5" fill="#8b949e">1.8 GB file · 1.8 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.24s" x="330" y="408" width="242.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.04s" x="580.8" y="419" font-size="12.5" fill="#e6edf3">95 <tspan fill="#3fb950" font-weight="600">126%</tspan></text>
+<rect class="bar" style="animation-delay:0.32s" x="330" y="424" width="192.9" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.04s" x="530.9" y="435" font-size="12.5" fill="#8b949e">75</text>
+<rect class="bar" style="animation-delay:0.24s" x="720" y="408" width="210.0" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.04s" x="938.0" y="419" font-size="12.5" fill="#e6edf3">2,917 <tspan fill="#8b949e" font-weight="600">80%</tspan></text>
+<rect class="bar" style="animation-delay:0.32s" x="720" y="424" width="261.8" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.04s" x="989.8" y="435" font-size="12.5" fill="#8b949e">3,636</text>
+<line x1="36" y1="446" x2="1064" y2="446" stroke="#21262d"/>
+<text x="36" y="467" font-size="16" font-weight="600" fill="#e6edf3">IQ3_M</text>
+<text x="36" y="485" font-size="12.5" fill="#8b949e">1.8 GB file · 1.9 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.28s" x="330" y="454" width="229.5" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.08s" x="567.5" y="465" font-size="12.5" fill="#e6edf3">90 <tspan fill="#3fb950" font-weight="600">100%</tspan></text>
+<rect class="bar" style="animation-delay:0.36s" x="330" y="470" width="229.5" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.08s" x="567.5" y="481" font-size="12.5" fill="#8b949e">90</text>
+<rect class="bar" style="animation-delay:0.28s" x="720" y="454" width="201.7" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.08s" x="929.7" y="465" font-size="12.5" fill="#e6edf3">2,802 <tspan fill="#8b949e" font-weight="600">83%</tspan></text>
+<rect class="bar" style="animation-delay:0.36s" x="720" y="470" width="241.7" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.08s" x="969.7" y="481" font-size="12.5" fill="#8b949e">3,357</text>
+<line x1="36" y1="492" x2="1064" y2="492" stroke="#21262d"/>
+<text x="36" y="513" font-size="16" font-weight="600" fill="#e6edf3">IQ3_S</text>
+<text x="36" y="531" font-size="12.5" fill="#8b949e">1.8 GB file · 1.8 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.31s" x="330" y="500" width="236.0" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.11s" x="574.0" y="511" font-size="12.5" fill="#e6edf3">92 <tspan fill="#3fb950" font-weight="600">101%</tspan></text>
+<rect class="bar" style="animation-delay:0.39s" x="330" y="516" width="232.9" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.11s" x="570.9" y="527" font-size="12.5" fill="#8b949e">91</text>
+<rect class="bar" style="animation-delay:0.31s" x="720" y="500" width="198.1" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.11s" x="926.1" y="511" font-size="12.5" fill="#e6edf3">2,752 <tspan fill="#8b949e" font-weight="600">68%</tspan></text>
+<rect class="bar" style="animation-delay:0.39s" x="720" y="516" width="290.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.11s" x="1018.0" y="527" font-size="12.5" fill="#8b949e">4,028</text>
+<line x1="36" y1="538" x2="1064" y2="538" stroke="#21262d"/>
+<text x="36" y="559" font-size="16" font-weight="600" fill="#e6edf3">IQ3_XS</text>
+<text x="36" y="577" font-size="12.5" fill="#8b949e">1.7 GB file · 1.8 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.35s" x="330" y="546" width="247.3" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.15s" x="585.3" y="557" font-size="12.5" fill="#e6edf3">97 <tspan fill="#3fb950" font-weight="600">105%</tspan></text>
+<rect class="bar" style="animation-delay:0.43s" x="330" y="562" width="236.5" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.15s" x="574.5" y="573" font-size="12.5" fill="#8b949e">92</text>
+<rect class="bar" style="animation-delay:0.35s" x="720" y="546" width="198.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.15s" x="926.8" y="557" font-size="12.5" fill="#e6edf3">2,761 <tspan fill="#8b949e" font-weight="600">71%</tspan></text>
+<rect class="bar" style="animation-delay:0.43s" x="720" y="562" width="279.2" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.15s" x="1007.2" y="573" font-size="12.5" fill="#8b949e">3,877</text>
+<line x1="36" y1="584" x2="1064" y2="584" stroke="#21262d"/>
+<text x="36" y="605" font-size="16" font-weight="600" fill="#e6edf3">IQ3_XXS</text>
+<text x="36" y="623" font-size="12.5" fill="#8b949e">1.6 GB file · 1.8 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.38s" x="330" y="592" width="233.0" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.18s" x="571.0" y="603" font-size="12.5" fill="#e6edf3">91 <tspan fill="#8b949e" font-weight="600">91%</tspan></text>
+<rect class="bar" style="animation-delay:0.46s" x="330" y="608" width="255.2" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.18s" x="593.2" y="619" font-size="12.5" fill="#8b949e">100</text>
+<rect class="bar" style="animation-delay:0.38s" x="720" y="592" width="202.8" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.18s" x="930.8" y="603" font-size="12.5" fill="#e6edf3">2,816 <tspan fill="#8b949e" font-weight="600">77%</tspan></text>
+<rect class="bar" style="animation-delay:0.46s" x="720" y="608" width="265.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.18s" x="993.0" y="619" font-size="12.5" fill="#8b949e">3,680</text>
+<line x1="36" y1="630" x2="1064" y2="630" stroke="#21262d"/>
+<rect x="24" y="636" width="1052" height="26" rx="8" fill="#161b22"/>
+<text x="36" y="654" font-size="13" font-weight="600" fill="#8b949e">2-BIT</text>
+<text x="36" y="685" font-size="16" font-weight="600" fill="#e6edf3">Q2_K</text>
+<text x="36" y="703" font-size="12.5" fill="#8b949e">1.6 GB file · 1.6 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.42s" x="330" y="672" width="280.7" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.22s" x="618.7" y="683" font-size="12.5" fill="#e6edf3">110 <tspan fill="#3fb950" font-weight="600">123%</tspan></text>
+<rect class="bar" style="animation-delay:0.50s" x="330" y="688" width="227.5" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.22s" x="565.5" y="699" font-size="12.5" fill="#8b949e">89</text>
+<rect class="bar" style="animation-delay:0.42s" x="720" y="672" width="197.7" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.22s" x="925.7" y="683" font-size="12.5" fill="#e6edf3">2,746 <tspan fill="#8b949e" font-weight="600">91%</tspan></text>
+<rect class="bar" style="animation-delay:0.50s" x="720" y="688" width="217.1" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.22s" x="945.1" y="699" font-size="12.5" fill="#8b949e">3,014</text>
+<line x1="36" y1="710" x2="1064" y2="710" stroke="#21262d"/>
+<text x="36" y="731" font-size="16" font-weight="600" fill="#e6edf3">IQ2_M</text>
+<text x="36" y="749" font-size="12.5" fill="#8b949e">1.4 GB file · 1.7 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.45s" x="330" y="718" width="234.3" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.25s" x="572.3" y="729" font-size="12.5" fill="#e6edf3">91 <tspan fill="#8b949e" font-weight="600">95%</tspan></text>
+<rect class="bar" style="animation-delay:0.53s" x="330" y="734" width="245.4" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.25s" x="583.4" y="745" font-size="12.5" fill="#8b949e">96</text>
+<rect class="bar" style="animation-delay:0.45s" x="720" y="718" width="195.7" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.25s" x="923.7" y="729" font-size="12.5" fill="#e6edf3">2,718 <tspan fill="#8b949e" font-weight="600">83%</tspan></text>
+<rect class="bar" style="animation-delay:0.53s" x="720" y="734" width="235.6" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.25s" x="963.6" y="745" font-size="12.5" fill="#8b949e">3,271</text>
+<line x1="36" y1="756" x2="1064" y2="756" stroke="#21262d"/>
+<text x="36" y="777" font-size="16" font-weight="600" fill="#e6edf3">IQ2_S</text>
+<text x="36" y="795" font-size="12.5" fill="#8b949e">1.3 GB file · 1.6 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.48s" x="330" y="764" width="256.5" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.29s" x="594.5" y="775" font-size="12.5" fill="#e6edf3">100 <tspan fill="#3fb950" font-weight="600">104%</tspan></text>
+<rect class="bar" style="animation-delay:0.56s" x="330" y="780" width="247.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.29s" x="585.0" y="791" font-size="12.5" fill="#8b949e">96</text>
+<rect class="bar" style="animation-delay:0.48s" x="720" y="764" width="199.9" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.29s" x="927.9" y="775" font-size="12.5" fill="#e6edf3">2,776 <tspan fill="#8b949e" font-weight="600">82%</tspan></text>
+<rect class="bar" style="animation-delay:0.56s" x="720" y="780" width="244.5" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.29s" x="972.5" y="791" font-size="12.5" fill="#8b949e">3,395</text>
+<line x1="36" y1="802" x2="1064" y2="802" stroke="#21262d"/>
+<text x="36" y="823" font-size="16" font-weight="600" fill="#e6edf3">IQ2_XS</text>
+<text x="36" y="841" font-size="12.5" fill="#8b949e">1.3 GB file · 1.5 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.52s" x="330" y="810" width="252.3" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.32s" x="590.3" y="821" font-size="12.5" fill="#e6edf3">98 <tspan fill="#3fb950" font-weight="600">102%</tspan></text>
+<rect class="bar" style="animation-delay:0.60s" x="330" y="826" width="248.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.32s" x="586.0" y="837" font-size="12.5" fill="#8b949e">97</text>
+<rect class="bar" style="animation-delay:0.52s" x="720" y="810" width="196.2" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.32s" x="924.2" y="821" font-size="12.5" fill="#e6edf3">2,725 <tspan fill="#8b949e" font-weight="600">93%</tspan></text>
+<rect class="bar" style="animation-delay:0.60s" x="720" y="826" width="211.3" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.32s" x="939.3" y="837" font-size="12.5" fill="#8b949e">2,935</text>
+<line x1="36" y1="848" x2="1064" y2="848" stroke="#21262d"/>
+<text x="36" y="869" font-size="16" font-weight="600" fill="#e6edf3">IQ2_XXS</text>
+<text x="36" y="887" font-size="12.5" fill="#8b949e">1.2 GB file · 1.4 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.56s" x="330" y="856" width="278.5" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.35s" x="616.5" y="867" font-size="12.5" fill="#e6edf3">109 <tspan fill="#3fb950" font-weight="600">108%</tspan></text>
+<rect class="bar" style="animation-delay:0.64s" x="330" y="872" width="257.5" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.35s" x="595.5" y="883" font-size="12.5" fill="#8b949e">100</text>
+<rect class="bar" style="animation-delay:0.56s" x="720" y="856" width="201.5" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.35s" x="929.5" y="867" font-size="12.5" fill="#e6edf3">2,798 <tspan fill="#8b949e" font-weight="600">76%</tspan></text>
+<rect class="bar" style="animation-delay:0.64s" x="720" y="872" width="265.1" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.35s" x="993.1" y="883" font-size="12.5" fill="#8b949e">3,682</text>
+<line x1="36" y1="894" x2="1064" y2="894" stroke="#21262d"/>
+<rect x="24" y="900" width="1052" height="26" rx="8" fill="#161b22"/>
+<text x="36" y="918" font-size="13" font-weight="600" fill="#8b949e">1-BIT</text>
+<text x="36" y="949" font-size="16" font-weight="600" fill="#e6edf3">IQ1_M</text>
+<text x="36" y="967" font-size="12.5" fill="#8b949e">1.1 GB file · 1.3 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.59s" x="330" y="936" width="246.6" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.39s" x="584.6" y="947" font-size="12.5" fill="#e6edf3">96 <tspan fill="#8b949e" font-weight="600">93%</tspan></text>
+<rect class="bar" style="animation-delay:0.67s" x="330" y="952" width="264.9" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.39s" x="602.9" y="963" font-size="12.5" fill="#8b949e">103</text>
+<rect class="bar" style="animation-delay:0.59s" x="720" y="936" width="206.4" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.39s" x="934.4" y="947" font-size="12.5" fill="#e6edf3">2,866 <tspan fill="#8b949e" font-weight="600">94%</tspan></text>
+<rect class="bar" style="animation-delay:0.67s" x="720" y="952" width="219.9" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.39s" x="947.9" y="963" font-size="12.5" fill="#8b949e">3,054</text>
+<line x1="36" y1="974" x2="1064" y2="974" stroke="#21262d"/>
+<text x="36" y="995" font-size="16" font-weight="600" fill="#e6edf3">IQ1_S</text>
+<text x="36" y="1013" font-size="12.5" fill="#8b949e">1.1 GB file · 1.3 GB VRAM</text>
+<rect class="bar" style="animation-delay:0.62s" x="330" y="982" width="259.3" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.43s" x="597.3" y="993" font-size="12.5" fill="#e6edf3">101 <tspan fill="#8b949e" font-weight="600">86%</tspan></text>
+<rect class="bar" style="animation-delay:0.70s" x="330" y="998" width="300.0" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.43s" x="638.0" y="1009" font-size="12.5" fill="#8b949e">117</text>
+<rect class="bar" style="animation-delay:0.62s" x="720" y="982" width="205.0" height="13" rx="3" fill="#7c6cff"/>
+<text class="num" style="animation-delay:1.43s" x="933.0" y="993" font-size="12.5" fill="#e6edf3">2,846 <tspan fill="#8b949e" font-weight="600">79%</tspan></text>
+<rect class="bar" style="animation-delay:0.70s" x="720" y="998" width="259.1" height="13" rx="3" fill="#6e7681"/>
+<text class="num" style="animation-delay:1.43s" x="987.1" y="1009" font-size="12.5" fill="#8b949e">3,598</text>
+<line x1="36" y1="1020" x2="1064" y2="1020" stroke="#21262d"/>
+<text x="36" y="1044" font-size="13" fill="#8b949e">Percent: Ithaca as a share of llama.cpp (green: faster). Test files requantized from Q4_K_M; details in docs/quant-speeds.md.</text>
+</svg>

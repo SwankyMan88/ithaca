@@ -29,9 +29,10 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 - **Runs models bigger than your VRAM.** Layers that don't fit on the GPU go to RAM, and what doesn't fit there streams from the SSD. You can start chatting immediately while layers move up in the background.
 - **Reads images.** Paste or drop a picture into the chat (needs a vision model like Gemma 3).
 - **Reads files.** PDF, Word, PowerPoint, Excel, text and code. Short files go in whole; long ones are searched so the model gets the relevant passages and cites the page.
-- **Makes images, video and speech** from a normal chat message, with a live preview while the image renders. Click an image to view it full size, or use the buttons on it to copy or save it.
+- **Makes images, video and speech** from a normal chat message, with a live preview while the image renders. Click an image to view it full size, or use the buttons on it to copy or save it. The gallery can save or delete anything you made.
 - **Edits pictures.** Ask "make it look like an 80s photo" or "add a boat" after an image, or open any picture in the Image studio and paint over the part to change.
-- **Works as a server.** `Ithaca.exe --server` runs an OpenAI-compatible API (chat, vision, images, image edits, speech, video) for your own scripts and apps, with no window.
+- **Works as a server.** `Ithaca.exe --server` runs an OpenAI-compatible API (chat, vision, images, image edits, speech, video) for your own scripts and apps, with no window. `/v1/ithaca/park` and `/v1/ithaca/wake` move the chat model to RAM and back in about half a second, to free VRAM for something else.
+- **Works on touchscreens.** Every button works without a mouse, and the layout fits tablets and phones.
 - **Remembers you.** A long-term memory the model can save to, search, edit and delete, which you can manage in Settings.
 - **Downloads models** from GPT4All's list or any Hugging Face GGUF repo, and benchmarks your PC so it can tell you how fast each model will run.
 
@@ -66,7 +67,7 @@ Settings, chats and memories are kept next to the exe, so the folder is portable
 
 Chat models (GGUF): Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Phi-3/4, Granite, Granite-MoE, Gemma 3 and the DeepSeek-R1 distills.
 
-Quantizations: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K and Q6_K. 4-bit weights stay 4-bit on the GPU.
+Quantizations: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, and the IQ family (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS). 4-bit and lower weights stay that small on the GPU, so a 2-bit file needs about a quarter of the VRAM of an 8-bit one.
 
 For image input, put the model's `mmproj` file next to it (for example `gemma-3-4b-it-Q4_K_M.gguf` with `mmproj-model-f16.gguf`). Ithaca picks it up automatically.
 
@@ -78,7 +79,7 @@ Media engines:
 | Video | Wan 2.2 TI2V-5B | Needs the umT5 encoder and the Wan 2.2 VAE; saves MP4 |
 | Speech | F5-TTS + Vocos | Voice cloning from a 5 to 12 second clip |
 
-Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, IQ and Q2/Q3_K quants, split GGUFs, Flux/SD3, LoRAs, image-to-video.
+Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, split GGUFs, Flux/SD3, LoRAs, image-to-video.
 
 ## Speed, compared with llama.cpp
 
@@ -89,16 +90,18 @@ Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, IQ and Q2/Q3_K quan
 
 Ithaca's own kernels generate at 96–111% of llama.cpp's speed and read prompts at 75–86% of it.
 
-| Model | Generation (Ithaca / llama.cpp) | Prompt, 512 tokens (Ithaca / llama.cpp) |
-|---|---|---|
-| Granite 3.1 MoE 3B Q4_K_M | 268 / 241 tok/s | 5,761 / 7,064 tok/s |
-| Gemma 3 4B Q4_K_M | 95 / 98 tok/s | 3,004 / 4,027 tok/s |
-| Qwen2.5 Coder 7B Q4_0 | 70 / 73 tok/s | 2,178 / 2,609 tok/s |
-| Granite 4.1 8B Q4_0 | 59 / 61 tok/s | 1,720 / 2,004 tok/s |
-| Qwen3 14B Q4_0 | 37 / 38 tok/s | 1,114 / 1,292 tok/s |
-| Qwen3 14B Q4_0, code, with Qwen3 0.6B as draft | 44 tok/s | |
+Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others). Qwen3 14B code generation with Qwen3 0.6B as a draft model reaches 44 tok/s.
 
-Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others).
+### Every quant type
+
+Low-bit files let bigger models fit in less VRAM. Ithaca runs all of them on the GPU at their compact size, and generates at about llama.cpp's speed (faster on the K-quants).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/quants-dark.svg">
+  <img src="docs/quants-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp for every quant type on Gemma 3 4B">
+</picture>
+
+Method and raw numbers: [docs/quant-speeds.md](docs/quant-speeds.md).
 
 ### Why use it over llama.cpp, Ollama or LM Studio?
 
