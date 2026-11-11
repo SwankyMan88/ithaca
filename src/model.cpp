@@ -820,7 +820,8 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     mm(L.o, dATT_, dT_);
     if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
     struct PP { bool on; double t0; double& acc; ~PP() { if (on) { cuda().sync(); acc += now_sec() - t0; } } } pp_guard{ppn, T0, t_all};
-    const bool ff8 = !L.gate_exps.t && (L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up));
+    // MoE: the experts gather their own tokens, so only the add + norm are saved (the int8 copy goes unused)
+    const bool ff8 = L.gate_exps.t ? n >= 16 && tc_prefill_ : L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up);
     const bool fb = ff8 && gx().add_norm_quant(dX_, dT_, L.d_pan, res, L.d_fn, dXN_, n, d, eps);
     if (!fb) {
         if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
