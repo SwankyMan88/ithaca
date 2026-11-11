@@ -38,6 +38,8 @@ static CUresult(CUAPI* cuGraphDestroy)(void*);
 static CUresult(CUAPI* cuMemGetInfo)(size_t*, size_t*);
 static CUresult(CUAPI* cuCtxSynchronize)();
 static CUresult(CUAPI* cuMemHostAlloc)(void**, size_t, unsigned);
+static CUresult(CUAPI* cuMemFreeHost)(void*);
+static CUresult(CUAPI* cuMemGetAddressRange)(CUdeviceptr*, size_t*, CUdeviceptr);
 static CUresult(CUAPI* cuEventCreate)(void**, unsigned);
 static CUresult(CUAPI* cuEventRecord)(void*, void*);
 static CUresult(CUAPI* cuEventSynchronize)(void*);
@@ -532,6 +534,7 @@ bool CudaTier::init(std::string& info) {
              load_sym(h, cuMemcpyDtoHAsync, "cuMemcpyDtoHAsync_v2") && load_sym(h, cuStreamCreate, "cuStreamCreate") && load_sym(h, cuMemcpyDtoDAsync, "cuMemcpyDtoDAsync_v2") && load_sym(h, cuMemsetD8Async, "cuMemsetD8Async") &&
              load_sym(h, cuStreamSynchronize, "cuStreamSynchronize") && load_sym(h, cuMemHostAlloc, "cuMemHostAlloc") &&
              load_sym(h, cuEventCreate, "cuEventCreate") && load_sym(h, cuEventRecord, "cuEventRecord") && load_sym(h, cuEventSynchronize, "cuEventSynchronize");
+    load_sym(h, cuMemFreeHost, "cuMemFreeHost"); load_sym(h, cuMemGetAddressRange, "cuMemGetAddressRange_v2");   // parking only
     has_graphs_ = load_sym(h, cuStreamBeginCapture, "cuStreamBeginCapture_v2") && load_sym(h, cuStreamEndCapture, "cuStreamEndCapture") &&
                   load_sym(h, cuGraphInstantiateWithFlags, "cuGraphInstantiateWithFlags") && load_sym(h, cuGraphLaunch, "cuGraphLaunch") &&
                   load_sym(h, cuGraphExecDestroy, "cuGraphExecDestroy") && load_sym(h, cuGraphDestroy, "cuGraphDestroy");
@@ -879,6 +882,26 @@ void CudaTier::free(uint64_t p) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     cuMemFree(p);
+}
+size_t CudaTier::alloc_size(uint64_t p) {
+    if (!ok_ || !p || !cuMemGetAddressRange) return 0;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    CUdeviceptr base = 0; size_t n = 0;
+    return cuMemGetAddressRange(&base, &n, p) == 0 && base == p ? n : 0;
+}
+void* CudaTier::host_alloc(size_t bytes) {
+    if (!ok_ || !cuMemFreeHost) return nullptr;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    void* h = nullptr;
+    return cuMemHostAlloc(&h, bytes, 0) == 0 ? h : nullptr;
+}
+void CudaTier::host_free(void* p) {
+    if (!ok_ || !p || !cuMemFreeHost) return;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    cuMemFreeHost(p);
 }
 
 bool CudaTier::matmul(uint64_t W, uint64_t qoff, int kind, const float* X, int n, int cols, int rows, float* Y) {

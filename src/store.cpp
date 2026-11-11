@@ -260,6 +260,14 @@ bool handle_store(const std::string& method, const std::string& path, const std:
     if (path == "/api/media/progress") { extern std::string media_progress_json(); out = media_progress_json(); return true; }
     if (path == "/api/media/cancel") { extern void media_cancel(); media_cancel(); out = "{}"; return true; }
     if (path == "/api/media/gallery") { extern std::string media_gallery_json(); out = media_gallery_json(); return true; }
+    if (path == "/api/media/delete" && method == "POST") {
+        extern bool media_delete_output(const std::string&);
+        J j; json_parse(body, j);
+        const std::string url = j["url"].str();
+        if (url.rfind("/outputs/", 0) != 0 || !media_delete_output(url.substr(9))) { code = 404; out = "{\"error\":\"could not delete that file\"}"; }
+        else out = "{}";
+        return true;
+    }
     if (path.rfind("/outputs/", 0) == 0) {
         extern bool media_read_output(const std::string&, std::string&, std::string&);
         if (!media_read_output(path.substr(9), out, type)) { code = 404; type = "text/plain"; out = "not found"; }

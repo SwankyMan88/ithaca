@@ -283,7 +283,7 @@ input[type=file]{color:var(--dim)}
 .spimg{position:relative;max-width:360px;border-radius:12px;overflow:hidden;border:1px solid var(--line)}
 .spimg img{display:block;width:100%;height:auto}.spmask{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
 .spside{display:flex;flex-direction:column;gap:8px;min-width:200px;flex:1}.spside .hint{font-size:12.5px;color:var(--faint)}
-.galimg{position:relative}.galedit{position:absolute;right:8px;bottom:8px;opacity:0;transition:opacity .2s;padding:4px 10px;font-size:12px}.galimg:hover .galedit{opacity:1}
+
 /* studios */
 .hero textarea,.sizerow input[type=number]{padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
 .hero textarea{width:100%;font-size:15px;min-height:84px;resize:vertical;padding:12px 14px;border-radius:12px;transition:border-color .2s,box-shadow .2s}
@@ -301,6 +301,22 @@ details.adv>summary::before{content:"›";display:inline-block;transition:transf
 details.adv>.in{padding:0 18px 16px}
 .studio .card{animation:rise .4s cubic-bezier(.2,.9,.3,1) both}.studio .card:nth-of-type(2){animation-delay:.05s}.studio .card:nth-of-type(3){animation-delay:.1s}
 .btn.pri{transition:transform .12s,box-shadow .2s}.btn.pri:hover{box-shadow:0 6px 20px rgba(139,108,255,.35)}.btn.pri:active{transform:scale(.97)}
+/* gallery tiles, and touchscreens: no hover, so nothing may depend on it, and fingers need bigger targets */
+body{touch-action:manipulation;height:100dvh}
+.galimg{position:relative}.galimg img{cursor:zoom-in;display:block}.galimg:hover .gbtns,.galimg:focus-within .gbtns{opacity:1}
+.galaudio .gbtns{position:static;opacity:1;margin-top:6px}
+@media(hover:none),(pointer:coarse){
+.gbtns,.hitem .x,.actions{opacity:1}
+.gbtns button,.gbtns a{width:42px;height:42px}
+.gallery{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.tbtn,.actions button,.hitem .x{min-width:40px;min-height:40px;display:inline-grid;place-items:center}
+.btn,.pill,.chip,.toggle,.newchat,.sidefoot button,.nav button,.tabs button,.hitem{min-height:44px}
+input,select,textarea{font-size:16px}
+input[type=range]{height:32px}
+input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
+.ring:focus .ringtip{display:block}
+}
+@media(max-width:600px){.ctxwrap{display:none}}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -373,7 +389,7 @@ details.adv>.in{padding:0 18px 16px}
       </div>
     </div>
     <div class="under">
-      <div class="ring" id="ring"><svg viewBox="0 0 36 36" id="ringSvg"></svg><span id="ringText">no model</span>
+      <div class="ring" id="ring" tabindex="0"><svg viewBox="0 0 36 36" id="ringSvg"></svg><span id="ringText">no model</span>
         <div class="ringtip" id="ringTip"></div></div>
       <span class="note">Runs fully on this PC. Can make mistakes.</span>
     </div>
@@ -1292,11 +1308,13 @@ async function drawVoices(){const el=$('voices');if(!el)return;const list=await 
     :'<p class="sub">No voices yet. Add one below.</p>';
   el.querySelectorAll('[data-def]').forEach(b=>b.onclick=()=>{prefs.voice=b.dataset.def;savePrefs();drawVoices()});
   el.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this voice?'))return;await api('/api/voices/delete',{name:b.dataset.del});if(prefs.voice==b.dataset.del){prefs.voice='';savePrefs()}drawVoices()})}
+function galBtns(x){return `<div class="gbtns">${x.kind=='image'?`<button onclick="editInStudio('${esc(x.url)}')" title="Edit" aria-label="Edit">${ico('edit')}</button>`:''}<a href="${esc(x.url)}" download title="Save" aria-label="Save">${ico('dl')}</a><button onclick="delMedia('${esc(x.url)}')" title="Delete" aria-label="Delete">${ico('trash')}</button></div>`}
+window.delMedia=async url=>{if(!confirm('Delete this for good?'))return;const r=await api('/api/media/delete',{url});if(r&&r.error)toast(r.error);else toast('Deleted');drawGallery()};
 async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api('/api/media/gallery')).filter(x=>(x.kind||'image')==view);
   const st='width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px';
-  g.innerHTML=list.length?list.map(x=>x.kind=='video'?`<video src="${esc(x.url)}" title="${esc(x.prompt)}" muted loop onmouseover="this.play()" onmouseout="this.pause()" controls style="${st}"></video>`
-    :x.kind=='audio'?`<div title="${esc(x.prompt)}"><audio controls src="${esc(x.url)}" style="width:100%"></audio><small>${esc((x.prompt||'').slice(0,60))}</small></div>`
-    :`<div class="galimg"><a href="${esc(x.url)}" target="_blank" title="${esc(x.prompt)}"><img src="${esc(x.url)}" loading="lazy" style="${st}"></a><button class="btn galedit" onclick="editInStudio('${esc(x.url)}')">${ico('edit')} Edit</button></div>`).join(''):`<div class="ph">Nothing yet</div>`}
+  g.innerHTML=list.length?list.map(x=>x.kind=='video'?`<div class="galimg"><video src="${esc(x.url)}" title="${esc(x.prompt)}" muted loop onmouseover="this.play()" onmouseout="this.pause()" controls style="${st}"></video>${galBtns(x)}</div>`
+    :x.kind=='audio'?`<div class="galaudio" title="${esc(x.prompt)}"><audio controls src="${esc(x.url)}" style="width:100%"></audio><small>${esc((x.prompt||'').slice(0,60))}</small>${galBtns(x)}</div>`
+    :`<div class="galimg"><img src="${esc(x.url)}" title="${esc(x.prompt)}" alt="${esc(x.prompt)}" loading="lazy" style="${st}" onclick="viewImg(this.src)">${galBtns(x)}</div>`).join(''):`<div class="ph">Nothing yet</div>`}
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.
 function watchProgress(el){let on=true,seen=-1;
@@ -1333,6 +1351,10 @@ $('send').onclick=send;
 $('hardBtn').onclick=()=>{hard=!hard;$('hardBtn').classList.toggle('on',hard)};
 $('newchat').onclick=newChat;$('search').oninput=drawHistory;
 $('toggleSide').onclick=()=>$('side').classList.toggle('hidden');
+// Narrow screens: the sidebar floats over the page, so it starts closed and closes after a choice or a tap outside.
+{const narrow=()=>matchMedia('(max-width:820px)').matches,hide=()=>{if(narrow())$('side').classList.add('hidden')};hide();
+$('side').addEventListener('click',e=>{if(e.target.closest('.hitem,.nav button,.newchat,.sidefoot button')&&!e.target.closest('.x'))hide()},true);
+document.querySelector('main').addEventListener('click',e=>{if(!e.target.closest('#toggleSide'))hide()})}
 document.addEventListener('keydown',e=>{if(e.key=='Escape'){if($('settings').classList.contains('open')){$('settings').classList.remove('open');render()}else if(busy)stopGen()}});
 
 (async()=>{

@@ -78,6 +78,12 @@ public:
     bool migrating() const { return migrating_; }
     int64_t gpu_bytes() const { return gpu_bytes_; }
     bool fully_on_gpu() const { return dev_ok_ && all_gpu(); }
+    // Parking: the weights move to page-locked RAM and their VRAM is freed; wake() copies them straight back
+    // (no file reads or format conversion). eval() wakes a parked model by itself. Only for models fully in VRAM.
+    bool park();
+    bool wake();
+    bool parked() const { return !parked_.empty(); }
+    int64_t parked_bytes() const { return parked_bytes_; }
     // Called when growing the KV cache runs out of VRAM; returns true if it freed something (e.g. a draft model).
     std::function<bool()> on_vram_short;
     int64_t kv_bytes_gpu() const;
@@ -111,6 +117,9 @@ private:
     std::vector<float> vec(const std::string& name);
 
     bool loaded_ = false;
+    struct Parked { Lin* l; void* host; size_t bytes; };
+    std::vector<Parked> parked_;
+    int64_t parked_bytes_ = 0;
     GGUF g_;
     Pool pool_;
     std::vector<Layer> layers_;

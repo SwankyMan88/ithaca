@@ -358,6 +358,8 @@ void Model::prefetch_thread() {
 
 void Model::unload() {
     if (!loaded_ && !g_.base) return;
+    for (auto& p : parked_) cuda().host_free(p.host);
+    parked_.clear(); parked_bytes_ = 0;
     stop_ = true;
     pre_cv_.notify_all();
     if (tier_th_.joinable()) tier_th_.join();
@@ -386,6 +388,61 @@ void Model::unload() {
     SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
     g_.close();
     loaded_ = false;
+}
+
+bool Model::park() {
+    if (!loaded_ || !parked_.empty() || !fully_on_gpu()) return false;
+    for (double t0 = now_sec(); migrating_ && now_sec() - t0 < 30;) Sleep(20);
+    if (migrating_) return false;
+    std::vector<Lin*> ls;
+    for (auto& L : layers_) for (Lin* l : L.lins()) if (l->dptr.load()) ls.push_back(l);
+    if (out_.dptr.load()) ls.push_back(&out_);
+    size_t need = 0;
+    for (Lin* l : ls) { size_t n = cuda().alloc_size(l->dptr.load()); if (!n) return false; need += n; }
+    MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms);
+    if (ms.ullAvailPhys < need + (2ull << 30)) return false;   // keep 2 GB of RAM for everything else
+    cuda().sync();
+    for (Lin* l : ls) {
+        uint64_t d = l->dptr.load(); size_t n = cuda().alloc_size(d);
+        void* h = cuda().host_alloc(n);
+        if (!h || !cuda().dtoh(h, d, n)) { cuda().host_free(h); wake(); return false; }
+        parked_.push_back({l, h, n}); parked_bytes_ += (int64_t)n;
+        l->dptr.store(0); cuda().free(d);
+    }
+    // Captured graphs hold the old addresses. The KV cache shrinks to 256 positions (a null cache would mean
+    // "this layer is not on the GPU"); it grows again as the next conversation needs.
+    cuda().graph_destroy(graph_); graph_ = nullptr;
+    for (auto& kv : seg_graphs_) cuda().graph_destroy(kv.second);
+    seg_graphs_.clear();
+    {
+        std::lock_guard<std::mutex> kl(kv_m_);
+        const size_t kvd = (size_t)hp.n_kv * hp.hd, eb = kvq8_ ? 1 : 2, per[4] = {kvd * eb, kvd * eb, (size_t)hp.n_kv * 4, (size_t)hp.n_kv * 4};
+        const int nbuf = kvq8_ ? 4 : 2, cap = std::min(ctx, 256);
+        for (auto& L : layers_) {
+            if (!L.d_kc || L.kv_cap <= cap) continue;
+            uint64_t* cur[4] = {&L.d_kc, &L.d_vc, &L.d_ks, &L.d_vs};
+            uint64_t nb[4] = {}; bool all = true;
+            for (int i = 0; i < nbuf && all; i++) all = (nb[i] = cuda().alloc((size_t)cap * per[i])) != 0;
+            if (!all) { for (int i = 0; i < nbuf; i++) cuda().free(nb[i]); continue; }   // keep the big cache
+            for (int i = 0; i < nbuf; i++) { cuda().free(*cur[i]); *cur[i] = nb[i]; }
+            L.kv_cap = cap;
+        }
+        kv_want_ = 0;
+    }
+    n_past = 0;
+    return true;
+}
+bool Model::wake() {
+    while (!parked_.empty()) {
+        Parked& p = parked_.back();
+        uint64_t d = cuda().alloc(p.bytes);
+        if (!d) return false;
+        if (!cuda().htod(d, p.host, p.bytes)) { cuda().free(d); return false; }
+        p.l->dptr.store(d);
+        cuda().host_free(p.host); parked_bytes_ -= (int64_t)p.bytes;
+        parked_.pop_back();
+    }
+    return true;
 }
 
 void Model::ensure_buffers(int n) {
@@ -825,6 +882,7 @@ const float* Model::eval(const int* toks, int n_all) {
     double ev0 = now_sec();
     EvT evt{evp, ev0};
     if (!loaded_ || n_all <= 0 || n_past + n_all > ctx) return nullptr;
+    if (!parked_.empty() && !wake()) return nullptr;
     // A long prompt right after a (re)load reads far faster once the layers are in VRAM than on the CPU, and the
     // placement is fixed per request below, so give the background placement a moment to finish first.
     if (n_all > 64 && migrating_) for (double t0 = now_sec(); migrating_ && now_sec() - t0 < 30;) Sleep(20);

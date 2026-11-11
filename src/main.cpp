@@ -253,7 +253,7 @@ void chat_model_release() {
     g_released_path = g_model.path_utf8;
     stop_draft("paused while media is generated");
     g_chat.reset();
-    g_model.unload();
+    if (!g_model.park()) g_model.unload();   // parked: weights wait in RAM and return in a fraction of a second
 }
 void chat_model_restore() {
     std::lock_guard<std::mutex> rl(g_release_m);
@@ -261,7 +261,8 @@ void chat_model_restore() {
     std::string p = g_released_path, err;
     g_released_path.clear();
     std::lock_guard<std::mutex> l(g_gen);
-    if (!g_model.loaded() && g_model.load(utf8_to_w(p), g_opts, err)) start_draft();   // opens instantly; layers return to VRAM in the background
+    if (g_model.parked()) { if (g_model.wake()) start_draft(); else { g_model.unload(); if (g_model.load(utf8_to_w(p), g_opts, err)) start_draft(); } }
+    else if (!g_model.loaded() && g_model.load(utf8_to_w(p), g_opts, err)) start_draft();   // opens instantly; layers return to VRAM in the background
 }
 
 // After a media job the chat model comes back only once no other job follows (a reply may make several in a row,
@@ -280,6 +281,20 @@ void chat_model_restore_later() {
     }).detach();
 }
 static bool chat_model_paused() { std::lock_guard<std::mutex> rl(g_release_m); return !g_released_path.empty(); }
+// For agents and scripts (/v1/ithaca/...): where the chat model is, and how much VRAM is free.
+static std::string ithaca_status_json(double ms = -1) {
+    size_t f = 0, t = 0; Model::cuda().mem_info(f, t);
+    const bool paused = chat_model_paused();
+    std::string state = g_model.parked() ? "parked" : paused ? "unloaded" : !g_model.loaded() ? "none" : g_model.fully_on_gpu() ? "gpu" : g_model.migrating() ? "loading" : "partial";
+    std::string s = "{\"chat_model\":" + (g_model.loaded() || paused ? json_esc(g_model.loaded() ? g_model.hp.name : "") : std::string("null")) + ",\"state\":\"" + state + "\"";
+    MEMORYSTATUSEX mst{sizeof(mst)}; GlobalMemoryStatusEx(&mst);
+    s += ",\"ram_free_mb\":" + std::to_string(mst.ullAvailPhys >> 20);
+    s += ",\"vram_free_mb\":" + std::to_string(f >> 20) + ",\"vram_total_mb\":" + std::to_string(t >> 20) + ",\"parked_mb\":" + std::to_string(g_model.parked_bytes() >> 20);
+    extern bool media_busy();
+    s += std::string(",\"media_busy\":") + (media_busy() ? "true" : "false");
+    if (ms >= 0) s += ",\"ms\":" + std::to_string((long long)ms);
+    return s + "}";
+}
 
 // ---------- HTTP ----------
 static bool send_all(SOCKET s, const std::string& d) {
@@ -593,6 +608,18 @@ static bool handle_v1(SOCKET s, const std::string& method, const std::string& pa
     const std::string host = hdr_value(hdr_lower, "host");
     if (path == "/v1/models" && method == "GET") respond_json(s, 200, v1_models());
     else if (path == "/v1/chat/completions" && method == "POST") v1_chat(s, j);
+    else if (path == "/v1/ithaca/status" && method == "GET") respond_json(s, 200, ithaca_status_json());
+    else if (path == "/v1/ithaca/park" && method == "POST") {   // free the chat model's VRAM; it stays warm in RAM until woken or asked to chat
+        double t0 = now_sec();
+        g_restore_gen++;   // cancel a pending restore after a media job
+        chat_model_release();
+        respond_json(s, 200, ithaca_status_json((now_sec() - t0) * 1e3));
+    }
+    else if (path == "/v1/ithaca/wake" && method == "POST") {
+        double t0 = now_sec();
+        chat_model_restore();
+        respond_json(s, 200, ithaca_status_json((now_sec() - t0) * 1e3));
+    }
     else if (path == "/v1/completions" && method == "POST") {   // plain prompts are answered as a single user message
         std::string r = "{\"model\":" + json_esc(j["model"].str()) + ",\"messages\":[{\"role\":\"user\",\"content\":" + json_esc(j["prompt"].str()) + "}]";
         for (const char* k : {"temperature", "top_p", "top_k", "max_tokens", "stream", "stop"}) if (j[k].t != J::NUL) r += std::string(",\"") + k + "\":" + (j[k].t == J::STR ? json_esc(j[k].s) : j[k].t == J::BOOL ? (j[k].b ? "true" : "false") : j[k].t == J::NUM ? std::to_string(j[k].n) : "null");

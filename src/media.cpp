@@ -76,7 +76,16 @@ std::string media_generate_image(const J& req) {
     std::lock_guard<std::mutex> lk(g_media);
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
-    VramLease lease(7000);
+    // The chat model makes way when the picture would not fit beside it: the weights (about the checkpoint's
+    // size in fp16) plus the UNet's working memory at this size. Too little room streams the UNet every step.
+    int64_t need_mb = 7000;
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        const double side = std::max({req["width"].num(0), req["height"].num(0), 1024.0}) / 8;
+        if (GetFileAttributesExW(utf8_to_w(model).c_str(), GetFileExInfoStandard, &fa))
+            need_mb = (int64_t)((((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) >> 20) + (int64_t)(side * side * 64 * 1024 * 3 / (1 << 20)) + 1536;
+    }
+    VramLease lease(need_mb);
     SdEngine& e = sd_engine();
     std::string err;
     std::wstring vae = utf8_to_w(req["vae"].str(prefs["media_image_vae"].str()));
@@ -340,6 +349,18 @@ std::string media_gallery_json() {
         s += (i ? "," : "") + std::string("{\"url\":\"/outputs/") + w_to_utf8(n) + "\",\"kind\":\"" + kind + "\",\"prompt\":" + json_esc(m["prompt"].str()) + "}";
     }
     return s + "]";
+}
+
+// Deletes one gallery item and its settings file. Only plain names of generated media qualify.
+bool media_delete_output(const std::string& name) {
+    if (name.empty() || name.find("..") != std::string::npos || name.find_first_of("/\\:") != std::string::npos) return false;
+    std::string lo = name; for (auto& c : lo) c = (char)tolower(c);
+    auto ends = [&](const char* e) { size_t n = strlen(e); return lo.size() > n && lo.compare(lo.size() - n, n, e) == 0; };
+    if (!ends(".png") && !ends(".mp4") && !ends(".wav")) return false;
+    const std::wstring f = g_store_dir + L"\\outputs\\" + utf8_to_w(name);
+    if (!DeleteFileW(f.c_str())) return false;
+    DeleteFileW((f + L".json").c_str());
+    return true;
 }
 
 // Serves /outputs/<file>. Returns false when the name is not a plain file name.

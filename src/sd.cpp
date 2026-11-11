@@ -756,8 +756,10 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
 
     // Leave room for activations; whatever doesn't fit stays in RAM and is streamed each step.
     int64_t act = (int64_t)lh * lw * 64 * 1024 * (info_.arch == "sdxl" ? 3 : 2) + (512ll << 20);
-    int64_t budget = (int64_t)g.vram_free() - act;
-    unet_begin(std::max<int64_t>(0, budget));
+    g.trim();   // buffers pooled by earlier work (the text encoders, the last picture) would otherwise count as used
+    const int64_t F_unet = (int64_t)g.vram_free();
+    int64_t budget = F_unet - act;
+    unet_begin(std::max<int64_t>(0, budget)); const double T_unet = now_sec();
     GT xg = g.alloc(n), og = g.alloc(n);
     std::vector<float> xin(n);
     auto model = [&](float s, std::vector<float>& out) {
@@ -811,6 +813,7 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
         }
         keep(sig[i + 1]);
     }
+    fprintf(stderr, "[sd] UNet: budget %lld MB, %lld MB resident, %lld MB streamed, %.1f s; VRAM free %lld MB at start, %lld MB at end\n", (long long)(budget >> 20), (long long)(g.resident_bytes() >> 20), (long long)(g.streamed_bytes() >> 20), now_sec() - T_unet, (long long)(F_unet >> 20), (long long)(g.vram_free() >> 20));
     unet_end();
     for (GT* t : {&xg, &og, &cg, &ug, &yc, &yu}) g.free(*t);
     if (!err.empty()) { g.trim(); return false; }

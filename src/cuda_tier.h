@@ -20,6 +20,9 @@ public:
     uint64_t alloc(size_t bytes);                            // 0 on failure
     uint64_t alloc_upload(const void* host, size_t bytes);  // 0 on failure
     void free(uint64_t p);
+    size_t alloc_size(uint64_t p);                          // size of the allocation p starts (0 if unknown)
+    void* host_alloc(size_t bytes);                         // page-locked RAM: full-speed copies to and from VRAM
+    void host_free(void* p);
     bool htod(uint64_t dst, const void* src, size_t bytes);
     bool dtoh(void* dst, uint64_t src, size_t bytes);       // synchronizes the compute stream
     bool htod_async(uint64_t dst, const void* src, size_t bytes);  // ordered on the compute stream
