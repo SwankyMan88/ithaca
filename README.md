@@ -25,53 +25,60 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 
 ## What it does
 
-- **Chat** with GGUF models. Chats are saved, messages can be edited or regenerated, and there is a "Think hard" mode that reasons over a question in several passes before answering.
-- **Runs models bigger than your VRAM.** Layers that don't fit on the GPU go to RAM, and what doesn't fit there streams from the SSD. You can start chatting immediately while layers move up in the background.
-- **Reads images.** Paste or drop a picture into the chat (needs a vision model like Gemma 3).
-- **Reads files.** PDF, Word, PowerPoint, Excel, text and code. Short files go in whole; long ones are searched so the model gets the relevant passages and cites the page.
-- **Makes images, video and speech** from a normal chat message, with a live preview while the image renders. Click an image to view it full size, or use the buttons on it to copy or save it. The gallery can save or delete anything you made.
-- **Edits pictures.** Ask "make it look like an 80s photo" or "add a boat" after an image, or open any picture in the Image studio and paint over the part to change.
-- **Works as a server.** `Ithaca.exe --server` runs an OpenAI-compatible API (chat, vision, images, image edits, speech, video) for your own scripts and apps, with no window. `/v1/ithaca/park` and `/v1/ithaca/wake` move the chat model to RAM and back in about half a second, to free VRAM for something else.
-- **Works on touchscreens.** Every button works without a mouse, and the layout fits tablets and phones.
-- **Remembers you.** A long-term memory the model can save to, search, edit and delete, which you can manage in Settings.
-- **Downloads models** from GPT4All's list or any Hugging Face GGUF repo, and benchmarks your PC so it can tell you how fast each model will run.
-
-## More demos
-
-**Chat with a PDF.** Attach a file and ask about it. Long files are searched, and the answer points to pages.
-
-<img src="docs/demo-files.webp" alt="Attaching a 24-page PDF and getting a checklist with page numbers">
-
-**Download models and check your PC.** Each model shows whether it fits in VRAM and roughly how fast it will run. The system page lists your hardware.
-
-<img src="docs/demo-models.webp" alt="Browsing downloadable models and the system page">
-
-## Screenshots
-
-| Asking for an image | Reading an image |
-|---|---|
-| <img src="docs/chat-image.png" alt="Chat that creates an image"> | <img src="docs/chat-vision.png" alt="Asking about an attached picture"> |
-
-<img src="docs/chat-files.png" alt="Summarizing a 24-page PDF">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/features-dark.svg">
+  <img src="docs/features-light.svg" alt="Chat, bigger-than-VRAM models, vision, files, images, image edits, video, speech, an OpenAI API server, memory, model downloads and touch support">
+</picture>
 
 ## Getting started
 
-1. Download `Ithaca.exe` (or build it, see below) and put it in its own folder.
-2. Double-click it. A console window opens and the chat page opens in your browser.
-3. Click **Models** in the sidebar and download one, or point it at a folder of `.gguf` files you already have. It also finds models from GPT4All and LM Studio on its own.
-4. Load the model and start typing.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/steps-dark.svg">
+  <img src="docs/steps-light.svg" alt="Download, double-click, pick a model, chat">
+</picture>
 
-Settings, chats and memories are kept next to the exe, so the folder is portable. To stop Ithaca, use **Quit** in the sidebar or close its console window; nothing keeps running and all memory is freed. Starting it again while it runs just opens the existing window.
+1. Download `Ithaca.exe` and put it in its own folder.
+2. Double-click it. A console window opens and the chat page opens in your browser.
+3. Click **Models** and download one, or point it at a folder of `.gguf` files. It also finds models from GPT4All and LM Studio on its own.
+4. Load the model and start typing. You can type before it has finished loading.
+
+Settings, chats and memories are kept next to the exe, so the folder is portable. **Quit** in the sidebar (or closing the console) stops everything and frees all memory.
+
+## See it work
+
+**Chat with a PDF.** Long files are searched, and the answer points to pages.
+
+<img src="docs/demo-files.webp" alt="Attaching a 24-page PDF and getting a checklist with page numbers">
+
+**Download models and check your PC.** Each model shows whether it fits and roughly how fast it will run.
+
+<img src="docs/demo-models.webp" alt="Browsing downloadable models and the system page">
+
+## Speed, compared with llama.cpp
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bench-dark.svg">
+  <img src="docs/bench-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on five models">
+</picture>
+
+Ithaca generates at 96–104% of llama.cpp's speed and reads prompts at 85–116% of it, on the same files and the same GPU.
+
+### Every quant type
+
+Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU at their compact size.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/quants-dark.svg">
+  <img src="docs/quants-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp for every quant type on Gemma 3 4B">
+</picture>
 
 ## Models
 
-Chat models (GGUF): Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Phi-3/4, Granite, Granite-MoE, Gemma 3 and the DeepSeek-R1 distills.
+**Chat (GGUF):** Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Phi-3/4, Granite, Granite-MoE, Gemma 3 and the DeepSeek-R1 distills.
 
-Quantizations: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, and the IQ family (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS). 4-bit and lower weights stay that small on the GPU, so a 2-bit file needs about a quarter of the VRAM of an 8-bit one.
+**Quantizations:** F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K to Q6_K, and IQ1_S to IQ4_XS. Low-bit weights stay that small on the GPU.
 
-For image input, put the model's `mmproj` file next to it (for example `gemma-3-4b-it-Q4_K_M.gguf` with `mmproj-model-f16.gguf`). Ithaca picks it up automatically.
-
-Media engines:
+**Pictures in:** put the model's `mmproj` file next to it (for example `gemma-3-4b-it-Q4_K_M.gguf` with `mmproj-model-f16.gguf`) and Ithaca picks it up.
 
 | | Models | Notes |
 |---|---|---|
@@ -81,44 +88,77 @@ Media engines:
 
 Not supported yet: Mamba hybrids (Granite 4.0 H), Qwen2-MoE, split GGUFs, Flux/SD3, LoRAs, image-to-video.
 
-## Speed, compared with llama.cpp
+## Questions
+
+<details>
+<summary><b>Why use it instead of llama.cpp, Ollama or LM Studio?</b></summary>
+<br>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/bench-dark.svg">
-  <img src="docs/bench-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on five models">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/inside-dark.svg">
+  <img src="docs/inside-light.svg" alt="What is inside the 2 MB exe">
 </picture>
 
-Ithaca's own kernels generate at 96–111% of llama.cpp's speed and read prompts at 75–86% of it.
-
-Method: RTX 3060 12 GB, 16 GB RAM, same GGUF files, all layers on the GPU, average of 3 runs, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers are in [docs/bench-results.json](docs/bench-results.json). Time from start to first token was about even (faster on some models, slower on others). Qwen3 14B code generation with Qwen3 0.6B as a draft model reaches 44 tok/s.
-
-### Every quant type
-
-Low-bit files let bigger models fit in less VRAM. Ithaca runs all of them on the GPU at their compact size, and generates at about llama.cpp's speed (faster on the K-quants).
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/quants-dark.svg">
-  <img src="docs/quants-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp for every quant type on Gemma 3 4B">
-</picture>
-
-Method and raw numbers: [docs/quant-speeds.md](docs/quant-speeds.md).
-
-### Why use it over llama.cpp, Ollama or LM Studio?
-
-- One 2 MB file, no install, no runtime downloads. LM Studio is several hundred MB; Ollama installs a service.
-- Images, video and speech out, and images and documents in, in the same app and the same chat.
-- Runs models larger than your VRAM by streaming from RAM and SSD, and you can type before the model has finished loading.
+- One 2 MB file: no install, no service, no runtime downloads.
+- Images, video and speech out, and pictures and documents in, all in the same chat.
+- Models bigger than your VRAM still run, and you can type before loading finishes.
+- **Speculative decoding** is automatic: with a small model of the same family installed (Qwen3 0.6B next to Qwen3 14B), it drafts tokens for the big one. Qwen3 14B writes code at about 44 tok/s this way.
 - If you need Linux, Mac or AMD support, llama.cpp is the better choice today.
 
-- **Speculative decoding:** if a small model with the same vocabulary is installed (for example Qwen3 0.6B next to Qwen3 14B), Ithaca uses it automatically to draft tokens that the main model checks. It mostly helps code and structured text, pauses itself when it doesn't help, and only runs when there is spare VRAM. It can be turned off in Settings → Model & hardware.
-- **Long chats stay fast:** the conversation cache is stored as 8-bit in VRAM and only grows as the chat does.
-- Loading an 8B model onto the GPU takes about 1.5 s once the file is in the OS cache.
-- Reading an image takes about 0.7 s.
-- A 1024 px SDXL image at 20 steps takes about a minute.
+</details>
 
-## Use it as a server
+<details>
+<summary><b>How do models bigger than my GPU run?</b></summary>
+<br>
 
-`Ithaca.exe --server --model file.gguf` starts an OpenAI-compatible API on port 8080 with no app window, like llama.cpp's server. Anything that talks to the OpenAI API can use it: point the base URL at `http://127.0.0.1:8080/v1`.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/tiers-dark.svg">
+  <img src="docs/tiers-light.svg" alt="VRAM, RAM and SSD tiers">
+</picture>
+
+- Opening a model only reads its header, so you can type right away while layers move up in the background.
+- Weights reach the GPU through pinned buffers and are converted there by a kernel.
+- Follow-up messages reuse the cache for the part of the chat that didn't change, and the cache is 8-bit so long chats stay small.
+- When an image or video job needs the GPU, the chat model steps aside and comes back afterwards.
+
+</details>
+
+<details>
+<summary><b>Which quant should I download?</b></summary>
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/quant-vram-dark.svg">
+  <img src="docs/quant-vram-light.svg" alt="VRAM needed by each quant of Gemma 3 4B">
+</picture>
+
+Start with **Q4_K_M**. If it doesn't fit, IQ4_XS is smaller at the same speed, and the IQ3 and IQ2 files let much bigger models fit on small GPUs at some cost in quality. Every speed is in [docs/quant-speeds.md](docs/quant-speeds.md).
+
+</details>
+
+<details>
+<summary><b>What hardware do I need?</b></summary>
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hardware-dark.svg">
+  <img src="docs/hardware-light.svg" alt="RTX 30-series and newer, GTX 10-series and newer, or any CPU with AVX2">
+</picture>
+
+Windows 10 or 11. The NVIDIA driver you already have is enough: no CUDA toolkit. A 4B model at 4-bit needs about 2.5 GB of VRAM; a 14B model about 8 GB.
+
+</details>
+
+<details>
+<summary><b>How do I use it from my own code?</b></summary>
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/server-dark.svg">
+  <img src="docs/server-light.svg" alt="Your app talks to Ithaca --server through OpenAI-style endpoints">
+</picture>
+
+`Ithaca.exe --server --model file.gguf` starts an OpenAI-compatible API on port 8080 with no window.
 
 | Endpoint | What it does |
 |---|---|
@@ -143,22 +183,23 @@ print(client.chat.completions.create(model="default", messages=[{"role": "user",
 
 Options: `--port 8080`, `--host 0.0.0.0` to serve other devices on your network, and `--api-key KEY` (or the `ITHACA_API_KEY` variable) to require `Authorization: Bearer KEY`. In server mode only the API is reachable; the app's own endpoints are switched off.
 
-## How the memory tiers work
+`/v1/ithaca/park` and `/v1/ithaca/wake` move the chat model to RAM and back in about half a second, to free VRAM for something else. In server mode only the API is reachable.
 
-| Tier | What goes there |
-|---|---|
-| VRAM | The output head and as many layers as fit. A whole layer runs on the GPU, and token generation replays a CUDA graph. |
-| RAM | The next layers, locked in memory so Windows doesn't page them out. |
-| SSD | Everything else, memory-mapped and read ahead while the current layer computes. |
+</details>
 
-A few details:
+<details>
+<summary><b>How was the speed measured?</b></summary>
+<br>
 
-- Opening a model only reads its header, so you can type right away. The weights reach the GPU through pinned buffers and are converted to the GPU format by a kernel, not on the CPU.
-- Follow-up messages reuse the KV cache for the part of the conversation that didn't change.
-- By default about 768 MB of VRAM and 2.5 GB of RAM are left free for other programs. Both limits can be set in Settings.
-- When an image or video job needs the GPU, the chat model steps aside and reloads afterwards.
+RTX 3060 12 GB, 16 GB RAM, the same GGUF files, all layers on the GPU, 3 runs each, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers: [docs/bench-results.json](docs/bench-results.json).
 
-## Command line
+Prompts are read with int8 tensor cores (the same idea as llama.cpp's "mmq"), and the norm, residual add and int8 conversion around each matmul run as one fused step.
+
+</details>
+
+<details>
+<summary><b>Command line options</b></summary>
+<br>
 
 ```
 Ithaca.exe [--model file.gguf] [--ctx N] [--vram MB|0] [--ram MB] [--threads N] [--port 7860] [--no-browser]
@@ -168,20 +209,25 @@ Ithaca.exe --extract report.pdf
 Ithaca.exe --server [--model file.gguf] [--host 0.0.0.0] [--port 8080] [--api-key KEY]
 ```
 
-## Roadmap
+</details>
 
-- Faster prompt processing for Gemma 3 and mixture-of-experts models.
-- More architectures: Mamba hybrids, Qwen2-MoE, IQ quants, split GGUFs.
-- Flux and SD3 image models, LoRAs, image-to-video.
-- AMD and Intel GPUs (Vulkan).
+<details>
+<summary><b>Screenshots</b></summary>
+<br>
 
-## Building
+| Asking for an image | Reading an image |
+|---|---|
+| <img src="docs/chat-image.png" alt="Chat that creates an image"> | <img src="docs/chat-vision.png" alt="Asking about an attached picture"> |
 
-You need MinGW-w64 g++. Run `build.bat`; the result is a single static `Ithaca.exe`.
+<img src="docs/chat-files.png" alt="Summarizing a 24-page PDF">
 
-- The CPU path needs AVX2.
-- The GPU path needs an NVIDIA driver and a GTX 10-series or newer card. Tensor-core features need an RTX 30-series or newer.
-- On any other hardware Ithaca runs on the CPU.
+</details>
+
+<details>
+<summary><b>Building from source</b></summary>
+<br>
+
+You need MinGW-w64 g++. Run `build.bat`; the result is a single static `Ithaca.exe`. The CPU path needs AVX2.
 
 ```
 src/model.*        transformer, MoE, tier planner, CPU and GPU forward passes
@@ -194,6 +240,15 @@ src/chat.*         chat templates, sampling, prompt cache
 src/hub.cpp        model downloads, system info, benchmark
 src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 ```
+
+</details>
+
+## Roadmap
+
+- Close the rest of the prompt-speed gap on Gemma 3 and mixture-of-experts models.
+- IQ quants in mixture-of-experts models, gpt-oss, Mamba hybrids, Qwen2-MoE, split GGUFs.
+- Flux and SD3 image models, LoRAs, image-to-video.
+- AMD and Intel GPUs (Vulkan).
 
 ## License
 

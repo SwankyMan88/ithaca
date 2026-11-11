@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="250" viewBox="0 0 1100 250" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+<style>
+.bar{transform-box:fill-box;transform-origin:left center;transform:scaleX(0);animation:grow 1.1s cubic-bezier(.2,.8,.2,1) forwards}
+.up{opacity:0;transform-box:fill-box;transform:translateY(10px);animation:up .6s cubic-bezier(.2,.8,.2,1) forwards}
+.num{opacity:0;animation:show .5s ease-out forwards}
+.flow{stroke-dasharray:6 8;animation:flow 1.2s linear infinite}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes grow{to{transform:scaleX(1)}}
+@keyframes up{to{opacity:1;transform:none}}
+@keyframes show{to{opacity:1}}
+@keyframes flow{to{stroke-dashoffset:-28}}
+@keyframes pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.bar,.up,.num,.flow,.pulse{animation:none;opacity:1;transform:none}}
+</style>
+<defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient></defs>
+<rect width="1100" height="250" rx="16" fill="#ffffff"/>
+<text x="36" y="48" font-size="22" fill="#1f2328" font-weight="600">What runs where</text>
+<g class="up" style="animation-delay:0.10s"><rect x="36" y="72" width="328" height="156" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="36" y="72" width="328" height="6" rx="3" fill="#7c6cff"/>
+<path transform="translate(56 98) scale(1.25)" d="M2 7h20v10H2z M6 17v3 M18 17v3 M8 12a2 2 0 1 0 0.01 0 M16 12a2 2 0 1 0 0.01 0" fill="none" stroke="#7c6cff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="100" y="120" font-size="17" fill="#1f2328" font-weight="600">RTX 30-series or newer</text>
+<path d="M60 156 l4 4 8-9" fill="none" stroke="#7c6cff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="82" y="161" font-size="14" fill="#59636e">Everything on the GPU</text>
+<path d="M60 180 l4 4 8-9" fill="none" stroke="#7c6cff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="82" y="185" font-size="14" fill="#59636e">Int8 tensor cores for prompts</text>
+<path d="M60 204 l4 4 8-9" fill="none" stroke="#7c6cff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="82" y="209" font-size="14" fill="#59636e">Fastest images and video</text>
+</g>
+<g class="up" style="animation-delay:0.30s"><rect x="386" y="72" width="328" height="156" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="386" y="72" width="328" height="6" rx="3" fill="#2fb5ff"/>
+<path transform="translate(406 98) scale(1.25)" d="M2 7h20v10H2z M6 17v3 M18 17v3 M8 12a2 2 0 1 0 0.01 0 M16 12a2 2 0 1 0 0.01 0" fill="none" stroke="#2fb5ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="450" y="120" font-size="17" fill="#1f2328" font-weight="600">GTX 10 / 16, RTX 20</text>
+<path d="M410 156 l4 4 8-9" fill="none" stroke="#2fb5ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="432" y="161" font-size="14" fill="#59636e">Chat on the GPU</text>
+<path d="M410 180 l4 4 8-9" fill="none" stroke="#2fb5ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="432" y="185" font-size="14" fill="#59636e">Images on the GPU</text>
+<path d="M410 204 l4 4 8-9" fill="none" stroke="#2fb5ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="432" y="209" font-size="14" fill="#59636e">No tensor-core extras</text>
+</g>
+<g class="up" style="animation-delay:0.50s"><rect x="736" y="72" width="328" height="156" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="736" y="72" width="328" height="6" rx="3" fill="#d97706"/>
+<path transform="translate(756 98) scale(1.25)" d="M7 7h10v10H7z M10 10h4v4h-4z M10 3v4 M14 3v4 M10 17v4 M14 17v4 M3 10h4 M3 14h4 M17 10h4 M17 14h4" fill="none" stroke="#d97706" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="800" y="120" font-size="17" fill="#1f2328" font-weight="600">Any PC with AVX2</text>
+<path d="M760 156 l4 4 8-9" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="782" y="161" font-size="14" fill="#59636e">Chat on the CPU</text>
+<path d="M760 180 l4 4 8-9" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="782" y="185" font-size="14" fill="#59636e">Nothing to install</text>
+<path d="M760 204 l4 4 8-9" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="782" y="209" font-size="14" fill="#59636e">Slower, but it works</text>
+</g>
+</svg>

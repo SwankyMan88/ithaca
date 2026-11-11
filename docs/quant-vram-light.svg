@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="450" viewBox="0 0 1100 450" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+<style>
+.bar{transform-box:fill-box;transform-origin:left center;transform:scaleX(0);animation:grow 1.1s cubic-bezier(.2,.8,.2,1) forwards}
+.up{opacity:0;transform-box:fill-box;transform:translateY(10px);animation:up .6s cubic-bezier(.2,.8,.2,1) forwards}
+.num{opacity:0;animation:show .5s ease-out forwards}
+.flow{stroke-dasharray:6 8;animation:flow 1.2s linear infinite}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes grow{to{transform:scaleX(1)}}
+@keyframes up{to{opacity:1;transform:none}}
+@keyframes show{to{opacity:1}}
+@keyframes flow{to{stroke-dashoffset:-28}}
+@keyframes pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.bar,.up,.num,.flow,.pulse{animation:none;opacity:1;transform:none}}
+</style>
+<defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient></defs>
+<rect width="1100" height="450" rx="16" fill="#ffffff"/>
+<text x="36" y="48" font-size="22" fill="#1f2328" font-weight="600">How much VRAM each quant needs</text>
+<text x="36" y="76" font-size="15" fill="#59636e">Gemma 3 4B, whole model on the GPU (with an 8-bit conversation cache). Smaller files lose some quality.</text>
+<text x="36" y="140" font-size="16" fill="#1f2328" font-weight="600">Q4_K_M</text>
+<rect class="bar" style="animation-delay:0.10s" x="180" y="126" width="560.0" height="18" rx="5" fill="#7c6cff"/>
+<text x="748.0" y="140" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:0.80s">2.4 GB</text>
+<text x="860" y="140" font-size="13.5" fill="#7c6cff" font-weight="600" class="num" style="animation-delay:0.90s">Good default</text>
+<text x="36" y="180" font-size="16" fill="#1f2328" font-weight="600">IQ4_XS</text>
+<rect class="bar" style="animation-delay:0.16s" x="180" y="166" width="496.0" height="18" rx="5" fill="#7c6cff"/>
+<text x="684.0" y="180" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:0.86s">2.1 GB</text>
+<text x="860" y="180" font-size="13.5" fill="#7c6cff" font-weight="600" class="num" style="animation-delay:0.96s">Smaller, same speed</text>
+<text x="36" y="220" font-size="16" fill="#1f2328" font-weight="600">Q3_K_M</text>
+<rect class="bar" style="animation-delay:0.22s" x="180" y="206" width="468.7" height="18" rx="5" fill="#afb8c1"/>
+<text x="656.7" y="220" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:0.92s">2.0 GB</text>
+<text x="36" y="260" font-size="16" fill="#1f2328" font-weight="600">IQ3_XXS</text>
+<rect class="bar" style="animation-delay:0.28s" x="180" y="246" width="418.4" height="18" rx="5" fill="#7c6cff"/>
+<text x="606.4" y="260" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:0.98s">1.8 GB</text>
+<text x="860" y="260" font-size="13.5" fill="#7c6cff" font-weight="600" class="num" style="animation-delay:1.08s">Tight on VRAM</text>
+<text x="36" y="300" font-size="16" fill="#1f2328" font-weight="600">Q2_K</text>
+<rect class="bar" style="animation-delay:0.34s" x="180" y="286" width="380.4" height="18" rx="5" fill="#afb8c1"/>
+<text x="568.4" y="300" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:1.04s">1.6 GB</text>
+<text x="36" y="340" font-size="16" fill="#1f2328" font-weight="600">IQ2_XXS</text>
+<rect class="bar" style="animation-delay:0.40s" x="180" y="326" width="336.2" height="18" rx="5" fill="#7c6cff"/>
+<text x="524.2" y="340" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:1.10s">1.4 GB</text>
+<text x="860" y="340" font-size="13.5" fill="#7c6cff" font-weight="600" class="num" style="animation-delay:1.20s">Big models on small GPUs</text>
+<text x="36" y="380" font-size="16" fill="#1f2328" font-weight="600">IQ1_S</text>
+<rect class="bar" style="animation-delay:0.46s" x="180" y="366" width="297.8" height="18" rx="5" fill="#7c6cff"/>
+<text x="485.8" y="380" font-size="13.5" fill="#1f2328" class="num" style="animation-delay:1.16s">1.3 GB</text>
+<text x="860" y="380" font-size="13.5" fill="#7c6cff" font-weight="600" class="num" style="animation-delay:1.26s">Last resort</text>
+<text x="36" y="432" font-size="13" fill="#59636e">Measured with Ithaca --bench. Speeds for every quant are in docs/quant-speeds.md.</text>
+</svg>
