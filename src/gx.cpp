@@ -379,7 +379,7 @@ bool Gx::act_quantize(uint64_t G, uint64_t U, int M, int K, bool gelu) {
 bool Gx::linear_quant_grouped(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y,
                               uint64_t off, int E, int maxc, uint64_t s_stride, uint64_t q_stride, bool same_x) {
     uint64_t XQ, XD;
-    if (!f_mmqg_[kind] || !quantize_x(X, M, K, same_x, XQ, XD)) return false;
+    if (kind < 0 || kind >= 5 || !f_mmqg_[kind] || !quantize_x(X, M, K, same_x, XQ, XD)) return false;
     unsigned M_ = M, N_ = N, K_ = K;
     void* a[] = {&XQ, &XD, &Q, &S, &Y, &M_, &N_, &K_, &off, &q_stride, &s_stride};
     const int* tl = kMmqTiles[kind == 3 ? 0 : 1];
@@ -388,7 +388,7 @@ bool Gx::linear_quant_grouped(uint64_t X, int M, int K, uint64_t S, uint64_t Q, 
     return true;
 }
 bool Gx::linear_quant(uint64_t X, int M, int K, uint64_t S, uint64_t Q, int kind, int N, uint64_t Y, bool same_x) {
-    if (K % 32) return false;
+    if (K % 32 || kind < 0 || kind >= 5) return false;   // other kinds (IQ) have no int8 tensor-core kernels
     {
         // int8 tensor cores: quantize the activations once, then one pass per weight matrix
         uint64_t XQ, XD;

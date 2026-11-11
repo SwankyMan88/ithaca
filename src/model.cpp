@@ -382,6 +382,7 @@ void Model::unload() {
     layers_.clear();
     out_.t = nullptr; out_state_ = TIER_DISK;
     if (dLOGA_) { cuda().free(dLOGA_); dLOGA_ = 0; } loga_rows_ = 0;
+    if (dW16_) { cuda().free(dW16_); dW16_ = 0; } w16_cap_ = 0;
     kc_.clear(); kc_.shrink_to_fit(); vc_.clear(); vc_.shrink_to_fit();
     x_.clear(); xn_.clear(); q_.clear(); k_.clear(); v_.clear(); att_.clear(); ff1_.clear(); ff2_.clear(); tmp_.clear();
     bufn_ = 0; gpu_bytes_ = 0; ram_bytes_ = 0; n_past = 0;
@@ -743,6 +744,13 @@ void Model::rewind(int n) {
 
 // Prompt batches go through the int8 tensor-core kernels; single tokens use the dp4a kernels.
 void Model::mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y, bool same_x) {
+    if (kind >= CudaTier::K_IQ && n >= 16 && tc_prefill_ && gx().can_mmq(CudaTier::K_Q8_0)) {
+        // IQ prompts: the matrix goes to the Q8_0 layout once, then the int8 tensor-core matmul
+        const size_t nblk = (size_t)rows * (cols / 32), qo = (nblk * 2 + 255) / 256 * 256, need = qo + nblk * 32;
+        if (need > w16_cap_) { cuda().sync(); if (dW16_) cuda().free(dW16_); dW16_ = cuda().alloc(need); w16_cap_ = dW16_ ? need : 0; }
+        if (dW16_ && cuda().iq_to_q8(W, kind, cols, rows, dW16_, dW16_ + qo) &&
+            gx().linear_quant(x, n, cols, dW16_, dW16_ + qo, CudaTier::K_Q8_0, rows, y, same_x)) return;
+    }
     if (n >= 16 && tc_prefill_ && gx().linear_quant(x, n, cols, W, W + qoff, kind, rows, y, same_x)) return;
     cuda().matmul_dev(W, qoff, kind, x, n, cols, rows, y, same_x);
 }
@@ -1165,7 +1173,7 @@ int quant_selftest(const std::wstring& path) {
         if (t.nd != 2 || !CudaTier::can_load(t.type)) continue;
         if (layer0 ? t.name.rfind("blk.0.", 0) != 0 : std::find(seen.begin(), seen.end(), t.type) != seen.end()) continue;
         seen.push_back(t.type);
-        int cols = (int)t.ne[0], rows = (int)std::min<int64_t>(t.ne[1], 512);
+        int cols = (int)t.ne[0], rows = (int)std::min<int64_t>(t.ne[1], getenv("ITHACA_QT_ROWS") ? atoi(getenv("ITHACA_QT_ROWS")) : 512);
         size_t nbytes = gtype_row_bytes(t.type, cols) * rows;
         int kind; uint64_t qoff;
         uint64_t W = cu.load_weight(fh, (uint64_t)(t.data - g.base), nbytes, t.type, rows, cols, kind, qoff);
@@ -1181,6 +1189,18 @@ int quant_selftest(const std::wstring& path) {
         }
         double e = std::sqrt(num / std::max(den, 1e-30));
         printf("  %-6s %-28s rel.err %.5f  %s\n", gtype_name(t.type), t.name.c_str(), e, e < 0.02 ? "OK" : "BAD");
+        {   // several tokens at once (prompts use other kernels): each token row checked against its own reference
+            const int T = 11; std::vector<float> X((size_t)T * cols), Y((size_t)T * rows);
+            for (auto& v : X) { s = s * 1664525 + 1013904223; v = ((s >> 8) & 0xFFFF) / 32768.f - 1.f; }
+            bool ran = cu.matmul(W, qoff, kind, X.data(), T, cols, rows, Y.data());
+            double n2 = 0, d2 = 0;
+            for (int r = 0; r < rows; r++) {
+                dequant_row(t.type, t.data + r * gtype_row_bytes(t.type, cols), row.data(), cols);
+                for (int k = 0; k < T; k++) { double a = 0; for (int c = 0; c < cols; c++) a += (double)row[c] * X[(size_t)k * cols + c]; double g = Y[(size_t)k * rows + r]; n2 += (g - a) * (g - a); d2 += a * a; }
+            }
+            double e2 = std::sqrt(n2 / std::max(d2, 1e-30));
+            printf("  %-6s %-28s %d tokens: %s rel.err %.5f  %s\n", gtype_name(t.type), t.name.c_str(), T, ran ? "ran," : "LAUNCH FAILED,", e2, ran && e2 < 0.02 ? "OK" : "BAD");
+        }
         if (getenv("ITHACA_MMBENCH")) {   // full-size tensor, time n = 1..8 tokens
             int R = (int)t.ne[1]; size_t nb2 = gtype_row_bytes(t.type, cols) * R; int k2; uint64_t q2;
             uint64_t W2 = cu.load_weight(fh, (uint64_t)(t.data - g.base), nb2, t.type, R, cols, k2, q2);

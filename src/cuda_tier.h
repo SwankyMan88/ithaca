@@ -10,6 +10,7 @@ class CudaTier {
 public:
     // GPU weight kinds: Q4 (scale, 4-bit), Q8 (scale, int8), Q4M (scale + min, 4-bit: exact for Q4_K)
     enum { K_Q4_0 = 0, K_Q8_0 = 1, K_Q4M = 2, K_Q6 = 3, K_Q4K = 4, N_KINDS = 5 };
+    enum { K_IQ = 16 };   // K_IQ + i: IQ weights kept in their GGUF blocks (i: see iq_index), decoded inside the matmul
     // bytes of the scale area for `blocks` blocks of 32 (K_Q4K: blocks must be a multiple of 8)
     static size_t scale_bytes(int kind, size_t blocks) { return kind == K_Q4K ? blocks / 8 * 20 : blocks * (kind == K_Q4M || kind == K_Q6 ? 4 : 2); }
     enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, N_OPS };
@@ -64,6 +65,8 @@ public:
     // Returns the device pointer, or 0 if this quant type has no GPU converter (caller falls back).
     uint64_t load_weight(void* file, uint64_t off, size_t nbytes, int gtype, int rows, int cols, int& kind, uint64_t& qoff);
     static bool can_load(int gtype);
+    // IQ weights (kind >= K_IQ) decoded to the K_Q8_0 layout: f16 scales at S, int8 values at Q
+    bool iq_to_q8(uint64_t W, int kind, int cols, int rows, uint64_t S, uint64_t Q);
     static size_t gpu_bytes(int gtype, int rows, int cols);
     std::string name;
 private:
@@ -74,6 +77,9 @@ private:
     void* fns_[N_KINDS] = {};   // n == 1, 1 row per warp (small matrices)
     uint64_t qx_src_ = 0; int qx_n_ = 0, qx_cols_ = 0;   // input of the last activation quantization
     void* fe_[N_KINDS] = {};
+    void* fiq_[9][3] = {};
+    void* fiqq8_[9] = {};    // IQ matrix -> the Q8_0 layout, for prompts on the int8 tensor cores   // per IQ type: 4 rows x 1 token, 1 row x 1 token, 2 rows x 8 tokens
+    uint64_t iqtab_ = 0;     // their lookup grids
     void* ftopk_ = nullptr; void* fwsum_ = nullptr; void* fsort_ = nullptr;
     void* cv_[11] = {};
     void* up_ = nullptr;                 // upload stream
