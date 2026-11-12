@@ -209,6 +209,7 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     while (common < cache_.size() && common < toks.size() && cache_[common] == toks[common]) common++;
     if (common == toks.size()) common--;
     m_.rewind((int)common);
+    common = std::min(common, (size_t)m_.n_past);   // recurrent models restart from zero when rewound
     cache_.resize(common);
     st.reused = (int)common;
 

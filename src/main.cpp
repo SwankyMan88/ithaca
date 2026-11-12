@@ -66,7 +66,7 @@ static std::string attach_draft(const std::wstring& path) {
     // Past that length the chat simply continues without drafting.
     for (int ctx = std::max(1024, o.ctx); ctx >= 1024; ctx /= 2) {
         o.ctx = ctx;
-        if (!g_draft.load(path, o, err)) return err;
+        if (!g_draft.load(path, o, err)) return err; if (g_draft.recurrent()) { g_draft.unload(); return "draft model has state layers"; }
         while (g_draft.migrating()) Sleep(20);
         if (g_draft.fully_on_gpu()) {
             g_chat.set_draft(&g_draft);
@@ -250,6 +250,7 @@ static std::vector<std::wstring> find_drafts() {
 static void start_draft(bool force = false) {   // force: the user just switched it on
     const int gen = ++g_load_gen;
     if (!force && !spec_enabled()) { set_draft_state("off"); return; }
+    if (g_model.recurrent()) { set_draft_state("not available: this model's state layers can't undo rejected guesses"); return; }
     set_draft_state("looking for a draft model");
     std::thread([gen] {
         while (g_model.migrating() && gen == g_load_gen) Sleep(50);
