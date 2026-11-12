@@ -66,6 +66,13 @@ static void set_preview(const std::vector<uint8_t>& rgb, int w, int h) {
     g_preview.swap(b); g_preview_n++;
 }
 void media_cancel() { g_media_cancel = true; }
+// The chat model is coming back: drop the image engine's mapping of its checkpoint (several GB that would otherwise
+// count as used RAM while the chat model reloads). The file stays in the OS cache, so the next picture still starts fast.
+void media_release_engines() {
+    std::unique_lock<std::mutex> lk(g_media, std::try_to_lock);
+    if (!lk.owns_lock() || g_media_busy) return;   // a job is running or starting: it needs the engine
+    if (sd_engine().loaded()) sd_engine().unload();
+}
 
 // Returns JSON: {"url":..., "seed":..., "seconds":...} or {"error":...}
 std::string media_generate_image(const J& req) {

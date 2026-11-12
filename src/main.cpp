@@ -145,13 +145,55 @@ static std::vector<std::pair<std::wstring, uint64_t>> model_files() {
     found.erase(std::unique(found.begin(), found.end()), found.end());
     return found;
 }
+// What a GGUF holds, from its header: parameters (total and, for mixture-of-experts, used per token), architecture,
+// and whether Ithaca can run it (with the reason when not). Cached per file and size.
+struct ModelInfo { std::string json; };
+static std::string fmt_params(double n) {
+    char b[32];
+    if (n >= 1e9) snprintf(b, sizeof b, n >= 1e10 ? "%.0fB" : "%.1fB", n / 1e9); else snprintf(b, sizeof b, "%.0fM", n / 1e6);
+    return b;
+}
+static std::string model_info_json(const std::wstring& path, uint64_t size) {
+    static std::mutex m; static std::map<std::wstring, std::pair<uint64_t, std::string>> cache;
+    { std::lock_guard<std::mutex> l(m); auto it = cache.find(path); if (it != cache.end() && it->second.first == size) return it->second.second; }
+    GGUF g; std::string err, out;
+    if (!g.open(path, err)) out = ",\"supported\":false,\"why\":" + json_esc("Can't read this file: " + err);
+    else {
+        const std::string a = g.gets("general.architecture");
+        double total = 0, exps = 0; std::string bad_type;
+        bool shexp = false, ssm = false;
+        for (auto& t : g.tensors) {
+            double n = (double)t.ne[0] * t.ne[1] * t.ne[2] * t.ne[3];
+            total += n;
+            if (t.name.find("_exps.") != std::string::npos) exps += n;
+            if (t.name.find("_shexp") != std::string::npos) shexp = true;
+            if (t.name.find(".ssm_") != std::string::npos) ssm = true;
+            if (!gtype_supported(t.type) && bad_type.empty()) bad_type = gtype_name(t.type);
+        }
+        const int64_t E = g.geti(a + ".expert_count", 0), K = g.geti(a + ".expert_used_count", 0);
+        static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
+        const bool arch_ok = std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) != std::end(ok_arch);
+        std::string why;
+        if (a == "clip" || a == "mmproj") why = "Image projector for a vision model, not a chat model. Keep it next to its model.";
+        else if (g.geti("split.count", 1) > 1) why = "Split GGUF (several files); join it into one file first.";
+        else if (ssm) why = "Hybrid models (Mamba or linear-attention layers) aren't supported yet.";
+        else if (shexp) why = "Mixture-of-experts with shared experts (Qwen2-MoE) isn't supported yet.";
+        else if (!arch_ok) why = "The '" + a + "' architecture isn't supported yet.";
+        else if (!bad_type.empty()) why = "Uses the " + bad_type + " weight format, which isn't supported yet.";
+        out = ",\"arch\":" + json_esc(a) + ",\"params\":" + json_esc(total > 0 ? fmt_params(total) : "");
+        if (E > 1 && K > 0 && exps > 0) out += ",\"active\":" + json_esc(fmt_params(total - exps + exps * K / E));
+        out += std::string(",\"supported\":") + (why.empty() ? "true" : "false") + (why.empty() ? "" : ",\"why\":" + json_esc(why));
+    }
+    std::lock_guard<std::mutex> l(m); cache[path] = {size, out};
+    return out;
+}
 static std::string models_json() {
     auto found = model_files();
     std::string s = "[";
     for (size_t i = 0; i < found.size(); i++) {
         std::wstring name = found[i].first.substr(found[i].first.find_last_of(L'\\') + 1);
         s += (i ? "," : "") + std::string("{\"path\":") + json_esc(w_to_utf8(found[i].first)) + ",\"name\":" +
-             json_esc(w_to_utf8(name)) + ",\"mb\":" + std::to_string(found[i].second >> 20) + "}";
+             json_esc(w_to_utf8(name)) + ",\"mb\":" + std::to_string(found[i].second >> 20) + model_info_json(found[i].first, found[i].second) + "}";
     }
     return s + "]";
 }
@@ -244,20 +286,22 @@ static bool do_load(const std::string& path, std::string& err) {
 
 // VRAM handoff for media jobs: the chat model gives back its GPU memory while an image/video/speech
 // job runs (Windows would otherwise page GPU memory over PCIe), then reloads in the background.
-static std::string g_released_path;
+static std::string g_released_path, g_released_name;   // name: shown while the model is unloaded for a media job
 static std::mutex g_release_m;
 void chat_model_release() {
     std::lock_guard<std::mutex> rl(g_release_m);
     std::lock_guard<std::mutex> l(g_gen);
     if (!g_model.loaded() || g_model.gpu_bytes() == 0) return;
-    g_released_path = g_model.path_utf8;
+    g_released_path = g_model.path_utf8; g_released_name = g_model.hp.name;
     stop_draft("paused while media is generated");
     g_chat.reset();
     if (!g_model.park()) g_model.unload();   // parked: weights wait in RAM and return in a fraction of a second
 }
+void media_release_engines();
 void chat_model_restore() {
     std::lock_guard<std::mutex> rl(g_release_m);
     if (g_released_path.empty()) return;
+    media_release_engines();
     std::string p = g_released_path, err;
     g_released_path.clear();
     std::lock_guard<std::mutex> l(g_gen);
@@ -281,12 +325,16 @@ void chat_model_restore_later() {
     }).detach();
 }
 static bool chat_model_paused() { std::lock_guard<std::mutex> rl(g_release_m); return !g_released_path.empty(); }
+static std::string chat_model_name() {   // the loaded model, or the one waiting to come back after a media job
+    if (g_model.loaded() && !g_model.hp.name.empty()) return g_model.hp.name;
+    std::lock_guard<std::mutex> rl(g_release_m); return g_released_path.empty() ? std::string() : g_released_name;
+}
 // For agents and scripts (/v1/ithaca/...): where the chat model is, and how much VRAM is free.
 static std::string ithaca_status_json(double ms = -1) {
     size_t f = 0, t = 0; Model::cuda().mem_info(f, t);
     const bool paused = chat_model_paused();
     std::string state = g_model.parked() ? "parked" : paused ? "unloaded" : !g_model.loaded() ? "none" : g_model.fully_on_gpu() ? "gpu" : g_model.migrating() ? "loading" : "partial";
-    std::string s = "{\"chat_model\":" + (g_model.loaded() || paused ? json_esc(g_model.loaded() ? g_model.hp.name : "") : std::string("null")) + ",\"state\":\"" + state + "\"";
+    std::string s = "{\"chat_model\":" + (g_model.loaded() || paused ? json_esc(chat_model_name()) : std::string("null")) + ",\"state\":\"" + state + "\"";
     MEMORYSTATUSEX mst{sizeof(mst)}; GlobalMemoryStatusEx(&mst);
     s += ",\"ram_free_mb\":" + std::to_string(mst.ullAvailPhys >> 20);
     s += ",\"vram_free_mb\":" + std::to_string(f >> 20) + ",\"vram_total_mb\":" + std::to_string(t >> 20) + ",\"parked_mb\":" + std::to_string(g_model.parked_bytes() >> 20);
@@ -688,7 +736,7 @@ static void handle(SOCKET s) {
         {
             std::lock_guard<std::mutex> l(g_stats_m);
             st += ",\"busy\":" + std::string(g_busy ? "true" : "false") + ",\"paused\":" + std::string(chat_model_paused() ? "true" : "false") + ",\"stats\":" + g_last_stats +
-                  ",\"model\":" + json_esc(g_model.path_utf8) + ",\"name\":" + json_esc(g_model.hp.name) +
+                  ",\"model\":" + json_esc(g_model.path_utf8) + ",\"name\":" + json_esc(chat_model_name()) +
                   ",\"opts\":{\"threads\":" + std::to_string(g_opts.threads) + ",\"ctx\":" + std::to_string(g_opts.ctx) +
                   ",\"vram_mb\":" + std::to_string(g_opts.vram_mb) + ",\"ram_mb\":" + std::to_string(g_opts.ram_mb) +
                   "},\"hw_threads\":" + std::to_string(std::thread::hardware_concurrency()) + ",\"vision\":" + (g_has_vision ? "true" : "false") + ",\"draft\":" + [] { std::lock_guard<std::mutex> l(g_draft_m); return json_esc(g_draft_state); }() + "}";

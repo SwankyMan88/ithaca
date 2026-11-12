@@ -166,6 +166,7 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px}.seg button{padding:6px 12px;border-radius:7px;color:var(--dim);font-size:13px}.seg button.on{background:var(--raise);color:var(--text)}
 .hubrow{display:flex;gap:14px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--line)}.hubmain{flex:1;min-width:0}.hubmain b{display:block;font-size:14px;word-break:break-word}
 .hubmeta{display:block;font-size:12.5px;color:var(--dim);margin-top:3px}.hubmain p{margin:6px 0 0;font-size:12.5px;color:var(--faint);line-height:1.45}
+.mlist{margin:4px 0 14px}.mlist summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 0}.mrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line,rgba(127,127,127,.18))}.mrow b{display:block;font-size:13.5px;color:var(--text);word-break:break-all}.mrow small{display:block;color:#e57373;margin-top:2px}
 .fit{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:20px;margin-left:4px;white-space:nowrap}.fit.fast{background:rgba(60,190,120,.15);color:#4cc38a}.fit.ok{background:rgba(230,180,60,.15);color:#e0b34a}.fit.slow{background:rgba(230,90,90,.15);color:#e57373}
 .dlrow{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:13px}.dlrow b{display:block;word-break:break-all}.dlrow span{color:var(--dim);font-size:12px}
 .dlbar{height:6px;border-radius:6px;background:var(--line);overflow:hidden;margin-top:8px}.dlbar i{display:block;height:100%;background:linear-gradient(90deg,var(--a1),var(--a2,var(--a1)));transition:width .4s}
@@ -972,7 +973,8 @@ general:()=>`<h2>General</h2><p class="sub">How Ithaca talks to you.</p>
  <div class="field"><label>Max reply length (tokens)</label><input data-pref="max_tokens" type="number" step="256" value="${prefs.max_tokens}"></div></div>
  `,
 model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Ithaca spreads it across VRAM, RAM and SSD.</p>
- <div class="field"><label>Model</label><select id="mSel"><option>loading…</option></select></div>
+ <div class="field"><label>Model</label><select id="mSel"><option>loading…</option></select><small id="mWhy"></small></div>
+ <details class="mlist"><summary>Your models</summary><div id="mList" class="sub">Reading…</div></details>
  <div class="field"><label>Add a folder with .gguf files</label><div style="display:flex;gap:8px"><input id="mDir" placeholder="D:\\AI\\models"><button class="btn" id="mAdd">Add</button></div></div>
  <div class="grid2"><div class="field"><label>CPU threads</label><input id="mThreads" type="number" min="0" value="${status.opts?status.opts.threads:0}"><small>0 = auto (half your cores)</small></div>
  <div class="field"><label>Context window (tokens)</label><input id="mCtx" type="number" step="1024" value="${status.opts?status.opts.ctx:4096}"><small>How much the model can keep in mind</small></div>
@@ -1147,7 +1149,12 @@ If the list is already good, reply with nothing.`},
   if(tab=='hub')openHubTab();if(tab=='system')openSysTab();
   if(tab=='model'){
     const list=await api('/api/models');const s=$('mSel');
-    s.innerHTML=list.map(m=>`<option value="${esc(m.path)}" ${m.path==status.model?'selected':''}>${esc(m.name)} (${(m.mb/1024).toFixed(1)} GB)</option>`).join('')||'<option value="">No .gguf found. Add a folder below</option>';
+    const pm=m=>m.params?(m.active?`${m.params} params, ${m.active} active`:`${m.params} params`):'';
+    s.innerHTML=list.map(m=>`<option value="${esc(m.path)}" ${m.path==status.model?'selected':''}>${m.supported===false?'✕ ':''}${esc(m.name)} (${[pm(m),(m.mb/1024).toFixed(1)+' GB'].filter(Boolean).join(' · ')})</option>`).join('')||'<option value="">No .gguf found. Add a folder below</option>';
+    const why=()=>{const m=list.find(x=>x.path==s.value);$('mWhy').textContent=m&&m.supported===false?'Not supported: '+m.why:'';$('mLoad').disabled=!!(m&&m.supported===false)};
+    s.onchange=why;why();
+    $('mList').innerHTML=list.length?list.map(m=>`<div class="mrow"><div><b>${esc(m.name)}</b><span class="hubmeta">${[m.arch,pm(m),(m.mb/1024).toFixed(1)+' GB'].filter(Boolean).map(esc).join(' · ')}</span>${m.supported===false?`<small>${esc(m.why)}</small>`:''}</div>`+
+      (m.supported===false?'<span class="fit slow">Not supported</span>':'<span class="fit fast">Supported</span>')+'</div>').join(''):'No models found yet.';
     $('mAdd').onclick=async()=>{await api('/api/adddir',{dir:$('mDir').value});openSettings('model')};
     $('mLoad').onclick=async()=>{const b=$('mLoad');b.disabled=true;$('mMsg').textContent='Loading…';
       const r=await api('/api/load',{path:s.value,threads:+$('mThreads').value,ctx:+$('mCtx').value,vram_mb:+$('mVram').value,ram_mb:+$('mRam').value});
