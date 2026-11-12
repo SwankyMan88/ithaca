@@ -726,12 +726,12 @@ void Model::dnet_cpu(Layer& L, int n) {
                 const float eg = std::exp(L.ssm_a[h] * a), beta = 1.f / (1.f + std::exp(-be[(size_t)t * nh + h]));
                 float* S = &L.ssm_st[(size_t)h * dk * dv];   // [i key][j value]
                 float* o = yt + h * dv; float ss = 0;
-                for (int j = 0; j < dv; j++) {
-                    float kv = 0; for (int i = 0; i < dk; i++) { S[(size_t)i * dv + j] *= eg; kv += S[(size_t)i * dv + j] * k[i]; }
-                    const float dl = (v[j] - kv) * beta; float acc = 0;
-                    for (int i = 0; i < dk; i++) { S[(size_t)i * dv + j] += k[i] * dl; acc += S[(size_t)i * dv + j] * q[i]; }
-                    o[j] = acc; ss += acc * acc;
-                }
+                float kv[512], dl[512];   // row-wise over S so the inner loops are contiguous (dv <= 512)
+                for (int j = 0; j < dv; j++) { kv[j] = 0; o[j] = 0; }
+                for (int i = 0; i < dk; i++) { float* Si = S + (size_t)i * dv; const float ki = k[i]; for (int j = 0; j < dv; j++) { Si[j] *= eg; kv[j] += Si[j] * ki; } }
+                for (int j = 0; j < dv; j++) dl[j] = (v[j] - kv[j]) * beta;
+                for (int i = 0; i < dk; i++) { float* Si = S + (size_t)i * dv; const float ki = k[i], qi = q[i]; for (int j = 0; j < dv; j++) { Si[j] += ki * dl[j]; o[j] += Si[j] * qi; } }
+                for (int j = 0; j < dv; j++) ss += o[j] * o[j];
                 const float r = 1.f / std::sqrt(ss / dv + hp.eps);
                 for (int j = 0; j < dv; j++) o[j] *= r * L.ssm_norm[j] * act_silu(z[(size_t)t * hp.ssm_inner + h * dv + j]);
             }
