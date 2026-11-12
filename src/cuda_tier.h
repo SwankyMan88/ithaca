@@ -13,7 +13,7 @@ public:
     enum { K_IQ = 16 };   // K_IQ + i: IQ weights kept in their GGUF blocks (i: see iq_index), decoded inside the matmul
     // bytes of the scale area for `blocks` blocks of 32 (K_Q4K: blocks must be a multiple of 8)
     static size_t scale_bytes(int kind, size_t blocks) { return kind == K_Q4K ? blocks / 8 * 20 : blocks * (kind == K_Q4M || kind == K_Q6 ? 4 : 2); }
-    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, OAI, XBIAS, ROWEXP, N_OPS };
+    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, OAI, XBIAS, ROWEXP, SSM_CONV, SSM_SCAN, SSM_GNORM, SCONV, DNET, SIGMUL, N_OPS };
     bool init(std::string& info);   // safe to call when no NVIDIA GPU: returns false
     bool ok() const { return ok_; }
     void bind_thread();             // make context current on calling thread

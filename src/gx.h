@@ -79,7 +79,7 @@ public:
                               uint64_t off, int E, int maxc, uint64_t s_stride, uint64_t q_stride, bool same_x = false);   // same_x: x unchanged since the last call
     // Chat-engine prompt attention from the fp16 KV cache (causal, grouped heads, optional window / non-causal block).
     bool attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, int p0, int ldq, int kvd, int heads, int grp, int hd,
-                      float scale, int win, int nc, uint64_t Ks = 0, uint64_t Vs = 0, uint64_t sink = 0);   // Ks/Vs: int8 cache scales; sink: per-head logits
+                      float scale, int win, int nc, uint64_t Ks = 0, uint64_t Vs = 0, uint64_t sink = 0, float cap = 0);   // Ks/Vs: int8 cache scales; sink: per-head logits
     void gemm_nt(const GT& A, int M, int K, int lda, const GT& B, int N, int ldb, GT& C, int ldc, float alpha,
                  int batch, size_t sA, size_t sB, size_t sC, size_t offA = 0, size_t offB = 0, size_t offC = 0);
     void gemm_nn(const GT& A, int M, int K, int lda, const GT& B, int N, int ldb, GT& C, int ldc, float alpha,

@@ -171,12 +171,12 @@ static std::string model_info_json(const std::wstring& path, uint64_t size) {
             if (!gtype_supported(t.type) && bad_type.empty()) bad_type = gtype_name(t.type);
         }
         const int64_t E = g.geti(a + ".expert_count", 0), K = g.geti(a + ".expert_used_count", 0);
-        static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
+        static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
         const bool arch_ok = std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) != std::end(ok_arch);
         std::string why;
         if (a == "clip" || a == "mmproj") why = "Image projector for a vision model, not a chat model. Keep it next to its model.";
         else if (g.geti("split.count", 1) > 1) why = "Split GGUF (several files); join it into one file first.";
-        else if (ssm) why = "Hybrid models (Mamba or linear-attention layers) aren't supported yet.";
+        else if (ssm && !arch_ok) why = "Hybrid models (Mamba or linear-attention layers) aren't supported yet.";
         else if (shexp) why = "Mixture-of-experts with shared experts (Qwen2-MoE) isn't supported yet.";
         else if (!arch_ok) why = "The '" + a + "' architecture isn't supported yet.";
         else if (!bad_type.empty()) why = "Uses the " + bad_type + " weight format, which isn't supported yet.";
@@ -220,7 +220,7 @@ static std::vector<std::wstring> find_drafts() {
     uint64_t main_sz = 0;
     for (auto& f : model_files()) if (_wcsicmp(f.first.c_str(), main.c_str()) == 0) main_sz = f.second;
     if (!main_sz) return {};
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
     std::vector<std::pair<int, std::wstring>> found;
     const int nv = g_model.tok.n_vocab();
     for (auto& f : model_files()) {
@@ -1050,6 +1050,32 @@ int main() {
         }
         if (getenv("ITHACA_RAW")) {   // greedy continuation of the prompt as plain text (no chat template), for checks against llama.cpp
             std::vector<int> t = g_model.tok.encode(prompt, true);
+            if (const char* pc = getenv("ITHACA_PPL")) {   // like llama-perplexity -c N: chunks of N tokens, scored on their second half
+                const int c = atoi(pc) > 0 ? atoi(pc) : 128, V = g_model.hp.n_vocab; double nll = 0; int cnt = 0;
+                for (size_t c0 = 0; c0 + c <= t.size(); c0 += c) {
+                    std::vector<int> ch(t.begin() + c0, t.begin() + c0 + c);
+                    if (g_model.tok.add_bos && g_model.tok.bos >= 0) ch[0] = g_model.tok.bos;
+                    g_model.rewind(0);
+                    const float* lg = g_model.eval(ch.data(), c / 2 + 1);   // llama-perplexity scores tokens c/2 + 1 .. c - 1
+                    for (int i = c / 2 + 1; i < c; i++) {
+                        float mx = *std::max_element(lg, lg + V); double s = 0;
+                        for (int v = 0; v < V; v++) s += std::exp((double)lg[v] - mx);
+                        nll += std::log(s) + mx - lg[ch[i]]; cnt++;
+                        if (i + 1 < c) lg = g_model.eval(&ch[i], 1);
+                    }
+                    printf("[%zu] %.4f\n", c0 / c + 1, std::exp(nll / cnt));
+                }
+                printf("PPL %.4f over %d tokens\n", std::exp(nll / cnt), cnt); g_model.unload(); return 0;
+            }
+            if (const char* ag = getenv("ITHACA_AGREE")) {   // teacher-forced: how often our argmax is the next token of the given text
+                const int start = std::max(1, std::min((int)t.size() - 1, atoi(ag))); int same = 0, cnt = 0;
+                const float* lg = g_model.eval(t.data(), start);
+                for (int i = start; i < (int)t.size(); i++) {
+                    int id = (int)(std::max_element(lg, lg + g_model.hp.n_vocab) - lg); same += id == t[i]; cnt++;
+                    lg = g_model.eval(&t[i], 1);
+                }
+                printf("AGREE %d/%d\n", same, cnt); g_model.unload(); return 0;
+            }
             if (getenv("ITHACA_NLL")) {   // mean negative log-likelihood of the prompt: first half as one batch, the rest token by token
                 const int h = (int)t.size() / 2; double nll = 0; int cnt = 0;
                 auto acc = [&](const float* lg, int next) {
@@ -1065,6 +1091,7 @@ int main() {
             const float* lg = g_model.eval(t.data(), (int)t.size());
             for (int i = 0; i < (n > 0 ? n : 32) && lg; i++) {
                 int id = (int)(std::max_element(lg, lg + g_model.hp.n_vocab) - lg);
+                if (g_model.tok.is_stop(id)) { printf(" [end of text]"); break; }
                 std::string p = g_model.tok.piece(id); fwrite(p.data(), 1, p.size(), stdout); fflush(stdout);
                 lg = g_model.eval(&id, 1);
             }

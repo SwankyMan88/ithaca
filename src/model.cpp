@@ -52,18 +52,18 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.arch = g_.gets("general.architecture");
     hp.name = g_.gets("general.name", "model");
     const std::string& a = hp.arch;
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
     if (std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* s) { return a == s; }) == std::end(ok_arch)) {
         err = "architecture '" + a + "' is not supported yet (supported: llama, mistral, mixtral, qwen2, qwen2.5-vl text, qwen3, qwen3-moe, phi3/phi4, granite, granite-moe, gemma3, gpt-oss)";
         g_.close(); return false;
     }
     std::string P = a + ".";
     hp.n_embd = (int)g_.geti(P + "embedding_length", 0);
-    hp.n_layer = (int)g_.geti(P + "block_count", 0);
+    hp.n_layer = (int)g_.geti(P + "block_count", 0) - (int)g_.geti(P + "nextn_predict_layers", 0);   // multi-token-prediction layers are not run
     hp.n_head = (int)g_.geti(P + "attention.head_count", 0);
     {
         const GValue* kvv = g_.find(P + "attention.head_count_kv");
-        hp.n_kv = kvv ? (kvv->arr_n.empty() ? (int)kvv->i : (int)kvv->arr_n[0]) : hp.n_head;
+        hp.n_kv = kvv ? (kvv->arr_n.empty() ? (int)kvv->i : (int)*std::max_element(kvv->arr_n.begin(), kvv->arr_n.end())) : hp.n_head;   // per-layer list: the attention layers' count
     }
     hp.n_ff = (int)g_.geti(P + "feed_forward_length", 0);
     hp.eps = (float)g_.getf(P + "attention.layer_norm_rms_epsilon", 1e-5);
@@ -71,7 +71,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.hd = (int)g_.geti(P + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
     hp.n_rot = (int)g_.geti(P + "rope.dimension_count", hp.hd);
     hp.ctx_train = (int)g_.geti(P + "context_length", 4096);
-    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3" || a == "gpt-oss";
+    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3" || a == "gpt-oss" || a == "gemma2" || a == "olmo2" || a == "olmoe" || a == "lfm2" || a == "qwen35";
     hp.n_expert = (int)g_.geti(P + "expert_count", 0);
     hp.n_expert_used = (int)g_.geti(P + "expert_used_count", 0);
     { const GValue* en = g_.find(P + "expert_weights_norm"); hp.expert_norm = en ? en->i != 0 : true; }
@@ -82,12 +82,30 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         hp.rope_base_swa = (float)g_.getf(P + "rope.local.freq_base", 10000.0);
         if (hp.n_layer == 62) hp.attn_scale = 1.f / std::sqrt((float)hp.n_embd / hp.n_head);   // 27B uses query_pre_attn_scalar
     }
+    if (a == "gemma2") {   // Gemma 3's layout (minus q/k norms) with soft-capping; every other layer has a 4096 window
+        hp.gelu = true; hp.emb_scale = std::sqrt((float)hp.n_embd);
+        hp.swa_window = (int)g_.geti(P + "attention.sliding_window", 0); if (getenv("ITHACA_NO_SWA")) hp.swa_window = 0;
+        hp.rope_base_swa = hp.rope_base;
+        hp.attn_softcap = (float)g_.getf(P + "attn_logit_softcapping", 0.0); hp.final_softcap = (float)g_.getf(P + "final_logit_softcapping", 0.0);
+    }
+    if (a == "smollm3") hp.nope_step = 4;
+    if (a == "qwen35") {   // Gated DeltaNet + gated attention (3:1)
+        hp.ssm_inner = (int)g_.geti(P + "ssm.inner_size", 0); hp.ssm_state = (int)g_.geti(P + "ssm.state_size", 0);
+        hp.ssm_groups = (int)g_.geti(P + "ssm.group_count", 1); hp.ssm_heads = (int)g_.geti(P + "ssm.time_step_rank", 0); hp.ssm_conv = (int)g_.geti(P + "ssm.conv_kernel", 4);
+    }
+    if (a == "olmo2") hp.no_prenorm = true;
+    if (a == "olmoe") hp.expert_norm = false;   // top-k weights are not renormalized
     if (a == "gpt-oss") {   // every other layer (from the first) has a 128-token window; same RoPE on both kinds
         hp.oai = true;
         hp.swa_window = (int)g_.geti(P + "attention.sliding_window", 0); if (getenv("ITHACA_NO_SWA")) hp.swa_window = 0;
         hp.rope_base_swa = hp.rope_base;
     }
-    if (a == "granite" || a == "granitemoe") {
+    if (a == "granitehybrid") {
+        hp.nope = !(g_.find(P + "rope.scaling.finetuned") && g_.find(P + "rope.scaling.finetuned")->i);   // the converter stores "uses RoPE" here
+        hp.ssm_inner = (int)g_.geti(P + "ssm.inner_size", 0); hp.ssm_state = (int)g_.geti(P + "ssm.state_size", 0);
+        hp.ssm_groups = (int)g_.geti(P + "ssm.group_count", 1); hp.ssm_heads = (int)g_.geti(P + "ssm.time_step_rank", 0); hp.ssm_conv = (int)g_.geti(P + "ssm.conv_kernel", 4);
+    }
+    if (a == "granite" || a == "granitemoe" || a == "granitehybrid") {
         hp.emb_scale = (float)g_.getf(P + "embedding_scale", 1.0);
         hp.res_scale = (float)g_.getf(P + "residual_scale", 1.0);
         hp.attn_scale = (float)g_.getf(P + "attention.scale", 0.0);
@@ -102,6 +120,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.n_vocab = (int)embd_->ne[1];
     if (!bind(out_, "output.weight", err, false) || (!out_.t && !bind(out_, "token_embd.weight", err))) { g_.close(); return false; }
     out_norm_ = vec("output_norm.weight");
+    if (out_norm_.empty()) out_norm_ = vec("token_embd_norm.weight");   // LFM2 keeps its final norm under this name
 
     layers_ = std::vector<Layer>(hp.n_layer);
     for (int i = 0; i < hp.n_layer; i++) {
@@ -113,16 +132,44 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         L.k_norm = vec(b + "attn_k_norm.weight");
         L.bq = vec(b + "attn_q.bias"); L.bk = vec(b + "attn_k.bias"); L.bv = vec(b + "attn_v.bias");
         L.post_attn_norm = vec(b + "post_attention_norm.weight"); L.post_ffn_norm = vec(b + "post_ffw_norm.weight");
-        L.swa = hp.swa_window > 0 && (hp.oai ? i % 2 == 0 : (i + 1) % 6 != 0);
+        L.swa = hp.swa_window > 0 && (hp.oai || hp.arch == "gemma2" ? i % 2 == 0 : (i + 1) % 6 != 0);
+        L.nope = hp.nope || (hp.nope_step > 0 && (i + 1) % hp.nope_step == 0);
         if (hp.oai) {   // gpt-oss names the FFN input norm post_attention_norm
             L.ffn_norm.swap(L.post_attn_norm);
             L.bo = vec(b + "attn_output.bias"); L.sinks = vec(b + "attn_sinks.weight"); L.b_inp = vec(b + "ffn_gate_inp.bias");
             L.b_gate = vec(b + "ffn_gate_exps.bias"); L.b_up = vec(b + "ffn_up_exps.bias"); L.b_down = vec(b + "ffn_down_exps.bias");
         }
         bool ok = true;
-        if (g_.get(b + "attn_qkv.weight")) ok &= bind(L.qkv, b + "attn_qkv.weight", err);
+        if (hp.arch == "qwen35") L.ffn_norm.swap(L.post_attn_norm);   // post_attention_norm is the FFN input norm
+        if (hp.arch == "qwen35" && g_.get(b + "ssm_a")) {   // Gated DeltaNet layer
+            ok = bind(L.ssm_in, b + "attn_qkv.weight", err) && bind(L.ssm_out, b + "ssm_out.weight", err) && bind(L.dn_z, b + "attn_gate.weight", err) &&
+                 bind(L.dn_a, b + "ssm_alpha.weight", err) && bind(L.dn_b, b + "ssm_beta.weight", err);
+            L.conv_w = vec(b + "ssm_conv1d.weight"); L.ssm_a = vec(b + "ssm_a"); L.ssm_dtb = vec(b + "ssm_dt.bias"); L.ssm_norm = vec(b + "ssm_norm.weight");
+            const size_t C = (size_t)2 * hp.ssm_groups * hp.ssm_state + hp.ssm_inner;
+            if (L.conv_w.size() != C * hp.ssm_conv || L.ssm_a.size() != (size_t)hp.ssm_heads || hp.ssm_inner != hp.ssm_heads * hp.ssm_state) { err = "unexpected Gated DeltaNet shapes"; ok = false; }
+            L.conv_b.assign(C, 0.f); L.conv_st.assign((size_t)(hp.ssm_conv - 1) * C, 0.f); L.ssm_st.assign((size_t)hp.ssm_heads * hp.ssm_state * hp.ssm_state, 0.f);
+            L.dnet = true; recurrent_ = true;
+        }
+        else if (g_.get(b + "shortconv.in_proj.weight")) {   // LFM2 short-convolution layer instead of attention
+            ok = bind(L.ssm_in, b + "shortconv.in_proj.weight", err) && bind(L.ssm_out, b + "shortconv.out_proj.weight", err);
+            L.conv_w = vec(b + "shortconv.conv.weight"); L.sconv = true;
+            if (L.conv_w.size() != (size_t)hp.n_embd * 3) { err = "unexpected short-conv shapes (kernel 3 expected)"; ok = false; }
+            L.conv_st.assign((size_t)2 * hp.n_embd, 0.f);
+            recurrent_ = true;
+        }
+        else if (g_.get(b + "ssm_in.weight")) {   // Mamba-2 layer instead of attention
+            ok = bind(L.ssm_in, b + "ssm_in.weight", err) && bind(L.ssm_out, b + "ssm_out.weight", err);
+            L.conv_w = vec(b + "ssm_conv1d.weight"); L.conv_b = vec(b + "ssm_conv1d.bias"); L.ssm_a = vec(b + "ssm_a"); L.ssm_d = vec(b + "ssm_d");
+            L.ssm_dtb = vec(b + "ssm_dt.bias"); L.ssm_norm = vec(b + "ssm_norm.weight");
+            const size_t xbc = hp.ssm_inner + 2 * hp.ssm_groups * hp.ssm_state;
+            if (!hp.ssm_heads || L.conv_w.size() != xbc * hp.ssm_conv || L.ssm_a.size() != (size_t)hp.ssm_heads) { err = "unexpected Mamba-2 layer shapes"; ok = false; }
+            L.conv_st.assign((hp.ssm_conv - 1) * xbc, 0.f); L.ssm_st.assign((size_t)hp.ssm_inner * hp.ssm_state, 0.f);
+            recurrent_ = true;
+        }
+        else if (g_.get(b + "attn_qkv.weight")) ok &= bind(L.qkv, b + "attn_qkv.weight", err);
         else ok &= bind(L.q, b + "attn_q.weight", err) && bind(L.k, b + "attn_k.weight", err) && bind(L.v, b + "attn_v.weight", err);
-        ok = ok && bind(L.o, b + "attn_output.weight", err);
+        if (!L.ssm_in.t) ok = ok && bind(L.o, b + "attn_output.weight", err);
+        L.qgate = L.q.t && L.q.rows == 2 * hp.n_head * hp.hd;
         if (ok && g_.get(b + "ffn_gate_exps.weight")) {
             if (hp.n_expert < 1 || hp.n_expert_used < 1) { err = "MoE model without expert counts"; ok = false; }
             ok = ok && bind(L.gate_inp, b + "ffn_gate_inp.weight", err) && bind(L.gate_exps, b + "ffn_gate_exps.weight", err) &&
@@ -133,6 +180,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
             if (ok && g_.get(b + "ffn_gate.weight")) ok = bind(L.gate, b + "ffn_gate.weight", err) && bind(L.up, b + "ffn_up.weight", err);
             else if (ok) ok = bind(L.gateup, b + "ffn_up.weight", err);
         }
+        if (hp.no_prenorm) { L.attn_norm.assign(hp.n_embd, 1.f); L.ffn_norm.assign(hp.n_embd, 1.f); }   // placeholders: skipped below
         if (!ok || L.attn_norm.empty() || L.ffn_norm.empty()) {
             if (err.empty()) err = "layer " + std::to_string(i) + " is incomplete (MoE / hybrid models aren't supported yet)";
             layers_.clear(); g_.close(); return false;
@@ -196,7 +244,8 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         std::string ge;
         const bool flash = !getenv("ITHACA_NO_FLASH") && !getenv("ITHACA_NO_TC_PREFILL") && (gx().ok() || gx().init(ge)) && gx().tensor_cores() &&
                            (hp.hd == 64 || hp.hd == 80 || hp.hd == 96 || hp.hd == 128 || hp.hd == 256);
-        if (hp.oai && !flash) vram_budget = 0;   // attention sinks are only in the tensor-core kernels: CPU elsewhere
+        if ((hp.oai || hp.attn_softcap > 0) && !flash) vram_budget = 0;   // sinks and soft-capping are only in the tensor-core kernels
+        if (recurrent_ && (getenv("ITHACA_SSM_CPU") || (hp.ssm_heads && (hp.arch == "qwen35" ? hp.ssm_state != 128 || hp.ssm_inner / hp.ssm_heads != 128 : !ssm_gpu_ok())))) vram_budget = 0;   // state kernels need conv 4 and a state size dividing 256   // attention sinks are only in the tensor-core kernels: CPU elsewhere
         gpu_batch_ = flash ? 512 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
         sc_rows_ = flash ? 1 : gpu_batch_;
         {   // int8 KV needs the flash prompt kernels and the generated decode kernel (they read int8)
@@ -345,6 +394,8 @@ void Model::tier_thread() {
             L.d_qn = dev_vec(L.q_norm); L.d_kn = dev_vec(L.k_norm);
             L.d_bq = dev_vec(L.bq); L.d_bk = dev_vec(L.bk); L.d_bv = dev_vec(L.bv);
             L.d_pan = dev_vec(L.post_attn_norm); L.d_pfn = dev_vec(L.post_ffn_norm);
+            L.d_convw = dev_vec(L.conv_w); L.d_convb = dev_vec(L.conv_b); L.d_ssma = dev_vec(L.ssm_a); L.d_ssmd = dev_vec(L.ssm_d);
+            L.d_dtb = dev_vec(L.ssm_dtb); L.d_ssmnorm = dev_vec(L.ssm_norm); L.d_convst = dev_vec(L.conv_st); L.d_ssmst = dev_vec(L.ssm_st);
             L.d_bo = dev_vec(L.bo); L.d_sinks = dev_vec(L.sinks); L.d_binp = dev_vec(L.b_inp); L.d_bgate = dev_vec(L.b_gate); L.d_bup = dev_vec(L.b_up); L.d_bdown = dev_vec(L.b_down);
             {   // the KV cache starts small and grows with the conversation (ensure_kv); the tier plan
                 // already budgets the full context, so growing never pushes this model out of VRAM
@@ -569,6 +620,11 @@ bool Model::alloc_dev_buffers() {
         {&dSC_, (size_t)sc_rows_ * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
         {&dR_, B * (size_t)std::max(1, hp.n_expert)}, {&dG_, B * d}, {&dIdx_, B * (size_t)std::max(1, hp.n_expert_used)}, {&dWt_, B * (size_t)std::max(1, hp.n_expert_used)},
         {&dPM_, (size_t)hp.n_head * 16}, {&dPL_, (size_t)hp.n_head * 16}, {&dPO_, (size_t)hp.n_head * 16 * hp.hd}};
+    if (recurrent_) {
+        const size_t xbc = hp.ssm_inner + 2 * hp.ssm_groups * hp.ssm_state, tot = std::max<size_t>(hp.ssm_inner + xbc + hp.ssm_heads, 3 * d);
+        struct { uint64_t* p; size_t n; } sb[] = {{&dZX_, B * tot}, {&dXC_, B * std::max<size_t>(xbc, 1)}, {&dSY_, B * std::max<size_t>(hp.ssm_inner, d)}};
+        for (auto& b : sb) { *b.p = cuda().alloc(b.n * 4); if (!*b.p) return false; dev_allocs_.push_back(*b.p); }
+    }
     if (hp.n_expert > 0) {   // grouped expert matmuls for prompts: every (token, expert) row at once
         const size_t R = B * (size_t)std::max(1, hp.n_expert_used), fe = hp.n_ff_exp;
         struct { uint64_t* p; size_t n; } moe[] = {{&dMG_, R * d}, {&dMF1_, R * fe}, {&dMF2_, R * fe}, {&dMT_, R * d}, {&dOff_, (size_t)hp.n_expert + 1}, {&dSI_, R}, {&dSW_, R}};
@@ -624,6 +680,131 @@ void Model::route(const float* lg, int n, std::vector<std::vector<std::pair<int,
 }
 
 static inline float act_silu(float x) { return x / (1.0f + std::exp(-x)); }
+void Model::post_logits(float* v, size_t n) const {
+    if (hp.logit_scale != 1.f) for (size_t i = 0; i < n; i++) v[i] /= hp.logit_scale;
+    if (hp.final_softcap > 0) for (size_t i = 0; i < n; i++) v[i] = hp.final_softcap * std::tanh(v[i] / hp.final_softcap);
+}
+
+// Mamba-2 (Granite 4.0 H) on the CPU, token by token: in-projection to (z, xBC, dt); causal depthwise conv over xBC
+// with the last conv_kernel - 1 inputs kept as state, SiLU; per head the scan S = exp(dt A) S + dt x B^T, y = S C + D x;
+// y * silu(z), RMS-normed per group, out-projection. Follows llama.cpp's build_mamba2_layer (MIT, the ggml authors).
+// Qwen3.5 Gated DeltaNet on the CPU (same math as k_dnet): conv over [q | k | v] (no bias) + SiLU; per value head h
+// (key head h % groups): S *= exp(A softplus(alpha + dt bias)); delta = (v - S^T k) sigmoid(beta); S += k delta^T;
+// o = S^T q (q, k L2-normed, q / sqrt(dk)); o RMS-normed * w * silu(z); out-projection. After the HF Qwen3-Next reference.
+void Model::dnet_cpu(Layer& L, int n) {
+    const int dk = hp.ssm_state, nk = hp.ssm_groups, nh = hp.ssm_heads, dv = hp.ssm_inner / nh, ck = hp.ssm_conv, C = 2 * nk * dk + hp.ssm_inner;
+    std::vector<float> qkv((size_t)n * C), z((size_t)n * hp.ssm_inner), al((size_t)n * nh), be((size_t)n * nh), y((size_t)n * hp.ssm_inner), xc(C);
+    matmul(L.ssm_in, xn_.data(), n, qkv.data()); matmul(L.dn_z, xn_.data(), n, z.data());
+    matmul(L.dn_a, xn_.data(), n, al.data()); matmul(L.dn_b, xn_.data(), n, be.data());
+    for (int t = 0; t < n; t++) {
+        const float* xb = &qkv[(size_t)t * C];
+        for (int c = 0; c < C; c++) {
+            const float* w = &L.conv_w[(size_t)c * ck];
+            float s = w[ck - 1] * xb[c];
+            for (int k = 0; k < ck - 1; k++) s += w[k] * L.conv_st[(size_t)k * C + c];
+            for (int k = 0; k < ck - 2; k++) L.conv_st[(size_t)k * C + c] = L.conv_st[(size_t)(k + 1) * C + c];
+            L.conv_st[(size_t)(ck - 2) * C + c] = xb[c];
+            xc[c] = act_silu(s);
+        }
+        for (int h = 0; h < 2 * nk; h++) {   // L2 norm of every q and k head
+            float* v = &xc[(size_t)h * dk]; float ss = 0; for (int i = 0; i < dk; i++) ss += v[i] * v[i];
+            const float r = 1.f / std::sqrt(ss + 1e-6f) * (h < nk ? 1.f / std::sqrt((float)dk) : 1.f);
+            for (int i = 0; i < dk; i++) v[i] *= r;
+        }
+        float* yt = &y[(size_t)t * hp.ssm_inner];
+        pool_.run(nh, 1, [&](int64_t h0, int64_t h1, int) {
+            for (int64_t h = h0; h < h1; h++) {
+                const int kh = (int)(h % nk);   // the GGUF orders value heads so they tile over the key heads
+                const float* q = &xc[(size_t)kh * dk]; const float* k = &xc[(size_t)(nk + kh) * dk]; const float* v = &xc[(size_t)2 * nk * dk + h * dv];
+                float a = al[(size_t)t * nh + h] + L.ssm_dtb[h]; a = a > 20.f ? a : std::log1p(std::exp(a));
+                const float eg = std::exp(L.ssm_a[h] * a), beta = 1.f / (1.f + std::exp(-be[(size_t)t * nh + h]));
+                float* S = &L.ssm_st[(size_t)h * dk * dv];   // [i key][j value]
+                float* o = yt + h * dv; float ss = 0;
+                for (int j = 0; j < dv; j++) {
+                    float kv = 0; for (int i = 0; i < dk; i++) { S[(size_t)i * dv + j] *= eg; kv += S[(size_t)i * dv + j] * k[i]; }
+                    const float dl = (v[j] - kv) * beta; float acc = 0;
+                    for (int i = 0; i < dk; i++) { S[(size_t)i * dv + j] += k[i] * dl; acc += S[(size_t)i * dv + j] * q[i]; }
+                    o[j] = acc; ss += acc * acc;
+                }
+                const float r = 1.f / std::sqrt(ss / dv + hp.eps);
+                for (int j = 0; j < dv; j++) o[j] *= r * L.ssm_norm[j] * act_silu(z[(size_t)t * hp.ssm_inner + h * dv + j]);
+            }
+        });
+    }
+    matmul(L.ssm_out, y.data(), n, tmp_.data());
+}
+
+void Model::dnet_gpu(Layer& L, int n, bool same_x) {
+    CudaTier& cu = cuda();
+    unsigned un = n, dk = hp.ssm_state, nk = hp.ssm_groups, nh = hp.ssm_heads, C = 2 * nk * dk + hp.ssm_inner, hpk = 0, zero = 0;   // hpk 0: value head h uses key head h % nk
+    float eps = hp.eps;
+    uint64_t dAl = dF2_, dBe = dF2_ + (uint64_t)gpu_batch_ * nh * 4;
+    mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, same_x);
+    mmq(L.dn_z.dptr.load(), L.dn_z.gqoff, L.dn_z.gkind, dXN_, n, L.dn_z.cols, L.dn_z.rows, dF1_, true);
+    cu.matmul_dev(L.dn_a.dptr.load(), L.dn_a.gqoff, L.dn_a.gkind, dXN_, n, L.dn_a.cols, L.dn_a.rows, dAl);
+    cu.matmul_dev(L.dn_b.dptr.load(), L.dn_b.gqoff, L.dn_b.gkind, dXN_, n, L.dn_b.cols, L.dn_b.rows, dBe);
+    cu.launch(CudaTier::SSM_CONV, (C + 255) / 256, 1, 256, {&dZX_, &L.d_convw, &L.d_convb, &L.d_convst, &dXC_, &un, &C, &C, &zero});
+    cu.launch(CudaTier::DNET, nh, 1, 128, {&dXC_, &dF1_, &dAl, &dBe, &L.d_ssma, &L.d_dtb, &L.d_ssmnorm, &L.d_ssmst, &dSY_, &un, &C, &nk, &hpk, &nh, &eps});
+    mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
+}
+
+// LFM2 short convolution: (b, c, x) = in_proj(x); v = b * x; y = c * conv3(v) over the last 3 tokens; out_proj(y).
+void Model::sconv_cpu(Layer& L, int n) {
+    const int d = hp.n_embd;
+    std::vector<float> bcx((size_t)n * 3 * d), y((size_t)n * d);
+    matmul(L.ssm_in, xn_.data(), n, bcx.data());
+    for (int t = 0; t < n; t++) {
+        const float* r = &bcx[(size_t)t * 3 * d];
+        for (int c = 0; c < d; c++) {
+            const float v = r[c] * r[2 * d + c], *w = &L.conv_w[(size_t)c * 3];
+            const float o = w[0] * L.conv_st[c] + w[1] * L.conv_st[d + c] + w[2] * v;
+            L.conv_st[c] = L.conv_st[d + c]; L.conv_st[d + c] = v;
+            y[(size_t)t * d + c] = r[d + c] * o;
+        }
+    }
+    matmul(L.ssm_out, y.data(), n, tmp_.data());
+}
+
+void Model::mamba_cpu(Layer& L, int n) {
+    const int di = hp.ssm_inner, ds = hp.ssm_state, ng = hp.ssm_groups, nh = hp.ssm_heads, hdim = di / nh, ck = hp.ssm_conv;
+    const int xbc = di + 2 * ng * ds, tot = di + xbc + nh, d = hp.n_embd;
+    std::vector<float> zx((size_t)n * tot), y((size_t)n * di), xc(xbc);
+    matmul(L.ssm_in, xn_.data(), n, zx.data());
+    for (int t = 0; t < n; t++) {
+        const float* z = &zx[(size_t)t * tot]; const float* xb = z + di; const float* dt = xb + xbc;
+        for (int c = 0; c < xbc; c++) {
+            const float* w = &L.conv_w[(size_t)c * ck];
+            float s = L.conv_b[c] + w[ck - 1] * xb[c];
+            for (int k = 0; k < ck - 1; k++) s += w[k] * L.conv_st[(size_t)k * xbc + c];
+            for (int k = 0; k < ck - 2; k++) L.conv_st[(size_t)k * xbc + c] = L.conv_st[(size_t)(k + 1) * xbc + c];
+            L.conv_st[(size_t)(ck - 2) * xbc + c] = xb[c];
+            xc[c] = act_silu(s);
+        }
+        const float* xs = xc.data(); const float* B = xs + di; const float* C = B + ng * ds;
+        float* yt = &y[(size_t)t * di];
+        pool_.run(nh, 1, [&](int64_t h0, int64_t h1, int) {
+            for (int64_t h = h0; h < h1; h++) {
+                float v = dt[h] + L.ssm_dtb[h]; v = v > 20.f ? v : std::log1p(std::exp(v));
+                const float dA = std::exp(v * L.ssm_a[h]); const int g = (int)(h / (nh / ng));
+                const float* Bg = B + g * ds; const float* Cg = C + g * ds;
+                for (int p = 0; p < hdim; p++) {
+                    const int i = (int)h * hdim + p; const float xv = xs[i]; float* S = &L.ssm_st[(size_t)i * ds]; float acc = 0;
+                    for (int k = 0; k < ds; k++) { S[k] = S[k] * dA + v * xv * Bg[k]; acc += S[k] * Cg[k]; }
+                    yt[i] = acc + L.ssm_d[h] * xv;
+                }
+            }
+        });
+        for (int i = 0; i < di; i++) yt[i] *= act_silu(z[i]);
+        const int gs = di / ng;
+        for (int g = 0; g < ng; g++) {
+            float ss = 0; for (int i = 0; i < gs; i++) ss += yt[g * gs + i] * yt[g * gs + i];
+            const float r = 1.f / std::sqrt(ss / gs + hp.eps);
+            for (int i = 0; i < gs; i++) yt[g * gs + i] *= r * L.ssm_norm[g * gs + i];
+        }
+    }
+    (void)d;
+    matmul(L.ssm_out, y.data(), n, tmp_.data());
+}
 // gpt-oss: gate clamped to <= 7, up to [-7, 7]; gate * sigmoid(1.702 gate) * (up + 1)
 static inline float act_oai(float g, float u) { g = std::min(g, 7.f); u = std::min(7.f, std::max(-7.f, u)); return g / (1.f + std::exp(-1.702f * g)) * (u + 1.f); }
 static inline float act_gelu(float x) { return 0.5f * x * (1.f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x))); }
@@ -814,8 +995,30 @@ size_t Model::kv_pos_bytes() const {
 }
 
 void Model::rewind(int n) {
+    if (recurrent_ && n < n_past) {   // a state can't be rolled back: start over
+        n = 0;
+        for (auto& L : layers_) {
+            std::fill(L.conv_st.begin(), L.conv_st.end(), 0.f); std::fill(L.ssm_st.begin(), L.ssm_st.end(), 0.f);
+            if (L.d_convst) cuda().zero(L.d_convst, L.conv_st.size() * 4);
+            if (L.d_ssmst) cuda().zero(L.d_ssmst, L.ssm_st.size() * 4);
+        }
+    }
     if (n < n_past) n_past = n;
     for (auto& L : layers_) if (L.kv_dev > n) L.kv_dev = n;
+}
+
+// Mamba-2 on the GPU (same math as mamba_cpu): in-projection, conv (k_ssm_conv), scan (k_ssm_scan, the state stays in
+// VRAM), gate + group norm (k_ssm_gnorm), out-projection into dT_. No host syncs, so decode stays graph-captured.
+void Model::mamba_gpu(Layer& L, int n, bool same_x) {
+    CudaTier& cu = cuda();
+    unsigned un = n, di = hp.ssm_inner, ds = hp.ssm_state, ng = hp.ssm_groups, nh = hp.ssm_heads, hdim = di / nh, hpg = nh / ng;
+    unsigned xbc = di + 2 * ng * ds, tot = di + xbc + nh, dto = di + xbc, bo = di, co = di + ng * ds, gs = di / ng;
+    float eps = hp.eps;
+    mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, same_x);
+    cu.launch(CudaTier::SSM_CONV, (xbc + 255) / 256, 1, 256, {&dZX_, &L.d_convw, &L.d_convb, &L.d_convst, &dXC_, &un, &xbc, &tot, &di});
+    cu.launch(CudaTier::SSM_SCAN, di / (256 / ds), 1, 256, {&dXC_, &dZX_, &L.d_dtb, &L.d_ssma, &L.d_ssmd, &L.d_ssmst, &dSY_, &un, &xbc, &tot, &dto, &di, &ds, &hdim, &hpg, &bo, &co});
+    cu.launch(CudaTier::SSM_GNORM, ng, un, 256, {&dSY_, &dZX_, &L.d_ssmnorm, &di, &tot, &gs, &eps});
+    mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
 }
 
 // Prompt batches go through the int8 tensor-core kernels; single tokens use the dp4a kernels.
@@ -848,10 +1051,22 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     // Prompts whose matmuls all take the int8 path: norm (and the residual add before it) quantizes straight into
     // the int8 input, so the matmuls skip their own quantize pass.
     auto int8 = [&](Lin& w) { return n >= 16 && tc_prefill_ && (w.gkind >= CudaTier::K_IQ ? gx().can_mmq(CudaTier::K_Q8_0) : gx().can_mmq(w.gkind)); };
-    auto attn8 = [&](Layer& l) { return l.qkv.t ? int8(l.qkv) : int8(l.q) && int8(l.k) && int8(l.v); };
+    auto attn8 = [&](Layer& l) { return !hp.no_prenorm && (l.ssm_in.t ? int8(l.ssm_in) : l.qkv.t ? int8(l.qkv) : int8(l.q) && int8(l.k) && int8(l.v)); };
+    static double t_attn = 0, t_all = 0; static int calls = 0;
     const bool fa = (xn_ready_ == &L && xn_n_ == n && xn_past_ == n_past) || (attn8(L) && gx().add_norm_quant(dX_, 0, 0, 0.f, L.d_an, dXN_, n, d, eps));   // xn_ready_: the last layer already did it
     xn_ready_ = nullptr;
-    if (!fa) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
+    if (hp.no_prenorm) cu.dtod(dXN_, dX_, (size_t)n * d * 4);
+    else if (!fa) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
+    if (L.dnet) dnet_gpu(L, n, fa);
+    else if (L.sconv) {
+        unsigned d3 = 3 * d;
+        mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, fa);
+        cu.launch(CudaTier::SCONV, (d + 255) / 256, 1, 256, {&dZX_, &L.d_convw, &L.d_convst, &dSY_, &un, &d});
+        mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
+        (void)d3;
+    }
+    else if (L.ssm_in.t) mamba_gpu(L, n, fa);
+    else {
     if (L.qkv.t) {
         mm(L.qkv, dXN_, dT_, fa);
         unsigned W = qd + 2 * kvd;
@@ -860,17 +1075,23 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         cu.ew(CudaTier::COPY2D, un * kvd, {&sk, &W, &dK_, &kvd, &kvd});
         cu.ew(CudaTier::COPY2D, un * kvd, {&sv, &W, &dV_, &kvd, &kvd});
     } else {
-        mm(L.q, dXN_, dQ_, fa); mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
+        if (L.qgate) {   // per head [q | gate]: q to dQ_, the gate stays in dT_ for the output
+            unsigned W2 = 2 * hd, nhq = un * nh;
+            mm(L.q, dXN_, dT_, fa); cu.ew(CudaTier::COPY2D, nhq * hd, {&dT_, &W2, &dQ_, &hd, &hd});
+        } else mm(L.q, dXN_, dQ_, fa);
+        mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
     }
     if (L.d_bq) cu.ew(CudaTier::BIAS, un * qd, {&dQ_, &L.d_bq, &qd});
     if (L.d_bk) cu.ew(CudaTier::BIAS, un * kvd, {&dK_, &L.d_bk, &kvd});
     if (L.d_bv) cu.ew(CudaTier::BIAS, un * kvd, {&dV_, &L.d_bv, &kvd});
-    if (L.d_qn) cu.launch(CudaTier::RMSNORM, un * nh, 1, 256, {&dQ_, &L.d_qn, &dQ_, &hd, &eps});
-    if (L.d_kn) cu.launch(CudaTier::RMSNORM, un * nkv, 1, 256, {&dK_, &L.d_kn, &dK_, &hd, &eps});
+    if (L.d_qn) { const bool w = (int)L.q_norm.size() == (int)qd; cu.launch(CudaTier::RMSNORM, w ? un : un * nh, 1, 256, {&dQ_, &L.d_qn, &dQ_, w ? &qd : &hd, &eps}); }
+    if (L.d_kn) { const bool w = (int)L.k_norm.size() == (int)kvd; cu.launch(CudaTier::RMSNORM, w ? un : un * nkv, 1, 256, {&dK_, &L.d_kn, &dK_, w ? &kvd : &hd, &eps}); }
     uint64_t cs = L.swa ? dCS2_ : dCS_;
     unsigned win = L.swa ? (unsigned)hp.swa_window : 0;
-    cu.launch(CudaTier::ROPE, un, 1, 256, {&dQ_, &cs, &nh, &hd, &half, &neox, &qd});
-    cu.launch(CudaTier::ROPE, un, 1, 256, {&dK_, &cs, &nkv, &hd, &half, &neox, &kvd});
+    if (!L.nope) {
+        cu.launch(CudaTier::ROPE, un, 1, 256, {&dQ_, &cs, &nh, &hd, &half, &neox, &qd});
+        cu.launch(CudaTier::ROPE, un, 1, 256, {&dK_, &cs, &nkv, &hd, &half, &neox, &kvd});
+    }
     if (kvq8_) {
         cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dK_, &L.d_kc, &L.d_ks, &dPOS_, &hd, &nkv});
         cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dV_, &L.d_vc, &L.d_vs, &dPOS_, &hd, &nkv});
@@ -884,26 +1105,28 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     // Prompts: tensor-core flash attention straight from the KV cache. Decode: one CTA per kv head reads the
     // cache once for all query heads sharing it (GQA), split over 16 key ranges; else the per-head kernel.
     if (n == 1 && f_gqa_) {
-        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv, &L.d_sinks};
+        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv, &L.d_sinks, &hp.attn_softcap};
         cu.launch_raw(f_gqa_, nkv, spl, 1, 256, 0, a);
     }
     else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc,
-                                                        kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0, L.d_sinks)))
+                                                        kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0, L.d_sinks, hp.attn_softcap)))
         cu.launch(CudaTier::ATTN, nh, un * spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &scale, &spl, &dPM_, &dPL_, &dPO_, &win, &nc});
     if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
-    static double t_attn = 0, t_all = 0; static int calls = 0;
     if (ppn) { cu.sync(); t_attn += now_sec() - Ta; }
+    if (L.qgate) { unsigned W2 = 2 * hd; uint64_t g = dT_ + (uint64_t)hd * 4; cu.ew(CudaTier::SIGMUL, un * qd, {&dATT_, &g, &hd, &W2}); }
     mm(L.o, dATT_, dT_);
     if (L.d_bo) cu.ew(CudaTier::BIAS, un * d, {&dT_, &L.d_bo, &d});
+    }
     if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
     struct PP { bool on; double t0; double& acc; ~PP() { if (on) { cuda().sync(); acc += now_sec() - t0; } } } pp_guard{ppn, T0, t_all};
     // MoE: the experts gather their own tokens, so only the add + norm are saved (the int8 copy goes unused)
-    const bool ff8 = L.gate_exps.t ? n >= 16 && tc_prefill_ : L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up);
+    const bool ff8 = !hp.no_prenorm && (L.gate_exps.t ? n >= 16 && tc_prefill_ : L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up));
     const bool fb = ff8 && gx().add_norm_quant(dX_, dT_, L.d_pan, res, L.d_fn, dXN_, n, d, eps);
     if (!fb) {
         if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
         cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
-        cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
+        if (hp.no_prenorm) cu.dtod(dXN_, dX_, (size_t)n * d * 4);
+        else cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
     }
     if (L.gate_exps.t) { moe_gpu(L, n); return; }
     if (L.gateup.t) {
@@ -966,7 +1189,7 @@ void Model::bench_gpu() {
             unsigned z1 = 0;
             timeit(nm, (double)pos * kvd * 4, [&] {
                 unsigned nkv1 = hp.n_kv;
-                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1, &L.d_ks, &L.d_vs, &nkv1, &L.d_sinks};
+                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1, &L.d_ks, &L.d_vs, &nkv1, &L.d_sinks, &hp.attn_softcap};
                 cu.launch_raw(f_gqa_, hp.n_kv, spl, 1, 256, 0, a);
             });
         }
@@ -1017,7 +1240,7 @@ const float* Model::eval(const int* toks, int n_all) {
             if (graph_) {
                 cu.graph_launch(graph_);
                 cu.dtoh(logits_.data(), dLOG_, (size_t)hp.n_vocab * 4);
-                if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
+                post_logits(logits_.data(), logits_.size());
                 for (auto& L : layers_) L.kv_dev = n_past + 1;
                 n_past += 1;
                 return logits_.data();
@@ -1072,6 +1295,9 @@ const float* Model::eval(const int* toks, int n_all) {
                 auto kv_sync = [&](int k) {  // layer just moved to VRAM: bring its CPU-computed KV along
                     Layer& M = layers_[k];
                     if (M.kv_dev >= n_past) return;
+                    // recurrent layers: the host state is at n_past (the CPU ran this layer until now)
+                    if (M.d_convst) cu.htod(M.d_convst, M.conv_st.data(), M.conv_st.size() * 4);
+                    if (M.d_ssmst) cu.htod(M.d_ssmst, M.ssm_st.data(), M.ssm_st.size() * 4);
                     size_t off = ((size_t)k * ctx + M.kv_dev) * kvdz;
                     const size_t npos = (size_t)(n_past - M.kv_dev), cnt = npos * kvdz * 2;
                     if (kvq8_) {   // quantize the fp16 host rows the same way k_kvstore_q8 does
@@ -1121,7 +1347,12 @@ const float* Model::eval(const int* toks, int n_all) {
             }
             if (on_dev) { cuda().dtoh(x_.data(), dX_, (size_t)n * d * 4); on_dev = false; }
 
-            rmsnorm(x_.data(), L.attn_norm.data(), xn_.data(), n, d);
+            if (hp.no_prenorm) memcpy(xn_.data(), x_.data(), (size_t)n * d * 4);
+            else rmsnorm(x_.data(), L.attn_norm.data(), xn_.data(), n, d);
+            if (L.dnet) dnet_cpu(L, n);
+            else if (L.sconv) sconv_cpu(L, n);
+            else if (L.ssm_in.t) mamba_cpu(L, n);
+            else {
             if (L.qkv.t) {
                 matmul(L.qkv, xn_.data(), n, tmp_.data());
                 for (int t = 0; t < n; t++) {
@@ -1131,6 +1362,10 @@ const float* Model::eval(const int* toks, int n_all) {
                     memcpy(&v_[(size_t)t * kvd], s + qd + kvd, kvd * 4);
                 }
             } else {
+                if (L.qgate) {   // per head [q | gate]: q to q_, the gate kept for the output
+                    qg_.resize((size_t)n * 2 * qd); matmul(L.q, xn_.data(), n, qg_.data());
+                    for (int t = 0; t < n; t++) for (int h = 0; h < hp.n_head; h++) memcpy(&q_[(size_t)t * qd + (size_t)h * hd], &qg_[(size_t)t * 2 * qd + (size_t)h * 2 * hd], hd * 4);
+                } else
                 matmul(L.q, xn_.data(), n, q_.data());
                 matmul(L.k, xn_.data(), n, k_.data());
                 matmul(L.v, xn_.data(), n, v_.data());
@@ -1140,12 +1375,12 @@ const float* Model::eval(const int* toks, int n_all) {
                 if (!L.bk.empty()) for (int i = 0; i < kvd; i++) k_[(size_t)t * kvd + i] += L.bk[i];
                 if (!L.bv.empty()) for (int i = 0; i < kvd; i++) v_[(size_t)t * kvd + i] += L.bv[i];
             }
-            if (!L.q_norm.empty()) rmsnorm(q_.data(), L.q_norm.data(), q_.data(), n * hp.n_head, hd);
-            if (!L.k_norm.empty()) rmsnorm(k_.data(), L.k_norm.data(), k_.data(), n * hp.n_kv, hd);
+            // per-head q/k norms, or across all heads at once (OLMo 2, OLMoE: the weight spans the whole projection)
+            if (!L.q_norm.empty()) { const bool w = (int)L.q_norm.size() == qd; rmsnorm(q_.data(), L.q_norm.data(), q_.data(), w ? n : n * hp.n_head, w ? qd : hd); }
+            if (!L.k_norm.empty()) { const bool w = (int)L.k_norm.size() == kvd; rmsnorm(k_.data(), L.k_norm.data(), k_.data(), w ? n : n * hp.n_kv, w ? kvd : hd); }
             for (int t = 0; t < n; t++) {
                 int pos = n_past + t;
-                rope(&q_[(size_t)t * qd], hp.n_head, pos, L.swa);
-                rope(&k_[(size_t)t * kvd], hp.n_kv, pos, L.swa);
+                if (!L.nope) { rope(&q_[(size_t)t * qd], hp.n_head, pos, L.swa); rope(&k_[(size_t)t * kvd], hp.n_kv, pos, L.swa); }
                 size_t off = ((size_t)li * ctx + pos) * kvd;
                 f32_to_f16(&k_[(size_t)t * kvd], &kc_[off], kvd);
                 f32_to_f16(&v_[(size_t)t * kvd], &vc_[off], kvd);
@@ -1163,6 +1398,7 @@ const float* Model::eval(const int* toks, int n_all) {
                     float mx = -1e30f;
                     for (int j = j0; j <= pos; j++) {
                         float s = dot_f16(qv, kbase + (size_t)j * kvd + kvh * hd, hd) * scale;
+                        if (hp.attn_softcap > 0) s = hp.attn_softcap * std::tanh(s / hp.attn_softcap);
                         sc[j] = s; if (s > mx) mx = s;
                     }
                     float sum = 0;
@@ -1174,12 +1410,17 @@ const float* Model::eval(const int* toks, int n_all) {
                     for (int j = j0; j <= pos; j++) axpy_f16(o, sc[j] * inv, vbase + (size_t)j * kvd + kvh * hd, hd);
                 }
             });
+            if (L.qgate)
+                for (int t = 0; t < n; t++) for (int h = 0; h < hp.n_head; h++) for (int i = 0; i < hd; i++)
+                    att_[(size_t)t * qd + (size_t)h * hd + i] /= 1.f + std::exp(-qg_[(size_t)t * 2 * qd + (size_t)h * 2 * hd + hd + i]);
             matmul(L.o, att_.data(), n, tmp_.data());
             if (!L.bo.empty()) for (int t = 0; t < n; t++) for (int i = 0; i < d; i++) tmp_[(size_t)t * d + i] += L.bo[i];
+            }
             if (!L.post_attn_norm.empty()) rmsnorm(tmp_.data(), L.post_attn_norm.data(), tmp_.data(), n, d);
             for (size_t i = 0; i < (size_t)n * d; i++) x_[i] += tmp_[i] * hp.res_scale;
 
-            rmsnorm(x_.data(), L.ffn_norm.data(), xn_.data(), n, d);
+            if (hp.no_prenorm) memcpy(xn_.data(), x_.data(), (size_t)n * d * 4);
+            else rmsnorm(x_.data(), L.ffn_norm.data(), xn_.data(), n, d);
             if (L.gate_exps.t) { moe_cpu(L, n); continue; }
             if (L.gateup.t) {
                 matmul(L.gateup, xn_.data(), n, tmp_.data());
@@ -1211,7 +1452,7 @@ const float* Model::eval(const int* toks, int n_all) {
                 mmq(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, n, out_.cols, out_.rows, dLOGA_);
                 logits_.resize((size_t)n * hp.n_vocab);
                 cu.dtoh(logits_.data(), dLOGA_, logits_.size() * 4);
-                if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
+                post_logits(logits_.data(), logits_.size());
                 n_past += n;
                 if (evp) { g_ev[1] += now_sec() - evh; g_ev[2] += now_sec() - ev0; }
                 continue;
@@ -1220,7 +1461,7 @@ const float* Model::eval(const int* toks, int n_all) {
             cu.launch(CudaTier::RMSNORM, 1, 1, 256, {&last, &d_onorm_, &dXN_, &ud, &eps});
             cu.matmul_dev(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, 1, out_.cols, out_.rows, dLOG_);
             cu.dtoh(logits_.data(), dLOG_, (size_t)hp.n_vocab * 4);
-            if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
+            post_logits(logits_.data(), logits_.size());
             n_past += n;
             continue;
         }
@@ -1231,7 +1472,7 @@ const float* Model::eval(const int* toks, int n_all) {
             logits_.resize((size_t)rows * hp.n_vocab);
             rmsnorm(&x_[(size_t)(n - rows) * d], out_norm_.data(), xn_.data(), rows, d);
             matmul(out_, xn_.data(), rows, logits_.data());
-            if (hp.logit_scale != 1.f) for (auto& v : logits_) v /= hp.logit_scale;
+            post_logits(logits_.data(), logits_.size());
         }
     }
     return logits_.data();

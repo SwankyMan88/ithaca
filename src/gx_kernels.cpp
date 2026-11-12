@@ -551,10 +551,12 @@ std::string gen_flash_kv(const char* name, int D, int DV, bool q8 = false) {
 
     const int KC = (D + 15) / 16, DP = KC * 16, DT = DV / 8, NT = 256, G4 = D / 4, GV4 = DV / 4;
     o(".visible .entry %s(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pO, .param .u32 pT, .param .u32 pP0, .param .u32 pLdq,"
-      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0%s, .param .u64 pSink)", name,
+      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0%s, .param .u64 pSink, .param .f32 pCap)", name,
       q8 ? ", .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV" : "");
     o("{");
-    o(" .reg .b32 %%e<8>; .reg .f32 %%g<6>;");
+    o(" .reg .b32 %%e<8>; .reg .f32 %%g<6>; .reg .f32 %%cp<4>; .reg .pred %%pcap;");
+    // Gemma 2: scores soft-capped, cap * tanh(s / cap)
+    o(" ld.param.f32 %%cp0,[pCap]; setp.gt.f32 %%pcap,%%cp0,0f00000000; @%%pcap rcp.approx.f32 %%cp1,%%cp0; @%%pcap add.f32 %%cp1,%%cp1,%%cp1; @%%pcap mul.f32 %%cp2,%%cp0,0f3FB8AA3B;");
     o(" .reg .pred %%p<12>; .reg .b32 %%r<80>; .reg .b64 %%rd<32>; .reg .f32 %%f<32>; .reg .b16 %%h<8>;");
     o(" .reg .b32 %%q<%d>; .reg .f32 %%s<32>; .reg .f32 %%o<%d>; .reg .b32 %%a<4>; .reg .b32 %%b<2>; .reg .f32 %%m<2>; .reg .f32 %%l<2>;", KC * 4, DT * 4);
     o(" .shared .align 16 .b16 sK[%d]; .shared .align 16 .b16 sV[%d];", 64 * DP, 64 * DV);
@@ -636,6 +638,8 @@ std::string gen_flash_kv(const char* name, int D, int DV, bool q8 = false) {
             o(" mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%%s%d,%%s%d,%%s%d,%%s%d},{%%q%d,%%q%d,%%q%d,%%q%d},{%%b0,%%b1},{%%s%d,%%s%d,%%s%d,%%s%d};",
               j * 4, j * 4 + 1, j * 4 + 2, j * 4 + 3, c * 4, c * 4 + 1, c * 4 + 2, c * 4 + 3, j * 4, j * 4 + 1, j * 4 + 2, j * 4 + 3);
         }
+        for (int e = 0; e < 4; e++)
+            o(" @%%pcap mul.f32 %%cp3,%%s%d,%%cp1; @%%pcap ex2.approx.f32 %%cp3,%%cp3; @%%pcap add.f32 %%cp3,%%cp3,0f3F800000; @%%pcap rcp.approx.f32 %%cp3,%%cp3; @%%pcap fma.rn.f32 %%cp3,%%cp3,0fC0000000,0f3F800000; @%%pcap mul.f32 %%s%d,%%cp3,%%cp2;", j * 4 + e, j * 4 + e);
         // mask: key k0 = kb + 8j + 2t (and k0 + 1) against each row's [lo, hi]
         o(" add.u32 %%r29,%%r20,%d; shl.b32 %%r30,%%r8,1; add.u32 %%r29,%%r29,%%r30; add.u32 %%r31,%%r29,1;", j * 8);
         o(" setp.gt.u32 %%p6,%%r29,%%r58; setp.lt.or.u32 %%p6,%%r29,%%r60,%%p6; @%%p6 mov.f32 %%s%d,0fF149F2CA;", j * 4);

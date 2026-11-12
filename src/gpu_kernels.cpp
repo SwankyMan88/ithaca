@@ -162,7 +162,9 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); s += b; s += "\n"; };
     s += ".visible .entry k_attn_gqa(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pPM, .param .u64 pPL, .param .u64 pPO,"
          " .param .u32 pHD, .param .u32 pKVD, .param .u32 pGRP, .param .u64 pPOS, .param .f32 pSCALE, .param .u32 pSPL, .param .u32 pWIN,"
-         " .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV, .param .u64 pSink)\n{\n"
+         " .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV, .param .u64 pSink, .param .f32 pCap)\n{\n"
+         " .reg .f32 %cp<4>; .reg .pred %pcap;\n"
+         " ld.param.f32 %cp0,[pCap]; setp.gt.f32 %pcap,%cp0,0f00000000; @%pcap rcp.approx.f32 %cp1,%cp0; @%pcap add.f32 %cp1,%cp1,%cp1; @%pcap mul.f32 %cp2,%cp0,0f3FB8AA3B;\n"
          " .reg .pred %p<8>; .reg .pred %ps<8>; .reg .b32 %r<56>; .reg .f32 %f<24>; .reg .b64 %rd<32>; .reg .b16 %h;\n";
     L(" .reg .f32 %%q<%d>; .reg .f32 %%o<%d>; .reg .f32 %%m<%d>; .reg .f32 %%l<%d>; .reg .f32 %%k<%d>; .reg .f32 %%v<%d>;", G * NT, G * NT, G, G, NT, NT);
     L(" .shared .align 4 .f32 sO[%d]; .shared .align 4 .f32 sM[%d]; .shared .align 4 .f32 sL[%d];", 8 * G * NT * 32, 8 * G, 8 * G);
@@ -206,6 +208,7 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
         for (int t = 1; t < NT; t++) L(" fma.rn.f32 %%f2,%%q%d,%%k%d,%%f2;", g * NT + t, t);
         for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f3,%%f2,%d,31,0xffffffff; add.f32 %%f2,%%f2,%%f3;", o);
         if (q8) s += " mul.f32 %f2,%f2,%f16;\n";
+        s += " @%pcap mul.f32 %cp3,%f2,%cp1; @%pcap ex2.approx.f32 %cp3,%cp3; @%pcap add.f32 %cp3,%cp3,0f3F800000; @%pcap rcp.approx.f32 %cp3,%cp3; @%pcap fma.rn.f32 %cp3,%cp3,0fC0000000,0f3F800000; @%pcap mul.f32 %f2,%cp3,%cp2;\n";
         L(" max.f32 %%f4,%%m%d,%%f2; sub.f32 %%f5,%%m%d,%%f4; ex2.approx.f32 %%f5,%%f5; sub.f32 %%f6,%%f2,%%f4; ex2.approx.f32 %%f6,%%f6;", g, g);
         L(" fma.rn.f32 %%l%d,%%l%d,%%f5,%%f6; mov.f32 %%m%d,%%f4;", g, g, g);
         if (q8) s += " mul.f32 %f6,%f6,%f17;\n";
@@ -294,6 +297,736 @@ std::string gpu_ops_ptx() {
             " mul.wide.u32 %rd3,%r8,4; add.u64 %rd3,%rd6,%rd3; ld.global.u32 %r10,[%rd3]; mad.lo.u32 %r10,%r10,%r7,%r9;\n"
             " mul.wide.u32 %rd4,%r10,4; add.u64 %rd4,%rd2,%rd4; ld.global.f32 %f2,[%rd4];\n"
             " mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd1,%rd5; ld.global.f32 %f3,[%rd5]; add.f32 %f3,%f3,%f2; st.global.f32 [%rd5],%f3;\n");
+    // ---- Qwen3.5 Gated DeltaNet: block = value head, thread = value column j holding S[:, j] (128 key rows) in registers.
+    // Per token: q, k L2-normed (q / sqrt(128)); S *= exp(g); delta = (v - S^T k) * beta; S += k delta^T; o = S^T q;
+    // o RMS-normed over the head * w * silu(z). g = A * softplus(alpha + dt bias), beta = sigmoid(raw). ----
+    s += ".visible .entry k_dnet(.param .u64 pX, .param .u64 pZ, .param .u64 pAl, .param .u64 pBe, .param .u64 pA, .param .u64 pDtb, .param .u64 pW, .param .u64 pS, .param .u64 pY, .param .u32 pN, .param .u32 pC, .param .u32 pNk, .param .u32 pHpk, .param .u32 pNh, .param .f32 pE)\n{\n";
+    s += " .reg .pred %p<4>; .reg .b32 %r<32>; .reg .f32 %f<40>; .reg .b64 %rd<24>; .reg .f32 %s<128>; .shared .align 16 .f32 qs[128]; .shared .align 16 .f32 ks[128]; .shared .align 4 .f32 red[8];\n";
+    s += " ld.param.u64 %rd1,[pX]; ld.param.u64 %rd2,[pZ]; ld.param.u64 %rd3,[pAl]; ld.param.u64 %rd4,[pBe]; ld.param.u64 %rd5,[pA]; ld.param.u64 %rd6,[pDtb]; ld.param.u64 %rd7,[pW]; ld.param.u64 %rd8,[pS]; ld.param.u64 %rd9,[pY];\n";
+    s += " ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pC]; ld.param.u32 %r3,[pNk]; ld.param.u32 %r4,[pHpk]; ld.param.u32 %r5,[pNh]; ld.param.f32 %f1,[pE];\n";
+    s += " mov.u32 %r6,%ctaid.x; mov.u32 %r7,%tid.x; setp.eq.u32 %p3,%r4,0; @%p3 rem.u32 %r8,%r6,%r3; @!%p3 div.u32 %r8,%r6,%r4;\n";
+    s += " shl.b32 %r9,%r6,14; shl.b32 %r10,%r7,0; add.u32 %r9,%r9,%r10;\n";
+    s += " mad.lo.u32 %r11,0,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s0,[%rd10];\n";
+    s += " mad.lo.u32 %r11,1,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s1,[%rd10];\n";
+    s += " mad.lo.u32 %r11,2,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s2,[%rd10];\n";
+    s += " mad.lo.u32 %r11,3,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s3,[%rd10];\n";
+    s += " mad.lo.u32 %r11,4,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s4,[%rd10];\n";
+    s += " mad.lo.u32 %r11,5,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s5,[%rd10];\n";
+    s += " mad.lo.u32 %r11,6,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s6,[%rd10];\n";
+    s += " mad.lo.u32 %r11,7,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s7,[%rd10];\n";
+    s += " mad.lo.u32 %r11,8,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s8,[%rd10];\n";
+    s += " mad.lo.u32 %r11,9,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s9,[%rd10];\n";
+    s += " mad.lo.u32 %r11,10,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s10,[%rd10];\n";
+    s += " mad.lo.u32 %r11,11,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s11,[%rd10];\n";
+    s += " mad.lo.u32 %r11,12,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s12,[%rd10];\n";
+    s += " mad.lo.u32 %r11,13,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s13,[%rd10];\n";
+    s += " mad.lo.u32 %r11,14,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s14,[%rd10];\n";
+    s += " mad.lo.u32 %r11,15,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s15,[%rd10];\n";
+    s += " mad.lo.u32 %r11,16,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s16,[%rd10];\n";
+    s += " mad.lo.u32 %r11,17,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s17,[%rd10];\n";
+    s += " mad.lo.u32 %r11,18,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s18,[%rd10];\n";
+    s += " mad.lo.u32 %r11,19,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s19,[%rd10];\n";
+    s += " mad.lo.u32 %r11,20,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s20,[%rd10];\n";
+    s += " mad.lo.u32 %r11,21,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s21,[%rd10];\n";
+    s += " mad.lo.u32 %r11,22,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s22,[%rd10];\n";
+    s += " mad.lo.u32 %r11,23,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s23,[%rd10];\n";
+    s += " mad.lo.u32 %r11,24,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s24,[%rd10];\n";
+    s += " mad.lo.u32 %r11,25,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s25,[%rd10];\n";
+    s += " mad.lo.u32 %r11,26,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s26,[%rd10];\n";
+    s += " mad.lo.u32 %r11,27,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s27,[%rd10];\n";
+    s += " mad.lo.u32 %r11,28,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s28,[%rd10];\n";
+    s += " mad.lo.u32 %r11,29,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s29,[%rd10];\n";
+    s += " mad.lo.u32 %r11,30,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s30,[%rd10];\n";
+    s += " mad.lo.u32 %r11,31,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s31,[%rd10];\n";
+    s += " mad.lo.u32 %r11,32,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s32,[%rd10];\n";
+    s += " mad.lo.u32 %r11,33,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s33,[%rd10];\n";
+    s += " mad.lo.u32 %r11,34,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s34,[%rd10];\n";
+    s += " mad.lo.u32 %r11,35,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s35,[%rd10];\n";
+    s += " mad.lo.u32 %r11,36,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s36,[%rd10];\n";
+    s += " mad.lo.u32 %r11,37,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s37,[%rd10];\n";
+    s += " mad.lo.u32 %r11,38,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s38,[%rd10];\n";
+    s += " mad.lo.u32 %r11,39,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s39,[%rd10];\n";
+    s += " mad.lo.u32 %r11,40,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s40,[%rd10];\n";
+    s += " mad.lo.u32 %r11,41,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s41,[%rd10];\n";
+    s += " mad.lo.u32 %r11,42,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s42,[%rd10];\n";
+    s += " mad.lo.u32 %r11,43,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s43,[%rd10];\n";
+    s += " mad.lo.u32 %r11,44,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s44,[%rd10];\n";
+    s += " mad.lo.u32 %r11,45,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s45,[%rd10];\n";
+    s += " mad.lo.u32 %r11,46,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s46,[%rd10];\n";
+    s += " mad.lo.u32 %r11,47,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s47,[%rd10];\n";
+    s += " mad.lo.u32 %r11,48,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s48,[%rd10];\n";
+    s += " mad.lo.u32 %r11,49,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s49,[%rd10];\n";
+    s += " mad.lo.u32 %r11,50,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s50,[%rd10];\n";
+    s += " mad.lo.u32 %r11,51,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s51,[%rd10];\n";
+    s += " mad.lo.u32 %r11,52,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s52,[%rd10];\n";
+    s += " mad.lo.u32 %r11,53,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s53,[%rd10];\n";
+    s += " mad.lo.u32 %r11,54,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s54,[%rd10];\n";
+    s += " mad.lo.u32 %r11,55,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s55,[%rd10];\n";
+    s += " mad.lo.u32 %r11,56,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s56,[%rd10];\n";
+    s += " mad.lo.u32 %r11,57,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s57,[%rd10];\n";
+    s += " mad.lo.u32 %r11,58,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s58,[%rd10];\n";
+    s += " mad.lo.u32 %r11,59,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s59,[%rd10];\n";
+    s += " mad.lo.u32 %r11,60,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s60,[%rd10];\n";
+    s += " mad.lo.u32 %r11,61,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s61,[%rd10];\n";
+    s += " mad.lo.u32 %r11,62,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s62,[%rd10];\n";
+    s += " mad.lo.u32 %r11,63,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s63,[%rd10];\n";
+    s += " mad.lo.u32 %r11,64,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s64,[%rd10];\n";
+    s += " mad.lo.u32 %r11,65,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s65,[%rd10];\n";
+    s += " mad.lo.u32 %r11,66,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s66,[%rd10];\n";
+    s += " mad.lo.u32 %r11,67,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s67,[%rd10];\n";
+    s += " mad.lo.u32 %r11,68,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s68,[%rd10];\n";
+    s += " mad.lo.u32 %r11,69,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s69,[%rd10];\n";
+    s += " mad.lo.u32 %r11,70,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s70,[%rd10];\n";
+    s += " mad.lo.u32 %r11,71,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s71,[%rd10];\n";
+    s += " mad.lo.u32 %r11,72,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s72,[%rd10];\n";
+    s += " mad.lo.u32 %r11,73,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s73,[%rd10];\n";
+    s += " mad.lo.u32 %r11,74,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s74,[%rd10];\n";
+    s += " mad.lo.u32 %r11,75,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s75,[%rd10];\n";
+    s += " mad.lo.u32 %r11,76,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s76,[%rd10];\n";
+    s += " mad.lo.u32 %r11,77,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s77,[%rd10];\n";
+    s += " mad.lo.u32 %r11,78,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s78,[%rd10];\n";
+    s += " mad.lo.u32 %r11,79,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s79,[%rd10];\n";
+    s += " mad.lo.u32 %r11,80,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s80,[%rd10];\n";
+    s += " mad.lo.u32 %r11,81,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s81,[%rd10];\n";
+    s += " mad.lo.u32 %r11,82,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s82,[%rd10];\n";
+    s += " mad.lo.u32 %r11,83,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s83,[%rd10];\n";
+    s += " mad.lo.u32 %r11,84,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s84,[%rd10];\n";
+    s += " mad.lo.u32 %r11,85,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s85,[%rd10];\n";
+    s += " mad.lo.u32 %r11,86,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s86,[%rd10];\n";
+    s += " mad.lo.u32 %r11,87,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s87,[%rd10];\n";
+    s += " mad.lo.u32 %r11,88,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s88,[%rd10];\n";
+    s += " mad.lo.u32 %r11,89,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s89,[%rd10];\n";
+    s += " mad.lo.u32 %r11,90,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s90,[%rd10];\n";
+    s += " mad.lo.u32 %r11,91,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s91,[%rd10];\n";
+    s += " mad.lo.u32 %r11,92,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s92,[%rd10];\n";
+    s += " mad.lo.u32 %r11,93,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s93,[%rd10];\n";
+    s += " mad.lo.u32 %r11,94,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s94,[%rd10];\n";
+    s += " mad.lo.u32 %r11,95,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s95,[%rd10];\n";
+    s += " mad.lo.u32 %r11,96,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s96,[%rd10];\n";
+    s += " mad.lo.u32 %r11,97,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s97,[%rd10];\n";
+    s += " mad.lo.u32 %r11,98,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s98,[%rd10];\n";
+    s += " mad.lo.u32 %r11,99,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s99,[%rd10];\n";
+    s += " mad.lo.u32 %r11,100,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s100,[%rd10];\n";
+    s += " mad.lo.u32 %r11,101,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s101,[%rd10];\n";
+    s += " mad.lo.u32 %r11,102,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s102,[%rd10];\n";
+    s += " mad.lo.u32 %r11,103,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s103,[%rd10];\n";
+    s += " mad.lo.u32 %r11,104,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s104,[%rd10];\n";
+    s += " mad.lo.u32 %r11,105,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s105,[%rd10];\n";
+    s += " mad.lo.u32 %r11,106,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s106,[%rd10];\n";
+    s += " mad.lo.u32 %r11,107,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s107,[%rd10];\n";
+    s += " mad.lo.u32 %r11,108,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s108,[%rd10];\n";
+    s += " mad.lo.u32 %r11,109,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s109,[%rd10];\n";
+    s += " mad.lo.u32 %r11,110,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s110,[%rd10];\n";
+    s += " mad.lo.u32 %r11,111,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s111,[%rd10];\n";
+    s += " mad.lo.u32 %r11,112,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s112,[%rd10];\n";
+    s += " mad.lo.u32 %r11,113,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s113,[%rd10];\n";
+    s += " mad.lo.u32 %r11,114,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s114,[%rd10];\n";
+    s += " mad.lo.u32 %r11,115,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s115,[%rd10];\n";
+    s += " mad.lo.u32 %r11,116,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s116,[%rd10];\n";
+    s += " mad.lo.u32 %r11,117,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s117,[%rd10];\n";
+    s += " mad.lo.u32 %r11,118,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s118,[%rd10];\n";
+    s += " mad.lo.u32 %r11,119,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s119,[%rd10];\n";
+    s += " mad.lo.u32 %r11,120,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s120,[%rd10];\n";
+    s += " mad.lo.u32 %r11,121,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s121,[%rd10];\n";
+    s += " mad.lo.u32 %r11,122,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s122,[%rd10];\n";
+    s += " mad.lo.u32 %r11,123,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s123,[%rd10];\n";
+    s += " mad.lo.u32 %r11,124,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s124,[%rd10];\n";
+    s += " mad.lo.u32 %r11,125,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s125,[%rd10];\n";
+    s += " mad.lo.u32 %r11,126,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s126,[%rd10];\n";
+    s += " mad.lo.u32 %r11,127,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; ld.global.f32 %s127,[%rd10];\n";
+    s += " mul.wide.u32 %rd11,%r6,4; add.u64 %rd12,%rd5,%rd11; ld.global.f32 %f2,[%rd12]; add.u64 %rd13,%rd6,%rd11; ld.global.f32 %f3,[%rd13];\n";
+    s += " mul.f32 %f2,%f2,0f3FB8AA3B; mul.wide.u32 %rd14,%r7,4; add.u64 %rd14,%rd7,%rd14; ld.global.f32 %f4,[%rd14];\n";
+    s += " and.b32 %r12,%r7,31; setp.eq.u32 %p2,%r12,0; shr.u32 %r13,%r7,5; mov.u32 %r14,red; shl.b32 %r15,%r13,2; add.u32 %r15,%r14,%r15; mov.u32 %r16,qs; mov.u32 %r17,ks; shl.b32 %r18,%r7,2;\n";
+    s += " shl.b32 %r19,%r3,7; shl.b32 %r20,%r8,7; add.u32 %r20,%r20,%r7; add.u32 %r21,%r20,%r19; shl.b32 %r22,%r19,1; shl.b32 %r23,%r6,7; add.u32 %r23,%r23,%r22; add.u32 %r23,%r23,%r7;\n";
+    s += " mul.lo.u32 %r24,%r5,128; shl.b32 %r25,%r6,7; add.u32 %r25,%r25,%r7; mov.u32 %r26,0;\n";
+    s += "LT:\n";
+    s += " setp.ge.u32 %p1,%r26,%r1; @%p1 bra ET;\n";
+    s += " mul.lo.u32 %r27,%r26,%r2; add.u32 %r28,%r27,%r20; mul.wide.u32 %rd15,%r28,4; add.u64 %rd15,%rd1,%rd15; ld.global.f32 %f5,[%rd15];\n";
+    s += " add.u32 %r28,%r27,%r21; mul.wide.u32 %rd15,%r28,4; add.u64 %rd15,%rd1,%rd15; ld.global.f32 %f6,[%rd15];\n";
+    s += " add.u32 %r28,%r27,%r23; mul.wide.u32 %rd15,%r28,4; add.u64 %rd15,%rd1,%rd15; ld.global.f32 %f7,[%rd15];\n";
+    s += " mul.f32 %f8,%f5,%f5;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f8,16,31,0xffffffff; add.f32 %f8,%f8,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f8,8,31,0xffffffff; add.f32 %f8,%f8,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f8,4,31,0xffffffff; add.f32 %f8,%f8,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f8,2,31,0xffffffff; add.f32 %f8,%f8,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f8,1,31,0xffffffff; add.f32 %f8,%f8,%f30;\n";
+    s += " @%p2 st.shared.f32 [%r15],%f8; bar.sync 0; ld.shared.f32 %f9,[%r14]; ld.shared.f32 %f30,[%r14+4]; add.f32 %f9,%f9,%f30; ld.shared.f32 %f30,[%r14+8]; add.f32 %f9,%f9,%f30; ld.shared.f32 %f30,[%r14+12]; add.f32 %f9,%f9,%f30; bar.sync 0;\n";
+    s += " mul.f32 %f10,%f6,%f6;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f10,16,31,0xffffffff; add.f32 %f10,%f10,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f10,8,31,0xffffffff; add.f32 %f10,%f10,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f10,4,31,0xffffffff; add.f32 %f10,%f10,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f10,2,31,0xffffffff; add.f32 %f10,%f10,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f10,1,31,0xffffffff; add.f32 %f10,%f10,%f30;\n";
+    s += " @%p2 st.shared.f32 [%r15],%f10; bar.sync 0; ld.shared.f32 %f11,[%r14]; ld.shared.f32 %f30,[%r14+4]; add.f32 %f11,%f11,%f30; ld.shared.f32 %f30,[%r14+8]; add.f32 %f11,%f11,%f30; ld.shared.f32 %f30,[%r14+12]; add.f32 %f11,%f11,%f30; bar.sync 0;\n";
+    s += " add.f32 %f9,%f9,0f358637BD; rsqrt.approx.f32 %f9,%f9; mul.f32 %f5,%f5,%f9; mul.f32 %f5,%f5,0f3DB504F3;\n";
+    s += " add.f32 %f11,%f11,0f358637BD; rsqrt.approx.f32 %f11,%f11; mul.f32 %f6,%f6,%f11;\n";
+    s += " add.u32 %r29,%r16,%r18; st.shared.f32 [%r29],%f5; add.u32 %r29,%r17,%r18; st.shared.f32 [%r29],%f6; bar.sync 0;\n";
+    s += " mad.lo.u32 %r28,%r26,%r5,%r6; mul.wide.u32 %rd16,%r28,4; add.u64 %rd17,%rd3,%rd16; ld.global.f32 %f12,[%rd17]; add.u64 %rd18,%rd4,%rd16; ld.global.f32 %f13,[%rd18];\n";
+    s += " add.f32 %f12,%f12,%f3; mul.f32 %f14,%f12,0f3FB8AA3B; ex2.approx.f32 %f14,%f14; add.f32 %f14,%f14,0f3F800000; lg2.approx.f32 %f14,%f14; mul.f32 %f14,%f14,0f3F317218; setp.gt.f32 %p3,%f12,0f41A00000; selp.f32 %f12,%f12,%f14,%p3;\n";
+    s += " mul.f32 %f12,%f12,%f2; ex2.approx.f32 %f12,%f12;\n";
+    s += " mul.f32 %f13,%f13,0fBFB8AA3B; ex2.approx.f32 %f13,%f13; add.f32 %f13,%f13,0f3F800000; rcp.approx.f32 %f13,%f13;\n";
+    s += " mov.f32 %f15,0f00000000;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+0];\n";
+    s += " mul.f32 %s0,%s0,%f12; fma.rn.f32 %f15,%s0,%f20,%f15;\n";
+    s += " mul.f32 %s1,%s1,%f12; fma.rn.f32 %f15,%s1,%f21,%f15;\n";
+    s += " mul.f32 %s2,%s2,%f12; fma.rn.f32 %f15,%s2,%f22,%f15;\n";
+    s += " mul.f32 %s3,%s3,%f12; fma.rn.f32 %f15,%s3,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+16];\n";
+    s += " mul.f32 %s4,%s4,%f12; fma.rn.f32 %f15,%s4,%f20,%f15;\n";
+    s += " mul.f32 %s5,%s5,%f12; fma.rn.f32 %f15,%s5,%f21,%f15;\n";
+    s += " mul.f32 %s6,%s6,%f12; fma.rn.f32 %f15,%s6,%f22,%f15;\n";
+    s += " mul.f32 %s7,%s7,%f12; fma.rn.f32 %f15,%s7,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+32];\n";
+    s += " mul.f32 %s8,%s8,%f12; fma.rn.f32 %f15,%s8,%f20,%f15;\n";
+    s += " mul.f32 %s9,%s9,%f12; fma.rn.f32 %f15,%s9,%f21,%f15;\n";
+    s += " mul.f32 %s10,%s10,%f12; fma.rn.f32 %f15,%s10,%f22,%f15;\n";
+    s += " mul.f32 %s11,%s11,%f12; fma.rn.f32 %f15,%s11,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+48];\n";
+    s += " mul.f32 %s12,%s12,%f12; fma.rn.f32 %f15,%s12,%f20,%f15;\n";
+    s += " mul.f32 %s13,%s13,%f12; fma.rn.f32 %f15,%s13,%f21,%f15;\n";
+    s += " mul.f32 %s14,%s14,%f12; fma.rn.f32 %f15,%s14,%f22,%f15;\n";
+    s += " mul.f32 %s15,%s15,%f12; fma.rn.f32 %f15,%s15,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+64];\n";
+    s += " mul.f32 %s16,%s16,%f12; fma.rn.f32 %f15,%s16,%f20,%f15;\n";
+    s += " mul.f32 %s17,%s17,%f12; fma.rn.f32 %f15,%s17,%f21,%f15;\n";
+    s += " mul.f32 %s18,%s18,%f12; fma.rn.f32 %f15,%s18,%f22,%f15;\n";
+    s += " mul.f32 %s19,%s19,%f12; fma.rn.f32 %f15,%s19,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+80];\n";
+    s += " mul.f32 %s20,%s20,%f12; fma.rn.f32 %f15,%s20,%f20,%f15;\n";
+    s += " mul.f32 %s21,%s21,%f12; fma.rn.f32 %f15,%s21,%f21,%f15;\n";
+    s += " mul.f32 %s22,%s22,%f12; fma.rn.f32 %f15,%s22,%f22,%f15;\n";
+    s += " mul.f32 %s23,%s23,%f12; fma.rn.f32 %f15,%s23,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+96];\n";
+    s += " mul.f32 %s24,%s24,%f12; fma.rn.f32 %f15,%s24,%f20,%f15;\n";
+    s += " mul.f32 %s25,%s25,%f12; fma.rn.f32 %f15,%s25,%f21,%f15;\n";
+    s += " mul.f32 %s26,%s26,%f12; fma.rn.f32 %f15,%s26,%f22,%f15;\n";
+    s += " mul.f32 %s27,%s27,%f12; fma.rn.f32 %f15,%s27,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+112];\n";
+    s += " mul.f32 %s28,%s28,%f12; fma.rn.f32 %f15,%s28,%f20,%f15;\n";
+    s += " mul.f32 %s29,%s29,%f12; fma.rn.f32 %f15,%s29,%f21,%f15;\n";
+    s += " mul.f32 %s30,%s30,%f12; fma.rn.f32 %f15,%s30,%f22,%f15;\n";
+    s += " mul.f32 %s31,%s31,%f12; fma.rn.f32 %f15,%s31,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+128];\n";
+    s += " mul.f32 %s32,%s32,%f12; fma.rn.f32 %f15,%s32,%f20,%f15;\n";
+    s += " mul.f32 %s33,%s33,%f12; fma.rn.f32 %f15,%s33,%f21,%f15;\n";
+    s += " mul.f32 %s34,%s34,%f12; fma.rn.f32 %f15,%s34,%f22,%f15;\n";
+    s += " mul.f32 %s35,%s35,%f12; fma.rn.f32 %f15,%s35,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+144];\n";
+    s += " mul.f32 %s36,%s36,%f12; fma.rn.f32 %f15,%s36,%f20,%f15;\n";
+    s += " mul.f32 %s37,%s37,%f12; fma.rn.f32 %f15,%s37,%f21,%f15;\n";
+    s += " mul.f32 %s38,%s38,%f12; fma.rn.f32 %f15,%s38,%f22,%f15;\n";
+    s += " mul.f32 %s39,%s39,%f12; fma.rn.f32 %f15,%s39,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+160];\n";
+    s += " mul.f32 %s40,%s40,%f12; fma.rn.f32 %f15,%s40,%f20,%f15;\n";
+    s += " mul.f32 %s41,%s41,%f12; fma.rn.f32 %f15,%s41,%f21,%f15;\n";
+    s += " mul.f32 %s42,%s42,%f12; fma.rn.f32 %f15,%s42,%f22,%f15;\n";
+    s += " mul.f32 %s43,%s43,%f12; fma.rn.f32 %f15,%s43,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+176];\n";
+    s += " mul.f32 %s44,%s44,%f12; fma.rn.f32 %f15,%s44,%f20,%f15;\n";
+    s += " mul.f32 %s45,%s45,%f12; fma.rn.f32 %f15,%s45,%f21,%f15;\n";
+    s += " mul.f32 %s46,%s46,%f12; fma.rn.f32 %f15,%s46,%f22,%f15;\n";
+    s += " mul.f32 %s47,%s47,%f12; fma.rn.f32 %f15,%s47,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+192];\n";
+    s += " mul.f32 %s48,%s48,%f12; fma.rn.f32 %f15,%s48,%f20,%f15;\n";
+    s += " mul.f32 %s49,%s49,%f12; fma.rn.f32 %f15,%s49,%f21,%f15;\n";
+    s += " mul.f32 %s50,%s50,%f12; fma.rn.f32 %f15,%s50,%f22,%f15;\n";
+    s += " mul.f32 %s51,%s51,%f12; fma.rn.f32 %f15,%s51,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+208];\n";
+    s += " mul.f32 %s52,%s52,%f12; fma.rn.f32 %f15,%s52,%f20,%f15;\n";
+    s += " mul.f32 %s53,%s53,%f12; fma.rn.f32 %f15,%s53,%f21,%f15;\n";
+    s += " mul.f32 %s54,%s54,%f12; fma.rn.f32 %f15,%s54,%f22,%f15;\n";
+    s += " mul.f32 %s55,%s55,%f12; fma.rn.f32 %f15,%s55,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+224];\n";
+    s += " mul.f32 %s56,%s56,%f12; fma.rn.f32 %f15,%s56,%f20,%f15;\n";
+    s += " mul.f32 %s57,%s57,%f12; fma.rn.f32 %f15,%s57,%f21,%f15;\n";
+    s += " mul.f32 %s58,%s58,%f12; fma.rn.f32 %f15,%s58,%f22,%f15;\n";
+    s += " mul.f32 %s59,%s59,%f12; fma.rn.f32 %f15,%s59,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+240];\n";
+    s += " mul.f32 %s60,%s60,%f12; fma.rn.f32 %f15,%s60,%f20,%f15;\n";
+    s += " mul.f32 %s61,%s61,%f12; fma.rn.f32 %f15,%s61,%f21,%f15;\n";
+    s += " mul.f32 %s62,%s62,%f12; fma.rn.f32 %f15,%s62,%f22,%f15;\n";
+    s += " mul.f32 %s63,%s63,%f12; fma.rn.f32 %f15,%s63,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+256];\n";
+    s += " mul.f32 %s64,%s64,%f12; fma.rn.f32 %f15,%s64,%f20,%f15;\n";
+    s += " mul.f32 %s65,%s65,%f12; fma.rn.f32 %f15,%s65,%f21,%f15;\n";
+    s += " mul.f32 %s66,%s66,%f12; fma.rn.f32 %f15,%s66,%f22,%f15;\n";
+    s += " mul.f32 %s67,%s67,%f12; fma.rn.f32 %f15,%s67,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+272];\n";
+    s += " mul.f32 %s68,%s68,%f12; fma.rn.f32 %f15,%s68,%f20,%f15;\n";
+    s += " mul.f32 %s69,%s69,%f12; fma.rn.f32 %f15,%s69,%f21,%f15;\n";
+    s += " mul.f32 %s70,%s70,%f12; fma.rn.f32 %f15,%s70,%f22,%f15;\n";
+    s += " mul.f32 %s71,%s71,%f12; fma.rn.f32 %f15,%s71,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+288];\n";
+    s += " mul.f32 %s72,%s72,%f12; fma.rn.f32 %f15,%s72,%f20,%f15;\n";
+    s += " mul.f32 %s73,%s73,%f12; fma.rn.f32 %f15,%s73,%f21,%f15;\n";
+    s += " mul.f32 %s74,%s74,%f12; fma.rn.f32 %f15,%s74,%f22,%f15;\n";
+    s += " mul.f32 %s75,%s75,%f12; fma.rn.f32 %f15,%s75,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+304];\n";
+    s += " mul.f32 %s76,%s76,%f12; fma.rn.f32 %f15,%s76,%f20,%f15;\n";
+    s += " mul.f32 %s77,%s77,%f12; fma.rn.f32 %f15,%s77,%f21,%f15;\n";
+    s += " mul.f32 %s78,%s78,%f12; fma.rn.f32 %f15,%s78,%f22,%f15;\n";
+    s += " mul.f32 %s79,%s79,%f12; fma.rn.f32 %f15,%s79,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+320];\n";
+    s += " mul.f32 %s80,%s80,%f12; fma.rn.f32 %f15,%s80,%f20,%f15;\n";
+    s += " mul.f32 %s81,%s81,%f12; fma.rn.f32 %f15,%s81,%f21,%f15;\n";
+    s += " mul.f32 %s82,%s82,%f12; fma.rn.f32 %f15,%s82,%f22,%f15;\n";
+    s += " mul.f32 %s83,%s83,%f12; fma.rn.f32 %f15,%s83,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+336];\n";
+    s += " mul.f32 %s84,%s84,%f12; fma.rn.f32 %f15,%s84,%f20,%f15;\n";
+    s += " mul.f32 %s85,%s85,%f12; fma.rn.f32 %f15,%s85,%f21,%f15;\n";
+    s += " mul.f32 %s86,%s86,%f12; fma.rn.f32 %f15,%s86,%f22,%f15;\n";
+    s += " mul.f32 %s87,%s87,%f12; fma.rn.f32 %f15,%s87,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+352];\n";
+    s += " mul.f32 %s88,%s88,%f12; fma.rn.f32 %f15,%s88,%f20,%f15;\n";
+    s += " mul.f32 %s89,%s89,%f12; fma.rn.f32 %f15,%s89,%f21,%f15;\n";
+    s += " mul.f32 %s90,%s90,%f12; fma.rn.f32 %f15,%s90,%f22,%f15;\n";
+    s += " mul.f32 %s91,%s91,%f12; fma.rn.f32 %f15,%s91,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+368];\n";
+    s += " mul.f32 %s92,%s92,%f12; fma.rn.f32 %f15,%s92,%f20,%f15;\n";
+    s += " mul.f32 %s93,%s93,%f12; fma.rn.f32 %f15,%s93,%f21,%f15;\n";
+    s += " mul.f32 %s94,%s94,%f12; fma.rn.f32 %f15,%s94,%f22,%f15;\n";
+    s += " mul.f32 %s95,%s95,%f12; fma.rn.f32 %f15,%s95,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+384];\n";
+    s += " mul.f32 %s96,%s96,%f12; fma.rn.f32 %f15,%s96,%f20,%f15;\n";
+    s += " mul.f32 %s97,%s97,%f12; fma.rn.f32 %f15,%s97,%f21,%f15;\n";
+    s += " mul.f32 %s98,%s98,%f12; fma.rn.f32 %f15,%s98,%f22,%f15;\n";
+    s += " mul.f32 %s99,%s99,%f12; fma.rn.f32 %f15,%s99,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+400];\n";
+    s += " mul.f32 %s100,%s100,%f12; fma.rn.f32 %f15,%s100,%f20,%f15;\n";
+    s += " mul.f32 %s101,%s101,%f12; fma.rn.f32 %f15,%s101,%f21,%f15;\n";
+    s += " mul.f32 %s102,%s102,%f12; fma.rn.f32 %f15,%s102,%f22,%f15;\n";
+    s += " mul.f32 %s103,%s103,%f12; fma.rn.f32 %f15,%s103,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+416];\n";
+    s += " mul.f32 %s104,%s104,%f12; fma.rn.f32 %f15,%s104,%f20,%f15;\n";
+    s += " mul.f32 %s105,%s105,%f12; fma.rn.f32 %f15,%s105,%f21,%f15;\n";
+    s += " mul.f32 %s106,%s106,%f12; fma.rn.f32 %f15,%s106,%f22,%f15;\n";
+    s += " mul.f32 %s107,%s107,%f12; fma.rn.f32 %f15,%s107,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+432];\n";
+    s += " mul.f32 %s108,%s108,%f12; fma.rn.f32 %f15,%s108,%f20,%f15;\n";
+    s += " mul.f32 %s109,%s109,%f12; fma.rn.f32 %f15,%s109,%f21,%f15;\n";
+    s += " mul.f32 %s110,%s110,%f12; fma.rn.f32 %f15,%s110,%f22,%f15;\n";
+    s += " mul.f32 %s111,%s111,%f12; fma.rn.f32 %f15,%s111,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+448];\n";
+    s += " mul.f32 %s112,%s112,%f12; fma.rn.f32 %f15,%s112,%f20,%f15;\n";
+    s += " mul.f32 %s113,%s113,%f12; fma.rn.f32 %f15,%s113,%f21,%f15;\n";
+    s += " mul.f32 %s114,%s114,%f12; fma.rn.f32 %f15,%s114,%f22,%f15;\n";
+    s += " mul.f32 %s115,%s115,%f12; fma.rn.f32 %f15,%s115,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+464];\n";
+    s += " mul.f32 %s116,%s116,%f12; fma.rn.f32 %f15,%s116,%f20,%f15;\n";
+    s += " mul.f32 %s117,%s117,%f12; fma.rn.f32 %f15,%s117,%f21,%f15;\n";
+    s += " mul.f32 %s118,%s118,%f12; fma.rn.f32 %f15,%s118,%f22,%f15;\n";
+    s += " mul.f32 %s119,%s119,%f12; fma.rn.f32 %f15,%s119,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+480];\n";
+    s += " mul.f32 %s120,%s120,%f12; fma.rn.f32 %f15,%s120,%f20,%f15;\n";
+    s += " mul.f32 %s121,%s121,%f12; fma.rn.f32 %f15,%s121,%f21,%f15;\n";
+    s += " mul.f32 %s122,%s122,%f12; fma.rn.f32 %f15,%s122,%f22,%f15;\n";
+    s += " mul.f32 %s123,%s123,%f12; fma.rn.f32 %f15,%s123,%f23,%f15;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+496];\n";
+    s += " mul.f32 %s124,%s124,%f12; fma.rn.f32 %f15,%s124,%f20,%f15;\n";
+    s += " mul.f32 %s125,%s125,%f12; fma.rn.f32 %f15,%s125,%f21,%f15;\n";
+    s += " mul.f32 %s126,%s126,%f12; fma.rn.f32 %f15,%s126,%f22,%f15;\n";
+    s += " mul.f32 %s127,%s127,%f12; fma.rn.f32 %f15,%s127,%f23,%f15;\n";
+    s += " sub.f32 %f16,%f7,%f15; mul.f32 %f16,%f16,%f13; mov.f32 %f17,0f00000000;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+0]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+0];\n";
+    s += " fma.rn.f32 %s0,%f20,%f16,%s0; fma.rn.f32 %f17,%s0,%f24,%f17;\n";
+    s += " fma.rn.f32 %s1,%f21,%f16,%s1; fma.rn.f32 %f17,%s1,%f25,%f17;\n";
+    s += " fma.rn.f32 %s2,%f22,%f16,%s2; fma.rn.f32 %f17,%s2,%f26,%f17;\n";
+    s += " fma.rn.f32 %s3,%f23,%f16,%s3; fma.rn.f32 %f17,%s3,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+16]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+16];\n";
+    s += " fma.rn.f32 %s4,%f20,%f16,%s4; fma.rn.f32 %f17,%s4,%f24,%f17;\n";
+    s += " fma.rn.f32 %s5,%f21,%f16,%s5; fma.rn.f32 %f17,%s5,%f25,%f17;\n";
+    s += " fma.rn.f32 %s6,%f22,%f16,%s6; fma.rn.f32 %f17,%s6,%f26,%f17;\n";
+    s += " fma.rn.f32 %s7,%f23,%f16,%s7; fma.rn.f32 %f17,%s7,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+32]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+32];\n";
+    s += " fma.rn.f32 %s8,%f20,%f16,%s8; fma.rn.f32 %f17,%s8,%f24,%f17;\n";
+    s += " fma.rn.f32 %s9,%f21,%f16,%s9; fma.rn.f32 %f17,%s9,%f25,%f17;\n";
+    s += " fma.rn.f32 %s10,%f22,%f16,%s10; fma.rn.f32 %f17,%s10,%f26,%f17;\n";
+    s += " fma.rn.f32 %s11,%f23,%f16,%s11; fma.rn.f32 %f17,%s11,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+48]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+48];\n";
+    s += " fma.rn.f32 %s12,%f20,%f16,%s12; fma.rn.f32 %f17,%s12,%f24,%f17;\n";
+    s += " fma.rn.f32 %s13,%f21,%f16,%s13; fma.rn.f32 %f17,%s13,%f25,%f17;\n";
+    s += " fma.rn.f32 %s14,%f22,%f16,%s14; fma.rn.f32 %f17,%s14,%f26,%f17;\n";
+    s += " fma.rn.f32 %s15,%f23,%f16,%s15; fma.rn.f32 %f17,%s15,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+64]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+64];\n";
+    s += " fma.rn.f32 %s16,%f20,%f16,%s16; fma.rn.f32 %f17,%s16,%f24,%f17;\n";
+    s += " fma.rn.f32 %s17,%f21,%f16,%s17; fma.rn.f32 %f17,%s17,%f25,%f17;\n";
+    s += " fma.rn.f32 %s18,%f22,%f16,%s18; fma.rn.f32 %f17,%s18,%f26,%f17;\n";
+    s += " fma.rn.f32 %s19,%f23,%f16,%s19; fma.rn.f32 %f17,%s19,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+80]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+80];\n";
+    s += " fma.rn.f32 %s20,%f20,%f16,%s20; fma.rn.f32 %f17,%s20,%f24,%f17;\n";
+    s += " fma.rn.f32 %s21,%f21,%f16,%s21; fma.rn.f32 %f17,%s21,%f25,%f17;\n";
+    s += " fma.rn.f32 %s22,%f22,%f16,%s22; fma.rn.f32 %f17,%s22,%f26,%f17;\n";
+    s += " fma.rn.f32 %s23,%f23,%f16,%s23; fma.rn.f32 %f17,%s23,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+96]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+96];\n";
+    s += " fma.rn.f32 %s24,%f20,%f16,%s24; fma.rn.f32 %f17,%s24,%f24,%f17;\n";
+    s += " fma.rn.f32 %s25,%f21,%f16,%s25; fma.rn.f32 %f17,%s25,%f25,%f17;\n";
+    s += " fma.rn.f32 %s26,%f22,%f16,%s26; fma.rn.f32 %f17,%s26,%f26,%f17;\n";
+    s += " fma.rn.f32 %s27,%f23,%f16,%s27; fma.rn.f32 %f17,%s27,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+112]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+112];\n";
+    s += " fma.rn.f32 %s28,%f20,%f16,%s28; fma.rn.f32 %f17,%s28,%f24,%f17;\n";
+    s += " fma.rn.f32 %s29,%f21,%f16,%s29; fma.rn.f32 %f17,%s29,%f25,%f17;\n";
+    s += " fma.rn.f32 %s30,%f22,%f16,%s30; fma.rn.f32 %f17,%s30,%f26,%f17;\n";
+    s += " fma.rn.f32 %s31,%f23,%f16,%s31; fma.rn.f32 %f17,%s31,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+128]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+128];\n";
+    s += " fma.rn.f32 %s32,%f20,%f16,%s32; fma.rn.f32 %f17,%s32,%f24,%f17;\n";
+    s += " fma.rn.f32 %s33,%f21,%f16,%s33; fma.rn.f32 %f17,%s33,%f25,%f17;\n";
+    s += " fma.rn.f32 %s34,%f22,%f16,%s34; fma.rn.f32 %f17,%s34,%f26,%f17;\n";
+    s += " fma.rn.f32 %s35,%f23,%f16,%s35; fma.rn.f32 %f17,%s35,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+144]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+144];\n";
+    s += " fma.rn.f32 %s36,%f20,%f16,%s36; fma.rn.f32 %f17,%s36,%f24,%f17;\n";
+    s += " fma.rn.f32 %s37,%f21,%f16,%s37; fma.rn.f32 %f17,%s37,%f25,%f17;\n";
+    s += " fma.rn.f32 %s38,%f22,%f16,%s38; fma.rn.f32 %f17,%s38,%f26,%f17;\n";
+    s += " fma.rn.f32 %s39,%f23,%f16,%s39; fma.rn.f32 %f17,%s39,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+160]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+160];\n";
+    s += " fma.rn.f32 %s40,%f20,%f16,%s40; fma.rn.f32 %f17,%s40,%f24,%f17;\n";
+    s += " fma.rn.f32 %s41,%f21,%f16,%s41; fma.rn.f32 %f17,%s41,%f25,%f17;\n";
+    s += " fma.rn.f32 %s42,%f22,%f16,%s42; fma.rn.f32 %f17,%s42,%f26,%f17;\n";
+    s += " fma.rn.f32 %s43,%f23,%f16,%s43; fma.rn.f32 %f17,%s43,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+176]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+176];\n";
+    s += " fma.rn.f32 %s44,%f20,%f16,%s44; fma.rn.f32 %f17,%s44,%f24,%f17;\n";
+    s += " fma.rn.f32 %s45,%f21,%f16,%s45; fma.rn.f32 %f17,%s45,%f25,%f17;\n";
+    s += " fma.rn.f32 %s46,%f22,%f16,%s46; fma.rn.f32 %f17,%s46,%f26,%f17;\n";
+    s += " fma.rn.f32 %s47,%f23,%f16,%s47; fma.rn.f32 %f17,%s47,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+192]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+192];\n";
+    s += " fma.rn.f32 %s48,%f20,%f16,%s48; fma.rn.f32 %f17,%s48,%f24,%f17;\n";
+    s += " fma.rn.f32 %s49,%f21,%f16,%s49; fma.rn.f32 %f17,%s49,%f25,%f17;\n";
+    s += " fma.rn.f32 %s50,%f22,%f16,%s50; fma.rn.f32 %f17,%s50,%f26,%f17;\n";
+    s += " fma.rn.f32 %s51,%f23,%f16,%s51; fma.rn.f32 %f17,%s51,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+208]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+208];\n";
+    s += " fma.rn.f32 %s52,%f20,%f16,%s52; fma.rn.f32 %f17,%s52,%f24,%f17;\n";
+    s += " fma.rn.f32 %s53,%f21,%f16,%s53; fma.rn.f32 %f17,%s53,%f25,%f17;\n";
+    s += " fma.rn.f32 %s54,%f22,%f16,%s54; fma.rn.f32 %f17,%s54,%f26,%f17;\n";
+    s += " fma.rn.f32 %s55,%f23,%f16,%s55; fma.rn.f32 %f17,%s55,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+224]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+224];\n";
+    s += " fma.rn.f32 %s56,%f20,%f16,%s56; fma.rn.f32 %f17,%s56,%f24,%f17;\n";
+    s += " fma.rn.f32 %s57,%f21,%f16,%s57; fma.rn.f32 %f17,%s57,%f25,%f17;\n";
+    s += " fma.rn.f32 %s58,%f22,%f16,%s58; fma.rn.f32 %f17,%s58,%f26,%f17;\n";
+    s += " fma.rn.f32 %s59,%f23,%f16,%s59; fma.rn.f32 %f17,%s59,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+240]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+240];\n";
+    s += " fma.rn.f32 %s60,%f20,%f16,%s60; fma.rn.f32 %f17,%s60,%f24,%f17;\n";
+    s += " fma.rn.f32 %s61,%f21,%f16,%s61; fma.rn.f32 %f17,%s61,%f25,%f17;\n";
+    s += " fma.rn.f32 %s62,%f22,%f16,%s62; fma.rn.f32 %f17,%s62,%f26,%f17;\n";
+    s += " fma.rn.f32 %s63,%f23,%f16,%s63; fma.rn.f32 %f17,%s63,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+256]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+256];\n";
+    s += " fma.rn.f32 %s64,%f20,%f16,%s64; fma.rn.f32 %f17,%s64,%f24,%f17;\n";
+    s += " fma.rn.f32 %s65,%f21,%f16,%s65; fma.rn.f32 %f17,%s65,%f25,%f17;\n";
+    s += " fma.rn.f32 %s66,%f22,%f16,%s66; fma.rn.f32 %f17,%s66,%f26,%f17;\n";
+    s += " fma.rn.f32 %s67,%f23,%f16,%s67; fma.rn.f32 %f17,%s67,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+272]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+272];\n";
+    s += " fma.rn.f32 %s68,%f20,%f16,%s68; fma.rn.f32 %f17,%s68,%f24,%f17;\n";
+    s += " fma.rn.f32 %s69,%f21,%f16,%s69; fma.rn.f32 %f17,%s69,%f25,%f17;\n";
+    s += " fma.rn.f32 %s70,%f22,%f16,%s70; fma.rn.f32 %f17,%s70,%f26,%f17;\n";
+    s += " fma.rn.f32 %s71,%f23,%f16,%s71; fma.rn.f32 %f17,%s71,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+288]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+288];\n";
+    s += " fma.rn.f32 %s72,%f20,%f16,%s72; fma.rn.f32 %f17,%s72,%f24,%f17;\n";
+    s += " fma.rn.f32 %s73,%f21,%f16,%s73; fma.rn.f32 %f17,%s73,%f25,%f17;\n";
+    s += " fma.rn.f32 %s74,%f22,%f16,%s74; fma.rn.f32 %f17,%s74,%f26,%f17;\n";
+    s += " fma.rn.f32 %s75,%f23,%f16,%s75; fma.rn.f32 %f17,%s75,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+304]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+304];\n";
+    s += " fma.rn.f32 %s76,%f20,%f16,%s76; fma.rn.f32 %f17,%s76,%f24,%f17;\n";
+    s += " fma.rn.f32 %s77,%f21,%f16,%s77; fma.rn.f32 %f17,%s77,%f25,%f17;\n";
+    s += " fma.rn.f32 %s78,%f22,%f16,%s78; fma.rn.f32 %f17,%s78,%f26,%f17;\n";
+    s += " fma.rn.f32 %s79,%f23,%f16,%s79; fma.rn.f32 %f17,%s79,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+320]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+320];\n";
+    s += " fma.rn.f32 %s80,%f20,%f16,%s80; fma.rn.f32 %f17,%s80,%f24,%f17;\n";
+    s += " fma.rn.f32 %s81,%f21,%f16,%s81; fma.rn.f32 %f17,%s81,%f25,%f17;\n";
+    s += " fma.rn.f32 %s82,%f22,%f16,%s82; fma.rn.f32 %f17,%s82,%f26,%f17;\n";
+    s += " fma.rn.f32 %s83,%f23,%f16,%s83; fma.rn.f32 %f17,%s83,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+336]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+336];\n";
+    s += " fma.rn.f32 %s84,%f20,%f16,%s84; fma.rn.f32 %f17,%s84,%f24,%f17;\n";
+    s += " fma.rn.f32 %s85,%f21,%f16,%s85; fma.rn.f32 %f17,%s85,%f25,%f17;\n";
+    s += " fma.rn.f32 %s86,%f22,%f16,%s86; fma.rn.f32 %f17,%s86,%f26,%f17;\n";
+    s += " fma.rn.f32 %s87,%f23,%f16,%s87; fma.rn.f32 %f17,%s87,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+352]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+352];\n";
+    s += " fma.rn.f32 %s88,%f20,%f16,%s88; fma.rn.f32 %f17,%s88,%f24,%f17;\n";
+    s += " fma.rn.f32 %s89,%f21,%f16,%s89; fma.rn.f32 %f17,%s89,%f25,%f17;\n";
+    s += " fma.rn.f32 %s90,%f22,%f16,%s90; fma.rn.f32 %f17,%s90,%f26,%f17;\n";
+    s += " fma.rn.f32 %s91,%f23,%f16,%s91; fma.rn.f32 %f17,%s91,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+368]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+368];\n";
+    s += " fma.rn.f32 %s92,%f20,%f16,%s92; fma.rn.f32 %f17,%s92,%f24,%f17;\n";
+    s += " fma.rn.f32 %s93,%f21,%f16,%s93; fma.rn.f32 %f17,%s93,%f25,%f17;\n";
+    s += " fma.rn.f32 %s94,%f22,%f16,%s94; fma.rn.f32 %f17,%s94,%f26,%f17;\n";
+    s += " fma.rn.f32 %s95,%f23,%f16,%s95; fma.rn.f32 %f17,%s95,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+384]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+384];\n";
+    s += " fma.rn.f32 %s96,%f20,%f16,%s96; fma.rn.f32 %f17,%s96,%f24,%f17;\n";
+    s += " fma.rn.f32 %s97,%f21,%f16,%s97; fma.rn.f32 %f17,%s97,%f25,%f17;\n";
+    s += " fma.rn.f32 %s98,%f22,%f16,%s98; fma.rn.f32 %f17,%s98,%f26,%f17;\n";
+    s += " fma.rn.f32 %s99,%f23,%f16,%s99; fma.rn.f32 %f17,%s99,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+400]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+400];\n";
+    s += " fma.rn.f32 %s100,%f20,%f16,%s100; fma.rn.f32 %f17,%s100,%f24,%f17;\n";
+    s += " fma.rn.f32 %s101,%f21,%f16,%s101; fma.rn.f32 %f17,%s101,%f25,%f17;\n";
+    s += " fma.rn.f32 %s102,%f22,%f16,%s102; fma.rn.f32 %f17,%s102,%f26,%f17;\n";
+    s += " fma.rn.f32 %s103,%f23,%f16,%s103; fma.rn.f32 %f17,%s103,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+416]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+416];\n";
+    s += " fma.rn.f32 %s104,%f20,%f16,%s104; fma.rn.f32 %f17,%s104,%f24,%f17;\n";
+    s += " fma.rn.f32 %s105,%f21,%f16,%s105; fma.rn.f32 %f17,%s105,%f25,%f17;\n";
+    s += " fma.rn.f32 %s106,%f22,%f16,%s106; fma.rn.f32 %f17,%s106,%f26,%f17;\n";
+    s += " fma.rn.f32 %s107,%f23,%f16,%s107; fma.rn.f32 %f17,%s107,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+432]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+432];\n";
+    s += " fma.rn.f32 %s108,%f20,%f16,%s108; fma.rn.f32 %f17,%s108,%f24,%f17;\n";
+    s += " fma.rn.f32 %s109,%f21,%f16,%s109; fma.rn.f32 %f17,%s109,%f25,%f17;\n";
+    s += " fma.rn.f32 %s110,%f22,%f16,%s110; fma.rn.f32 %f17,%s110,%f26,%f17;\n";
+    s += " fma.rn.f32 %s111,%f23,%f16,%s111; fma.rn.f32 %f17,%s111,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+448]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+448];\n";
+    s += " fma.rn.f32 %s112,%f20,%f16,%s112; fma.rn.f32 %f17,%s112,%f24,%f17;\n";
+    s += " fma.rn.f32 %s113,%f21,%f16,%s113; fma.rn.f32 %f17,%s113,%f25,%f17;\n";
+    s += " fma.rn.f32 %s114,%f22,%f16,%s114; fma.rn.f32 %f17,%s114,%f26,%f17;\n";
+    s += " fma.rn.f32 %s115,%f23,%f16,%s115; fma.rn.f32 %f17,%s115,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+464]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+464];\n";
+    s += " fma.rn.f32 %s116,%f20,%f16,%s116; fma.rn.f32 %f17,%s116,%f24,%f17;\n";
+    s += " fma.rn.f32 %s117,%f21,%f16,%s117; fma.rn.f32 %f17,%s117,%f25,%f17;\n";
+    s += " fma.rn.f32 %s118,%f22,%f16,%s118; fma.rn.f32 %f17,%s118,%f26,%f17;\n";
+    s += " fma.rn.f32 %s119,%f23,%f16,%s119; fma.rn.f32 %f17,%s119,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+480]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+480];\n";
+    s += " fma.rn.f32 %s120,%f20,%f16,%s120; fma.rn.f32 %f17,%s120,%f24,%f17;\n";
+    s += " fma.rn.f32 %s121,%f21,%f16,%s121; fma.rn.f32 %f17,%s121,%f25,%f17;\n";
+    s += " fma.rn.f32 %s122,%f22,%f16,%s122; fma.rn.f32 %f17,%s122,%f26,%f17;\n";
+    s += " fma.rn.f32 %s123,%f23,%f16,%s123; fma.rn.f32 %f17,%s123,%f27,%f17;\n";
+    s += " ld.shared.v4.f32 {%f20,%f21,%f22,%f23},[ks+496]; ld.shared.v4.f32 {%f24,%f25,%f26,%f27},[qs+496];\n";
+    s += " fma.rn.f32 %s124,%f20,%f16,%s124; fma.rn.f32 %f17,%s124,%f24,%f17;\n";
+    s += " fma.rn.f32 %s125,%f21,%f16,%s125; fma.rn.f32 %f17,%s125,%f25,%f17;\n";
+    s += " fma.rn.f32 %s126,%f22,%f16,%s126; fma.rn.f32 %f17,%s126,%f26,%f17;\n";
+    s += " fma.rn.f32 %s127,%f23,%f16,%s127; fma.rn.f32 %f17,%s127,%f27,%f17;\n";
+    s += " mul.f32 %f18,%f17,%f17;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f18,16,31,0xffffffff; add.f32 %f18,%f18,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f18,8,31,0xffffffff; add.f32 %f18,%f18,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f18,4,31,0xffffffff; add.f32 %f18,%f18,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f18,2,31,0xffffffff; add.f32 %f18,%f18,%f30;\n";
+    s += " shfl.sync.bfly.b32 %f30,%f18,1,31,0xffffffff; add.f32 %f18,%f18,%f30;\n";
+    s += " @%p2 st.shared.f32 [%r15],%f18; bar.sync 0; ld.shared.f32 %f19,[%r14]; ld.shared.f32 %f30,[%r14+4]; add.f32 %f19,%f19,%f30; ld.shared.f32 %f30,[%r14+8]; add.f32 %f19,%f19,%f30; ld.shared.f32 %f30,[%r14+12]; add.f32 %f19,%f19,%f30; bar.sync 0;\n";
+    s += " mul.f32 %f19,%f19,0f3C000000; add.f32 %f19,%f19,%f1; rsqrt.approx.f32 %f19,%f19; mul.f32 %f17,%f17,%f19; mul.f32 %f17,%f17,%f4;\n";
+    s += " mad.lo.u32 %r28,%r26,%r24,%r25; mul.wide.u32 %rd19,%r28,4; add.u64 %rd20,%rd2,%rd19; ld.global.f32 %f28,[%rd20];\n";
+    s += " mul.f32 %f29,%f28,0fBFB8AA3B; ex2.approx.f32 %f29,%f29; add.f32 %f29,%f29,0f3F800000; div.approx.f32 %f28,%f28,%f29; mul.f32 %f17,%f17,%f28;\n";
+    s += " add.u64 %rd21,%rd9,%rd19; st.global.f32 [%rd21],%f17; add.u32 %r26,%r26,1; bra LT;\n";
+    s += "ET:\n";
+    s += " mad.lo.u32 %r11,0,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s0;\n";
+    s += " mad.lo.u32 %r11,1,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s1;\n";
+    s += " mad.lo.u32 %r11,2,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s2;\n";
+    s += " mad.lo.u32 %r11,3,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s3;\n";
+    s += " mad.lo.u32 %r11,4,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s4;\n";
+    s += " mad.lo.u32 %r11,5,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s5;\n";
+    s += " mad.lo.u32 %r11,6,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s6;\n";
+    s += " mad.lo.u32 %r11,7,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s7;\n";
+    s += " mad.lo.u32 %r11,8,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s8;\n";
+    s += " mad.lo.u32 %r11,9,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s9;\n";
+    s += " mad.lo.u32 %r11,10,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s10;\n";
+    s += " mad.lo.u32 %r11,11,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s11;\n";
+    s += " mad.lo.u32 %r11,12,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s12;\n";
+    s += " mad.lo.u32 %r11,13,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s13;\n";
+    s += " mad.lo.u32 %r11,14,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s14;\n";
+    s += " mad.lo.u32 %r11,15,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s15;\n";
+    s += " mad.lo.u32 %r11,16,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s16;\n";
+    s += " mad.lo.u32 %r11,17,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s17;\n";
+    s += " mad.lo.u32 %r11,18,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s18;\n";
+    s += " mad.lo.u32 %r11,19,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s19;\n";
+    s += " mad.lo.u32 %r11,20,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s20;\n";
+    s += " mad.lo.u32 %r11,21,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s21;\n";
+    s += " mad.lo.u32 %r11,22,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s22;\n";
+    s += " mad.lo.u32 %r11,23,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s23;\n";
+    s += " mad.lo.u32 %r11,24,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s24;\n";
+    s += " mad.lo.u32 %r11,25,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s25;\n";
+    s += " mad.lo.u32 %r11,26,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s26;\n";
+    s += " mad.lo.u32 %r11,27,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s27;\n";
+    s += " mad.lo.u32 %r11,28,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s28;\n";
+    s += " mad.lo.u32 %r11,29,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s29;\n";
+    s += " mad.lo.u32 %r11,30,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s30;\n";
+    s += " mad.lo.u32 %r11,31,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s31;\n";
+    s += " mad.lo.u32 %r11,32,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s32;\n";
+    s += " mad.lo.u32 %r11,33,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s33;\n";
+    s += " mad.lo.u32 %r11,34,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s34;\n";
+    s += " mad.lo.u32 %r11,35,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s35;\n";
+    s += " mad.lo.u32 %r11,36,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s36;\n";
+    s += " mad.lo.u32 %r11,37,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s37;\n";
+    s += " mad.lo.u32 %r11,38,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s38;\n";
+    s += " mad.lo.u32 %r11,39,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s39;\n";
+    s += " mad.lo.u32 %r11,40,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s40;\n";
+    s += " mad.lo.u32 %r11,41,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s41;\n";
+    s += " mad.lo.u32 %r11,42,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s42;\n";
+    s += " mad.lo.u32 %r11,43,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s43;\n";
+    s += " mad.lo.u32 %r11,44,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s44;\n";
+    s += " mad.lo.u32 %r11,45,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s45;\n";
+    s += " mad.lo.u32 %r11,46,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s46;\n";
+    s += " mad.lo.u32 %r11,47,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s47;\n";
+    s += " mad.lo.u32 %r11,48,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s48;\n";
+    s += " mad.lo.u32 %r11,49,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s49;\n";
+    s += " mad.lo.u32 %r11,50,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s50;\n";
+    s += " mad.lo.u32 %r11,51,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s51;\n";
+    s += " mad.lo.u32 %r11,52,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s52;\n";
+    s += " mad.lo.u32 %r11,53,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s53;\n";
+    s += " mad.lo.u32 %r11,54,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s54;\n";
+    s += " mad.lo.u32 %r11,55,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s55;\n";
+    s += " mad.lo.u32 %r11,56,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s56;\n";
+    s += " mad.lo.u32 %r11,57,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s57;\n";
+    s += " mad.lo.u32 %r11,58,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s58;\n";
+    s += " mad.lo.u32 %r11,59,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s59;\n";
+    s += " mad.lo.u32 %r11,60,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s60;\n";
+    s += " mad.lo.u32 %r11,61,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s61;\n";
+    s += " mad.lo.u32 %r11,62,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s62;\n";
+    s += " mad.lo.u32 %r11,63,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s63;\n";
+    s += " mad.lo.u32 %r11,64,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s64;\n";
+    s += " mad.lo.u32 %r11,65,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s65;\n";
+    s += " mad.lo.u32 %r11,66,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s66;\n";
+    s += " mad.lo.u32 %r11,67,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s67;\n";
+    s += " mad.lo.u32 %r11,68,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s68;\n";
+    s += " mad.lo.u32 %r11,69,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s69;\n";
+    s += " mad.lo.u32 %r11,70,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s70;\n";
+    s += " mad.lo.u32 %r11,71,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s71;\n";
+    s += " mad.lo.u32 %r11,72,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s72;\n";
+    s += " mad.lo.u32 %r11,73,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s73;\n";
+    s += " mad.lo.u32 %r11,74,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s74;\n";
+    s += " mad.lo.u32 %r11,75,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s75;\n";
+    s += " mad.lo.u32 %r11,76,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s76;\n";
+    s += " mad.lo.u32 %r11,77,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s77;\n";
+    s += " mad.lo.u32 %r11,78,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s78;\n";
+    s += " mad.lo.u32 %r11,79,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s79;\n";
+    s += " mad.lo.u32 %r11,80,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s80;\n";
+    s += " mad.lo.u32 %r11,81,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s81;\n";
+    s += " mad.lo.u32 %r11,82,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s82;\n";
+    s += " mad.lo.u32 %r11,83,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s83;\n";
+    s += " mad.lo.u32 %r11,84,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s84;\n";
+    s += " mad.lo.u32 %r11,85,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s85;\n";
+    s += " mad.lo.u32 %r11,86,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s86;\n";
+    s += " mad.lo.u32 %r11,87,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s87;\n";
+    s += " mad.lo.u32 %r11,88,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s88;\n";
+    s += " mad.lo.u32 %r11,89,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s89;\n";
+    s += " mad.lo.u32 %r11,90,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s90;\n";
+    s += " mad.lo.u32 %r11,91,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s91;\n";
+    s += " mad.lo.u32 %r11,92,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s92;\n";
+    s += " mad.lo.u32 %r11,93,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s93;\n";
+    s += " mad.lo.u32 %r11,94,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s94;\n";
+    s += " mad.lo.u32 %r11,95,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s95;\n";
+    s += " mad.lo.u32 %r11,96,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s96;\n";
+    s += " mad.lo.u32 %r11,97,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s97;\n";
+    s += " mad.lo.u32 %r11,98,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s98;\n";
+    s += " mad.lo.u32 %r11,99,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s99;\n";
+    s += " mad.lo.u32 %r11,100,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s100;\n";
+    s += " mad.lo.u32 %r11,101,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s101;\n";
+    s += " mad.lo.u32 %r11,102,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s102;\n";
+    s += " mad.lo.u32 %r11,103,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s103;\n";
+    s += " mad.lo.u32 %r11,104,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s104;\n";
+    s += " mad.lo.u32 %r11,105,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s105;\n";
+    s += " mad.lo.u32 %r11,106,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s106;\n";
+    s += " mad.lo.u32 %r11,107,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s107;\n";
+    s += " mad.lo.u32 %r11,108,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s108;\n";
+    s += " mad.lo.u32 %r11,109,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s109;\n";
+    s += " mad.lo.u32 %r11,110,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s110;\n";
+    s += " mad.lo.u32 %r11,111,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s111;\n";
+    s += " mad.lo.u32 %r11,112,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s112;\n";
+    s += " mad.lo.u32 %r11,113,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s113;\n";
+    s += " mad.lo.u32 %r11,114,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s114;\n";
+    s += " mad.lo.u32 %r11,115,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s115;\n";
+    s += " mad.lo.u32 %r11,116,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s116;\n";
+    s += " mad.lo.u32 %r11,117,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s117;\n";
+    s += " mad.lo.u32 %r11,118,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s118;\n";
+    s += " mad.lo.u32 %r11,119,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s119;\n";
+    s += " mad.lo.u32 %r11,120,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s120;\n";
+    s += " mad.lo.u32 %r11,121,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s121;\n";
+    s += " mad.lo.u32 %r11,122,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s122;\n";
+    s += " mad.lo.u32 %r11,123,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s123;\n";
+    s += " mad.lo.u32 %r11,124,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s124;\n";
+    s += " mad.lo.u32 %r11,125,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s125;\n";
+    s += " mad.lo.u32 %r11,126,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s126;\n";
+    s += " mad.lo.u32 %r11,127,128,%r9; mul.wide.u32 %rd10,%r11,4; add.u64 %rd10,%rd8,%rd10; st.global.f32 [%rd10],%s127;\n";
+    s += " ret;\n}\n";
+    // ---- LFM2 short convolution: one thread per channel, tokens in order. BCX rows [b | c | x] of 3 pD;
+    // v = b * x, conv over the last 3 v (2 kept as state), y = c * conv -> Y [N][pD] ----
+    s += ".visible .entry k_sconv(.param .u64 pBCX, .param .u64 pW, .param .u64 pS, .param .u64 pY, .param .u32 pN, .param .u32 pD)\n{\n"
+         " .reg .pred %p<4>; .reg .b32 %r<16>; .reg .f32 %f<16>; .reg .b64 %rd<16>;\n"
+         " ld.param.u64 %rd1,[pBCX]; ld.param.u64 %rd2,[pW]; ld.param.u64 %rd3,[pS]; ld.param.u64 %rd4,[pY]; ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pD];\n"
+         " mov.u32 %r3,%ctaid.x; mov.u32 %r4,%tid.x; mad.lo.u32 %r3,%r3,256,%r4; setp.ge.u32 %p1,%r3,%r2; @%p1 bra DONE;\n"
+         " mul.lo.u32 %r5,%r3,3; mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd2,%rd5; ld.global.f32 %f1,[%rd5]; ld.global.f32 %f2,[%rd5+4]; ld.global.f32 %f3,[%rd5+8];\n"
+         " mul.wide.u32 %rd6,%r3,4; add.u64 %rd6,%rd3,%rd6; mul.wide.u32 %rd7,%r2,4; ld.global.f32 %f4,[%rd6]; add.u64 %rd8,%rd6,%rd7; ld.global.f32 %f5,[%rd8];\n"
+         " mul.lo.u32 %r6,%r2,3; mov.u32 %r7,0;\n"
+         "LT:\n setp.ge.u32 %p2,%r7,%r1; @%p2 bra ET;\n"
+         " mad.lo.u32 %r8,%r7,%r6,%r3; mul.wide.u32 %rd9,%r8,4; add.u64 %rd9,%rd1,%rd9; ld.global.f32 %f6,[%rd9]; add.u64 %rd10,%rd9,%rd7; ld.global.f32 %f7,[%rd10]; add.u64 %rd11,%rd10,%rd7; ld.global.f32 %f8,[%rd11];\n"
+         " mul.f32 %f9,%f6,%f8; mul.f32 %f10,%f1,%f4; fma.rn.f32 %f10,%f2,%f5,%f10; fma.rn.f32 %f10,%f3,%f9,%f10; mov.f32 %f4,%f5; mov.f32 %f5,%f9; mul.f32 %f10,%f10,%f7;\n"
+         " mad.lo.u32 %r9,%r7,%r2,%r3; mul.wide.u32 %rd12,%r9,4; add.u64 %rd12,%rd4,%rd12; st.global.f32 [%rd12],%f10;\n"
+         " add.u32 %r7,%r7,1; bra LT;\nET:\n st.global.f32 [%rd6],%f4; st.global.f32 [%rd8],%f5;\n"
+         "DONE:\n ret;\n}\n";
+    // ---- Mamba-2 (Granite 4.0 H) ----
+    // k_ssm_conv: one thread per xBC channel, tokens in order. Causal depthwise conv (kernel 4) with the last 3 inputs as
+    // state, + bias, SiLU. In: ZX rows of pLd floats, xBC at column pOff. Out: [N][C]. State: [3][C], updated.
+    s += ".visible .entry k_ssm_conv(.param .u64 pZX, .param .u64 pW, .param .u64 pB, .param .u64 pS, .param .u64 pO, .param .u32 pN, .param .u32 pC, .param .u32 pLd, .param .u32 pOff)\n{\n"
+         " .reg .pred %p<4>; .reg .b32 %r<16>; .reg .f32 %f<20>; .reg .b64 %rd<16>;\n"
+         " ld.param.u64 %rd1,[pZX]; ld.param.u64 %rd2,[pW]; ld.param.u64 %rd3,[pB]; ld.param.u64 %rd4,[pS]; ld.param.u64 %rd5,[pO];\n"
+         " ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pC]; ld.param.u32 %r3,[pLd]; ld.param.u32 %r4,[pOff];\n"
+         " mov.u32 %r5,%ctaid.x; mov.u32 %r6,%tid.x; mad.lo.u32 %r5,%r5,256,%r6; setp.ge.u32 %p1,%r5,%r2; @%p1 bra DONE;\n"
+         " mul.wide.u32 %rd6,%r5,16; add.u64 %rd6,%rd2,%rd6; ld.global.v4.f32 {%f1,%f2,%f3,%f4},[%rd6];\n"
+         " mul.wide.u32 %rd7,%r5,4; add.u64 %rd8,%rd3,%rd7; ld.global.f32 %f5,[%rd8];\n"
+         " add.u64 %rd9,%rd4,%rd7; mul.wide.u32 %rd10,%r2,4; ld.global.f32 %f6,[%rd9]; add.u64 %rd11,%rd9,%rd10; ld.global.f32 %f7,[%rd11]; add.u64 %rd12,%rd11,%rd10; ld.global.f32 %f8,[%rd12];\n"
+         " mov.u32 %r7,0;\n"
+         "LT:\n setp.ge.u32 %p2,%r7,%r1; @%p2 bra ET;\n"
+         " mad.lo.u32 %r8,%r7,%r3,%r4; add.u32 %r8,%r8,%r5; mul.wide.u32 %rd13,%r8,4; add.u64 %rd13,%rd1,%rd13; ld.global.f32 %f9,[%rd13];\n"
+         " fma.rn.f32 %f10,%f1,%f6,%f5; fma.rn.f32 %f10,%f2,%f7,%f10; fma.rn.f32 %f10,%f3,%f8,%f10; fma.rn.f32 %f10,%f4,%f9,%f10;\n"
+         " mov.f32 %f6,%f7; mov.f32 %f7,%f8; mov.f32 %f8,%f9;\n"
+         " mul.f32 %f11,%f10,0fBFB8AA3B; ex2.approx.f32 %f11,%f11; add.f32 %f11,%f11,0f3F800000; div.approx.f32 %f10,%f10,%f11;\n"
+         " mad.lo.u32 %r9,%r7,%r2,%r5; mul.wide.u32 %rd14,%r9,4; add.u64 %rd14,%rd5,%rd14; st.global.f32 [%rd14],%f10;\n"
+         " add.u32 %r7,%r7,1; bra LT;\nET:\n"
+         " st.global.f32 [%rd9],%f6; st.global.f32 [%rd11],%f7; st.global.f32 [%rd12],%f8;\n"
+         "DONE:\n ret;\n}\n";
+    // k_ssm_scan: block = 256 / pDs state rows (row = head * hdim + p) x pDs state entries, one entry per thread, in a
+    // register for all N tokens: S = exp(dt A) S + dt x B; y = sum(S C) + D x. dt = softplus(raw + bias).
+    // X: conv output [N][pC] (x at 0, B at pBo + group * pDs, C at pCo + group * pDs); dt raw at ZX[t * pLd + pDto + h].
+    s += ".visible .entry k_ssm_scan(.param .u64 pX, .param .u64 pZX, .param .u64 pDtb, .param .u64 pA, .param .u64 pD, .param .u64 pS, .param .u64 pY,"
+         " .param .u32 pN, .param .u32 pC, .param .u32 pLd, .param .u32 pDto, .param .u32 pDi, .param .u32 pDs, .param .u32 pHdim, .param .u32 pHpg, .param .u32 pBo, .param .u32 pCo)\n{\n"
+         " .reg .pred %p<6>; .reg .b32 %r<40>; .reg .f32 %f<24>; .reg .b64 %rd<24>; .shared .align 4 .f32 red[8];\n"
+         " ld.param.u64 %rd1,[pX]; ld.param.u64 %rd2,[pZX]; ld.param.u64 %rd3,[pDtb]; ld.param.u64 %rd4,[pA]; ld.param.u64 %rd5,[pD]; ld.param.u64 %rd6,[pS]; ld.param.u64 %rd7,[pY];\n"
+         " ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pC]; ld.param.u32 %r3,[pLd]; ld.param.u32 %r4,[pDto]; ld.param.u32 %r5,[pDi]; ld.param.u32 %r6,[pDs]; ld.param.u32 %r7,[pHdim]; ld.param.u32 %r8,[pHpg];\n"
+         " ld.param.u32 %r30,[pBo]; ld.param.u32 %r31,[pCo];\n"
+         " mov.u32 %r9,%tid.x; rem.u32 %r10,%r9,%r6; div.u32 %r11,%r9,%r6;\n"                 // n, row in block
+         " div.u32 %r12,256,%r6; mov.u32 %r13,%ctaid.x; mad.lo.u32 %r14,%r13,%r12,%r11;\n"    // row
+         " div.u32 %r15,%r14,%r7; div.u32 %r16,%r15,%r8; mul.lo.u32 %r16,%r16,%r6; add.u32 %r16,%r16,%r10;\n"   // h; group * ds + n
+         " add.u32 %r32,%r30,%r16; add.u32 %r33,%r31,%r16;\n"                                   // B, C columns
+         " mad.lo.u32 %r17,%r14,%r6,%r10; mul.wide.u32 %rd8,%r17,4; add.u64 %rd8,%rd6,%rd8; ld.global.f32 %f1,[%rd8];\n"   // state
+         " mul.wide.u32 %rd9,%r15,4; add.u64 %rd10,%rd3,%rd9; ld.global.f32 %f2,[%rd10]; add.u64 %rd11,%rd4,%rd9; ld.global.f32 %f3,[%rd11]; add.u64 %rd12,%rd5,%rd9; ld.global.f32 %f4,[%rd12];\n"   // dtb, A, D
+         " mul.f32 %f3,%f3,0f3FB8AA3B;\n"                                                       // A * log2(e)
+         " and.b32 %r18,%r9,31; setp.eq.u32 %p2,%r18,0; shr.u32 %r19,%r10,5; shr.u32 %r20,%r6,5; mad.lo.u32 %r21,%r11,%r20,%r19; mov.u32 %r22,red; shl.b32 %r21,%r21,2; add.u32 %r21,%r22,%r21;\n"
+         " mul.lo.u32 %r23,%r11,%r20; shl.b32 %r23,%r23,2; add.u32 %r23,%r22,%r23; setp.eq.u32 %p3,%r10,0;\n"
+         " mov.u32 %r24,0;\n"
+         "LT:\n setp.ge.u32 %p1,%r24,%r1; @%p1 bra ET;\n"
+         " mad.lo.u32 %r25,%r24,%r3,%r4; add.u32 %r25,%r25,%r15; mul.wide.u32 %rd13,%r25,4; add.u64 %rd13,%rd2,%rd13; ld.global.f32 %f5,[%rd13]; add.f32 %f5,%f5,%f2;\n"
+         " mul.f32 %f6,%f5,0f3FB8AA3B; ex2.approx.f32 %f6,%f6; add.f32 %f6,%f6,0f3F800000; lg2.approx.f32 %f6,%f6; mul.f32 %f6,%f6,0f3F317218; setp.gt.f32 %p4,%f5,0f41A00000; selp.f32 %f5,%f5,%f6,%p4;\n"   // softplus
+         " mul.f32 %f7,%f5,%f3; ex2.approx.f32 %f7,%f7;\n"                                      // dA
+         " mul.lo.u32 %r26,%r24,%r2; add.u32 %r27,%r26,%r14; mul.wide.u32 %rd14,%r27,4; add.u64 %rd14,%rd1,%rd14; ld.global.f32 %f8,[%rd14];\n"   // x
+         " add.u32 %r28,%r26,%r32; mul.wide.u32 %rd15,%r28,4; add.u64 %rd15,%rd1,%rd15; ld.global.f32 %f9,[%rd15];\n"   // B
+         " add.u32 %r29,%r26,%r33; mul.wide.u32 %rd16,%r29,4; add.u64 %rd16,%rd1,%rd16; ld.global.f32 %f10,[%rd16];\n" // C
+         " mul.f32 %f11,%f5,%f8; mul.f32 %f11,%f11,%f9; fma.rn.f32 %f1,%f1,%f7,%f11; mul.f32 %f12,%f1,%f10;\n"
+         " shfl.sync.bfly.b32 %f13,%f12,16,31,0xffffffff; add.f32 %f12,%f12,%f13; shfl.sync.bfly.b32 %f13,%f12,8,31,0xffffffff; add.f32 %f12,%f12,%f13;\n"
+         " shfl.sync.bfly.b32 %f13,%f12,4,31,0xffffffff; add.f32 %f12,%f12,%f13; shfl.sync.bfly.b32 %f13,%f12,2,31,0xffffffff; add.f32 %f12,%f12,%f13;\n"
+         " shfl.sync.bfly.b32 %f13,%f12,1,31,0xffffffff; add.f32 %f12,%f12,%f13;\n"
+         " @%p2 st.shared.f32 [%r21],%f12; bar.sync 0;\n"
+         " @!%p3 bra NW; mov.f32 %f14,0f00000000; mov.u32 %r34,0;\n"
+         "LS:\n setp.ge.u32 %p5,%r34,%r20; @%p5 bra ES; shl.b32 %r35,%r34,2; add.u32 %r35,%r23,%r35; ld.shared.f32 %f15,[%r35]; add.f32 %f14,%f14,%f15; add.u32 %r34,%r34,1; bra LS;\nES:\n"
+         " fma.rn.f32 %f14,%f4,%f8,%f14; mad.lo.u32 %r36,%r24,%r5,%r14; mul.wide.u32 %rd17,%r36,4; add.u64 %rd17,%rd7,%rd17; st.global.f32 [%rd17],%f14;\n"
+         "NW:\n bar.sync 0; add.u32 %r24,%r24,1; bra LT;\nET:\n"
+         " st.global.f32 [%rd8],%f1;\n ret;\n}\n";
+    // k_ssm_gnorm: grid (groups, N), 256 threads: y *= silu(z), then RMS over the group * weight.
+    s += ".visible .entry k_ssm_gnorm(.param .u64 pY, .param .u64 pZX, .param .u64 pW, .param .u32 pDi, .param .u32 pLd, .param .u32 pGs, .param .f32 pE)\n{\n"
+         " .reg .pred %p<4>; .reg .b32 %r<24>; .reg .f32 %f<16>; .reg .b64 %rd<16>; .shared .align 4 .f32 red[8];\n"
+         " ld.param.u64 %rd1,[pY]; ld.param.u64 %rd2,[pZX]; ld.param.u64 %rd3,[pW]; ld.param.u32 %r1,[pDi]; ld.param.u32 %r2,[pLd]; ld.param.u32 %r3,[pGs]; ld.param.f32 %f1,[pE];\n"
+         " mov.u32 %r4,%ctaid.x; mov.u32 %r5,%ctaid.y; mov.u32 %r6,%tid.x; mul.lo.u32 %r7,%r4,%r3;\n"   // group start
+         " mul.lo.u32 %r8,%r5,%r1; mul.lo.u32 %r9,%r5,%r2; mov.f32 %f2,0f00000000; mov.u32 %r10,%r6;\n"
+         "L1:\n setp.ge.u32 %p1,%r10,%r3; @%p1 bra E1;\n"
+         " add.u32 %r11,%r7,%r10; add.u32 %r12,%r8,%r11; mul.wide.u32 %rd4,%r12,4; add.u64 %rd4,%rd1,%rd4; ld.global.f32 %f3,[%rd4];\n"
+         " add.u32 %r13,%r9,%r11; mul.wide.u32 %rd5,%r13,4; add.u64 %rd5,%rd2,%rd5; ld.global.f32 %f4,[%rd5];\n"
+         " mul.f32 %f5,%f4,0fBFB8AA3B; ex2.approx.f32 %f5,%f5; add.f32 %f5,%f5,0f3F800000; div.approx.f32 %f4,%f4,%f5; mul.f32 %f3,%f3,%f4; st.global.f32 [%rd4],%f3;\n"
+         " fma.rn.f32 %f2,%f3,%f3,%f2; add.u32 %r10,%r10,256; bra L1;\nE1:\n"
+         " shfl.sync.bfly.b32 %f6,%f2,16,31,0xffffffff; add.f32 %f2,%f2,%f6; shfl.sync.bfly.b32 %f6,%f2,8,31,0xffffffff; add.f32 %f2,%f2,%f6;\n"
+         " shfl.sync.bfly.b32 %f6,%f2,4,31,0xffffffff; add.f32 %f2,%f2,%f6; shfl.sync.bfly.b32 %f6,%f2,2,31,0xffffffff; add.f32 %f2,%f2,%f6; shfl.sync.bfly.b32 %f6,%f2,1,31,0xffffffff; add.f32 %f2,%f2,%f6;\n"
+         " and.b32 %r14,%r6,31; setp.eq.u32 %p2,%r14,0; shr.u32 %r15,%r6,5; mov.u32 %r16,red; shl.b32 %r17,%r15,2; add.u32 %r17,%r16,%r17; @%p2 st.shared.f32 [%r17],%f2; bar.sync 0;\n"
+         " ld.shared.f32 %f2,[%r16]; ld.shared.f32 %f7,[%r16+4]; add.f32 %f2,%f2,%f7; ld.shared.f32 %f7,[%r16+8]; add.f32 %f2,%f2,%f7; ld.shared.f32 %f7,[%r16+12]; add.f32 %f2,%f2,%f7;\n"
+         " ld.shared.f32 %f7,[%r16+16]; add.f32 %f2,%f2,%f7; ld.shared.f32 %f7,[%r16+20]; add.f32 %f2,%f2,%f7; ld.shared.f32 %f7,[%r16+24]; add.f32 %f2,%f2,%f7; ld.shared.f32 %f7,[%r16+28]; add.f32 %f2,%f2,%f7;\n"
+         " cvt.rn.f32.u32 %f8,%r3; div.rn.f32 %f2,%f2,%f8; add.f32 %f2,%f2,%f1; rsqrt.approx.f32 %f2,%f2; mov.u32 %r10,%r6;\n"
+         "L2:\n setp.ge.u32 %p1,%r10,%r3; @%p1 bra E2;\n"
+         " add.u32 %r11,%r7,%r10; add.u32 %r12,%r8,%r11; mul.wide.u32 %rd4,%r12,4; add.u64 %rd4,%rd1,%rd4; ld.global.f32 %f3,[%rd4];\n"
+         " mul.wide.u32 %rd6,%r11,4; add.u64 %rd6,%rd3,%rd6; ld.global.f32 %f9,[%rd6]; mul.f32 %f3,%f3,%f2; mul.f32 %f3,%f3,%f9; st.global.f32 [%rd4],%f3;\n"
+         " add.u32 %r10,%r10,256; bra L2;\nE2:\n ret;\n}\n";
+    // y[r*W+c] *= sigmoid(g[r*GS+c]): Qwen3.5 attention output gate
+    s += ew("k_sigmul", ".param .u64 pY, .param .u64 pG, .param .u32 pW, .param .u32 pGS",
+            " ld.param.u64 %rd1,[pY]; ld.param.u64 %rd2,[pG]; ld.param.u32 %r7,[pW]; ld.param.u32 %r8,[pGS];\n",
+            " div.u32 %r9,%r5,%r7; mul.lo.u32 %r10,%r9,%r7; sub.u32 %r10,%r5,%r10; mad.lo.u32 %r11,%r9,%r8,%r10;\n"
+            " mul.wide.u32 %rd3,%r11,4; add.u64 %rd3,%rd2,%rd3; ld.global.f32 %f2,[%rd3]; mul.f32 %f2,%f2,0fBFB8AA3B; ex2.approx.f32 %f2,%f2; add.f32 %f2,%f2,0f3F800000;\n"
+            " mul.wide.u32 %rd4,%r5,4; add.u64 %rd4,%rd1,%rd4; ld.global.f32 %f3,[%rd4]; div.approx.f32 %f3,%f3,%f2; st.global.f32 [%rd4],%f3;\n");
     // dst[r] = the expert of grouped row r: the last e with off[e] <= r (off: E + 1 row offsets)
     s += ew("k_rowexp", ".param .u64 pD, .param .u64 pOff, .param .u32 pE",
             " ld.param.u64 %rd1,[pD]; ld.param.u64 %rd2,[pOff]; ld.param.u32 %r7,[pE];\n",
