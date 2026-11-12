@@ -121,7 +121,7 @@ private:
     std::vector<float> vec(const std::string& name);
 
     bool loaded_ = false;
-    uint64_t dW16_ = 0; size_t w16_cap_ = 0;   // Q8_0 copy of one IQ matrix while a prompt runs through it
+    uint64_t dW16_ = 0; size_t w16_cap_ = 0; int64_t w16_plan_ = 0;   // Q8_0 copy of one IQ matrix while a prompt runs through it
     struct Parked { Lin* l; void* host; size_t bytes; };
     std::vector<Parked> parked_;
     int64_t parked_bytes_ = 0;

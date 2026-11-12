@@ -40,6 +40,8 @@ static size_t gpu_cost(const Lin& l) {
     return (size_t)l.rows * (l.cols / 32) * 36 + 256;  // CPU-repacked Q8 layout
 }
 
+int iq_index(int gtype);
+static const int kExpChunk = 8;   // IQ experts converted to Q8_0 this many at a time for prompts
 bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) {
     unload();
     double t0 = now_sec();
@@ -204,7 +206,11 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         int64_t act = (int64_t)gpu_batch_ * 4 * ((int64_t)hp.n_embd * 2 + hp.n_head * hp.hd * 2 + kvd * 2 + hp.n_ff * 3 +
                       std::max<int64_t>({hp.n_embd, hp.n_head * hp.hd + 2 * (int64_t)kvd, 2ll * hp.n_ff}) + hp.n_rot) +
                       (int64_t)sc_rows_ * hp.n_head * ctx * 4 + hp.n_vocab * 4ll;
-        vram_budget -= act + (64ll << 20);
+        w16_plan_ = 0;
+        for (auto& L : layers_)   // IQ / MXFP4 experts: prompts convert one stacked matrix at a time to Q8_0 (scratch)
+            for (Lin* l : {&L.gate_exps, &L.up_exps, &L.down_exps})
+                if (l->t && iq_index(l->t->type) >= 0) w16_plan_ = std::max<int64_t>(w16_plan_, (int64_t)l->rows / hp.n_expert * kExpChunk * (l->cols / 32) * 34 + 256);
+        vram_budget -= act + w16_plan_ + (64ll << 20);
         if (o.vram_mb < 0) {   // a model that only misses by the headroom runs all on the GPU with a smaller one (a layer on the CPU halves the speed)
             int64_t need = gpu_cost(out_);
             for (auto& L : layers_) { for (Lin* l : L.lins()) need += gpu_cost(*l); need += (int64_t)ctx * kv_pos_bytes(); }
@@ -719,20 +725,42 @@ bool Model::moe_grouped(Layer& L, int n) {
     CudaTier& cu = cuda();
     const int E = hp.n_expert, K = std::min(hp.n_expert_used, E);
     unsigned d = hp.n_embd, ff = hp.n_ff_exp, tot = (unsigned)(n * K);
-    // check first: the router kernel overwrites the logits, so a fallback after it would route wrongly
-    if (!gx().can_group(L.gate_exps.gkind) || !gx().can_group(L.up_exps.gkind) || !gx().can_group(L.down_exps.gkind)) return false;
+    // check first: the router kernel overwrites the logits, so a fallback after it would route wrongly.
+    // IQ / MXFP4 experts: each stacked matrix goes to the Q8_0 layout once (scratch dW16_), then the same grouped kernels.
+    auto ok_kind = [&](const Lin& l) { return l.gkind >= CudaTier::K_IQ ? gx().can_group(CudaTier::K_Q8_0) : gx().can_group(l.gkind); };
+    if (!ok_kind(L.gate_exps) || !ok_kind(L.up_exps) || !ok_kind(L.down_exps)) return false;
+    for (const Lin* l : {&L.gate_exps, &L.up_exps, &L.down_exps})
+        if (l->gkind >= CudaTier::K_IQ) {
+            const size_t nblk = (size_t)l->rows / E * std::min(E, kExpChunk) * (l->cols / 32), need = (nblk * 2 + 255) / 256 * 256 + nblk * 32;
+            if (need > w16_cap_) { cu.sync(); if (dW16_) cu.free(dW16_); dW16_ = cu.alloc(need); w16_cap_ = dW16_ ? need : 0; }
+            if (!dW16_) return false;
+        }
     if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
     auto grouped = [&](const Lin& l, uint64_t x, unsigned K_, unsigned N, uint64_t y, bool same_x) {
         const size_t nb = l.cols / 32, R = l.rows / E;
+        if (l.gkind >= CudaTier::K_IQ) {   // a few experts at a time through the Q8_0 scratch (rows come from the absolute offsets)
+            const size_t rb = gtype_row_bytes(l.t->type, l.cols);
+            for (int e0 = 0; e0 < E; e0 += kExpChunk) {
+                const int c = std::min(kExpChunk, E - e0);
+                const size_t nblk = (size_t)c * R * nb, qo = (nblk * 2 + 255) / 256 * 256;
+                if (!cu.iq_to_q8(l.dptr.load() + (uint64_t)e0 * R * rb, l.gkind, l.cols, (int)(c * R), dW16_, dW16_ + qo) ||
+                    !gx().linear_quant_grouped(x, tot, K_, dW16_, dW16_ + qo, CudaTier::K_Q8_0, N, y, dOff_ + (uint64_t)e0 * 4, c, n, R * nb * 2, R * nb * 32, same_x || e0 > 0))
+                    return false;
+            }
+            return true;
+        }
         const size_t qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
         uint64_t S = l.dptr.load();
         return gx().linear_quant_grouped(x, tot, K_, S, S + l.gqoff, l.gkind, N, y, dOff_, E, n, CudaTier::scale_bytes(l.gkind, R * nb), R * nb * qb, same_x);
     };
     cu.ew(CudaTier::GATHER, tot * d, {&dXN_, &dSI_, &dMG_, &d});
+    if (L.d_bgate) { unsigned ue = E; cu.ew(CudaTier::ROWEXP, tot, {&dIdx_, &dOff_, &ue}); }   // expert of each grouped row, for the biases
     if (!grouped(L.gate_exps, dMG_, d, ff, dMF1_, false) || !grouped(L.up_exps, dMG_, d, ff, dMF2_, true)) return false;
-    const bool fused = gx().act_quantize(dMF1_, dMF2_, tot, ff, hp.gelu);
-    if (!fused) cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
+    if (L.d_bgate) { cu.ew(CudaTier::XBIAS, tot * ff, {&dMF1_, &L.d_bgate, &dIdx_, &ff}); cu.ew(CudaTier::XBIAS, tot * ff, {&dMF2_, &L.d_bup, &dIdx_, &ff}); }
+    const bool fused = !hp.oai && gx().act_quantize(dMF1_, dMF2_, tot, ff, hp.gelu);
+    if (!fused) cu.ew(hp.oai ? CudaTier::OAI : hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
     if (!grouped(L.down_exps, dMF1_, ff, d, dMT_, fused)) return false;
+    if (L.d_bdown) cu.ew(CudaTier::XBIAS, tot * d, {&dMT_, &L.d_bdown, &dIdx_, &d});
     cu.ew(CudaTier::SCATTER, tot * d, {&dX_, &dMT_, &dSI_, &dSW_, &d});
     return true;
 }

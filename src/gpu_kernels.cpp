@@ -294,6 +294,13 @@ std::string gpu_ops_ptx() {
             " mul.wide.u32 %rd3,%r8,4; add.u64 %rd3,%rd6,%rd3; ld.global.u32 %r10,[%rd3]; mad.lo.u32 %r10,%r10,%r7,%r9;\n"
             " mul.wide.u32 %rd4,%r10,4; add.u64 %rd4,%rd2,%rd4; ld.global.f32 %f2,[%rd4];\n"
             " mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd1,%rd5; ld.global.f32 %f3,[%rd5]; add.f32 %f3,%f3,%f2; st.global.f32 [%rd5],%f3;\n");
+    // dst[r] = the expert of grouped row r: the last e with off[e] <= r (off: E + 1 row offsets)
+    s += ew("k_rowexp", ".param .u64 pD, .param .u64 pOff, .param .u32 pE",
+            " ld.param.u64 %rd1,[pD]; ld.param.u64 %rd2,[pOff]; ld.param.u32 %r7,[pE];\n",
+            " mov.u32 %r8,0; mov.u32 %r9,1;\n"
+            "RE:\n setp.ge.u32 %p2,%r9,%r7; @%p2 bra RD;\n"
+            " mul.wide.u32 %rd3,%r9,4; add.u64 %rd3,%rd2,%rd3; ld.global.u32 %r10,[%rd3]; setp.le.u32 %p3,%r10,%r5; @%p3 mov.u32 %r8,%r9; add.u32 %r9,%r9,1; bra RE;\n"
+            "RD:\n mul.wide.u32 %rd4,%r5,4; add.u64 %rd4,%rd1,%rd4; st.global.u32 [%rd4],%r8;\n");
     // dst[r*D+c] = src[idx[r]*D+c]
     s += ew("k_gather", ".param .u64 pS, .param .u64 pI, .param .u64 pD, .param .u32 pDim",
             " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pI]; ld.param.u64 %rd6,[pD]; ld.param.u32 %r7,[pDim];\n",

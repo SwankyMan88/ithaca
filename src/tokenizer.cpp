@@ -72,7 +72,8 @@ bool Tokenizer::is_stop(int id) const {
         const std::string& t = tokens_[id];
         return t == "<|im_end|>" || t == "<|eot_id|>" || t == "<|end|>" || t == "<|endoftext|>" || t == "<|end_of_text|>";
     }
-    return id != bos;
+    // A BOS the model would never start with (Qwen: bos = <|endoftext|>, add_bos off) is an end marker when generated.
+    return id != bos || !add_bos || tokens_[id] == "<|endoftext|>";
 }
 
 std::string Tokenizer::piece(int id) const {
