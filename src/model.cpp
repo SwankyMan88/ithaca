@@ -52,7 +52,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.arch = g_.gets("general.architecture");
     hp.name = g_.gets("general.name", "model");
     const std::string& a = hp.arch;
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35", "qwen2moe", "deepseek2"};
     if (std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* s) { return a == s; }) == std::end(ok_arch)) {
         err = "architecture '" + a + "' is not supported yet (supported: llama, mistral, mixtral, qwen2, qwen2.5-vl text, qwen3, qwen3-moe, phi3/phi4, granite, granite-moe, gemma3, gpt-oss)";
         g_.close(); return false;
@@ -71,7 +71,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.hd = (int)g_.geti(P + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
     hp.n_rot = (int)g_.geti(P + "rope.dimension_count", hp.hd);
     hp.ctx_train = (int)g_.geti(P + "context_length", 4096);
-    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3" || a == "gpt-oss" || a == "gemma2" || a == "olmo2" || a == "olmoe" || a == "lfm2" || a == "qwen35";
+    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3" || a == "gpt-oss" || a == "gemma2" || a == "olmo2" || a == "olmoe" || a == "lfm2" || a == "qwen35" || a == "qwen2moe";
     hp.n_expert = (int)g_.geti(P + "expert_count", 0);
     hp.n_expert_used = (int)g_.geti(P + "expert_used_count", 0);
     { const GValue* en = g_.find(P + "expert_weights_norm"); hp.expert_norm = en ? en->i != 0 : true; }
@@ -89,12 +89,23 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         hp.attn_softcap = (float)g_.getf(P + "attn_logit_softcapping", 0.0); hp.final_softcap = (float)g_.getf(P + "final_logit_softcapping", 0.0);
     }
     if (a == "smollm3") hp.nope_step = 4;
+    if (a == "deepseek2") {
+        // MLA: q / k heads are [nope | rope] (key_length), values value_length. Ithaca stores both padded to one
+        // 256-wide head laid out [rope | nope | 0], so the usual attention kernels and KV cache run it unchanged.
+        hp.mla_rank = (int)g_.geti(P + "attention.kv_lora_rank", 0); hp.mla_qlora = (int)g_.geti(P + "attention.q_lora_rank", 0);
+        hp.mla_v = (int)g_.geti(P + "attention.value_length", 0); hp.mla_nope = hp.hd - hp.n_rot;
+        if (hp.mla_rank <= 0 || hp.mla_v <= 0 || hp.hd > 256 || hp.mla_v > 256) { err = "unexpected DeepSeek attention shapes"; g_.close(); return false; }
+        hp.hd = 256; hp.n_kv = hp.n_head;
+        hp.exp_scale = (float)g_.getf(P + "expert_weights_scale", 1.0);
+        if (!g_.find(P + "expert_weights_norm")) hp.expert_norm = false;   // V2: top-k weights are not renormalized
+        if (g_.geti(P + "expert_gating_func", 1) == 2) { err = "DeepSeek V3-style sigmoid routing isn't supported yet"; g_.close(); return false; }
+    }
     if (a == "qwen35") {   // Gated DeltaNet + gated attention (3:1)
         hp.ssm_inner = (int)g_.geti(P + "ssm.inner_size", 0); hp.ssm_state = (int)g_.geti(P + "ssm.state_size", 0);
         hp.ssm_groups = (int)g_.geti(P + "ssm.group_count", 1); hp.ssm_heads = (int)g_.geti(P + "ssm.time_step_rank", 0); hp.ssm_conv = (int)g_.geti(P + "ssm.conv_kernel", 4);
     }
     if (a == "olmo2") hp.no_prenorm = true;
-    if (a == "olmoe") hp.expert_norm = false;   // top-k weights are not renormalized
+    if ((a == "olmoe" || a == "qwen2moe") && !g_.find(P + "expert_weights_norm")) hp.expert_norm = false;   // top-k weights are not renormalized   // top-k weights are not renormalized
     if (a == "gpt-oss") {   // every other layer (from the first) has a 128-token window; same RoPE on both kinds
         hp.oai = true;
         hp.swa_window = (int)g_.geti(P + "attention.sliding_window", 0); if (getenv("ITHACA_NO_SWA")) hp.swa_window = 0;
@@ -123,6 +134,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     if (out_norm_.empty()) out_norm_ = vec("token_embd_norm.weight");   // LFM2 keeps its final norm under this name
 
     layers_ = std::vector<Layer>(hp.n_layer);
+    int ff_max = 0;   // widest dense FFN (layers may differ: DeepSeek's dense first layer, shared experts)
     for (int i = 0; i < hp.n_layer; i++) {
         Layer& L = layers_[i];
         std::string b = "blk." + std::to_string(i) + ".";
@@ -166,6 +178,17 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
             L.conv_st.assign((hp.ssm_conv - 1) * xbc, 0.f); L.ssm_st.assign((size_t)hp.ssm_inner * hp.ssm_state, 0.f);
             recurrent_ = true;
         }
+        else if (g_.get(b + "attn_kv_a_mqa.weight")) {   // DeepSeek V2 multi-head latent attention
+            if (!g_.get(b + "attn_kv_b.weight")) { err = "this DeepSeek file splits attn_kv_b (newer converter); not supported yet"; ok = false; }
+            ok = ok && bind(L.kva, b + "attn_kv_a_mqa.weight", err) && bind(L.kvb, b + "attn_kv_b.weight", err) &&
+                 (g_.get(b + "attn_q_a.weight") ? bind(L.qa, b + "attn_q_a.weight", err) && bind(L.qb, b + "attn_q_b.weight", err) : bind(L.q, b + "attn_q.weight", err));
+            L.kva_norm = vec(b + "attn_kv_a_norm.weight"); L.qa_norm = vec(b + "attn_q_a_norm.weight");
+            const int nh = hp.n_head, qk = hp.mla_nope + hp.n_rot;
+            if (ok && (L.kva.rows != hp.mla_rank + hp.n_rot || L.kvb.cols != hp.mla_rank || L.kvb.rows != nh * (hp.mla_nope + hp.mla_v) ||
+                       (L.q.t ? L.q.rows : L.qb.rows) != nh * qk || (int)L.kva_norm.size() != hp.mla_rank || (L.qa.t && (int)L.qa_norm.size() != L.qa.rows))) {
+                err = "unexpected DeepSeek attention shapes"; ok = false;
+            }
+        }
         else if (g_.get(b + "attn_qkv.weight")) ok &= bind(L.qkv, b + "attn_qkv.weight", err);
         else ok &= bind(L.q, b + "attn_q.weight", err) && bind(L.k, b + "attn_k.weight", err) && bind(L.v, b + "attn_v.weight", err);
         if (!L.ssm_in.t) ok = ok && bind(L.o, b + "attn_output.weight", err);
@@ -174,7 +197,11 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
             if (hp.n_expert < 1 || hp.n_expert_used < 1) { err = "MoE model without expert counts"; ok = false; }
             ok = ok && bind(L.gate_inp, b + "ffn_gate_inp.weight", err) && bind(L.gate_exps, b + "ffn_gate_exps.weight", err) &&
                  bind(L.up_exps, b + "ffn_up_exps.weight", err) && bind(L.down_exps, b + "ffn_down_exps.weight", err);
-            if (ok && g_.get(b + "ffn_gate_inp_shexp.weight")) { err = "MoE models with shared experts (Qwen2-MoE) aren't supported yet"; ok = false; }
+            if (ok && g_.get(b + "ffn_gate_shexp.weight")) {   // shared experts: a dense FFN beside the routed ones (Qwen2-MoE gates it)
+                ok = bind(L.gate, b + "ffn_gate_shexp.weight", err) && bind(L.up, b + "ffn_up_shexp.weight", err) && bind(L.down, b + "ffn_down_shexp.weight", err);
+                L.shg = vec(b + "ffn_gate_inp_shexp.weight"); L.shexp = true;
+                if (ok && !L.shg.empty() && (int)L.shg.size() != hp.n_embd) { err = "unexpected shared-expert gate"; ok = false; }
+            }
         } else {
             ok = ok && bind(L.down, b + "ffn_down.weight", err);
             if (ok && g_.get(b + "ffn_gate.weight")) ok = bind(L.gate, b + "ffn_gate.weight", err) && bind(L.up, b + "ffn_up.weight", err);
@@ -193,12 +220,12 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
             if (!L.lo || l->t->data < L.lo) L.lo = l->t->data;
             if (l->t->data + l->t->nbytes > L.hi) L.hi = l->t->data + l->t->nbytes;
         }
-        if (L.gate_exps.t) { hp.n_ff_exp = L.gate_exps.rows / hp.n_expert; moe_ = true; }
-        else if (L.gateup.t) hp.n_ff = L.gateup.rows / 2;
-        else hp.n_ff = L.gate.rows;
+        if (L.gate_exps.t) { hp.n_ff_exp = L.gate_exps.rows / hp.n_expert; moe_ = true; if (L.gate.t) ff_max = std::max(ff_max, L.gate.rows); }
+        else if (L.gateup.t) ff_max = std::max(ff_max, L.gateup.rows / 2);
+        else ff_max = std::max(ff_max, L.gate.rows);
     }
 
-    hp.n_ff = std::max(hp.n_ff, hp.n_ff_exp);
+    hp.n_ff = std::max(ff_max > 0 ? ff_max : hp.n_ff, hp.n_ff_exp);
     inv_freq_.resize(hp.n_rot / 2); inv_freq_swa_.resize(hp.n_rot / 2);
     std::vector<float> factors = vec("rope_freqs.weight");
     float rscale = g_.gets(P + "rope.scaling.type") == "linear" ? (float)g_.getf(P + "rope.scaling.factor", 1.0) : 1.f;
@@ -214,13 +241,19 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         const double f = g_.getf(P + "rope.scaling.factor", 1.0), orig = g_.getf(P + "rope.scaling.original_context_length", 4096.0);
         const double bf = g_.getf(P + "rope.scaling.yarn_beta_fast", 32.0), bs = g_.getf(P + "rope.scaling.yarn_beta_slow", 1.0), dim = hp.n_rot;
         auto corr = [&](double b) { return dim * std::log(orig / (b * 2 * 3.14159265358979)) / (2 * std::log((double)hp.rope_base)); };
-        double lo = std::max(0.0, corr(bf)), hi = std::min(dim / 2 - 1, corr(bs)); if (hi <= lo) hi = lo + 0.001;
+        double lo = std::max(0.0, std::floor(corr(bf))), hi = std::min(dim - 1, std::ceil(corr(bs))); if (hi <= lo) hi = lo + 0.001;
         for (int i = 0; i < hp.n_rot / 2; i++) {
             const double fr = std::pow((double)hp.rope_base, -2.0 * i / dim), ramp = std::min(1.0, std::max(0.0, (i - lo) / (hi - lo)));
             inv_freq_[i] = inv_freq_swa_[i] = (float)(fr / f * ramp + fr * (1 - ramp));
         }
         const double ms = f > 1 ? 1 + 0.1 * std::log(f) : 1;
         hp.attn_scale = (float)(ms * ms / std::sqrt((double)hp.hd));
+    }
+    if (hp.mla_rank) {   // llama.cpp: the score scale is mscale^2 / sqrt(qk head size), mscale = 1 + log_mul ln(factor)
+        const double f = g_.gets(P + "rope.scaling.type") == "yarn" ? g_.getf(P + "rope.scaling.factor", 1.0) : 1.0;
+        const double lm = g_.getf(P + "rope.scaling.yarn_log_multiplier", 0.0);
+        const double ms = f > 1 ? 1 + lm * std::log(f) : 1;
+        hp.attn_scale = (float)(ms * ms / std::sqrt((double)(hp.mla_nope + hp.n_rot)));
     }
 
     ctx = std::max(256, std::min(o.ctx, hp.ctx_train > 0 ? hp.ctx_train : o.ctx));
@@ -398,6 +431,7 @@ void Model::tier_thread() {
         if (ok && dev_ok_) {
             L.d_an = dev_vec(L.attn_norm); L.d_fn = dev_vec(L.ffn_norm);
             L.d_qn = dev_vec(L.q_norm); L.d_kn = dev_vec(L.k_norm);
+            L.d_qan = dev_vec(L.qa_norm); L.d_kvan = dev_vec(L.kva_norm); L.d_shg = dev_vec(L.shg);
             L.d_bq = dev_vec(L.bq); L.d_bk = dev_vec(L.bk); L.d_bv = dev_vec(L.bv);
             L.d_pan = dev_vec(L.post_attn_norm); L.d_pfn = dev_vec(L.post_ffn_norm);
             L.d_convw = dev_vec(L.conv_w); L.d_convb = dev_vec(L.conv_b); L.d_ssma = dev_vec(L.ssm_a); L.d_ssmd = dev_vec(L.ssm_d);
@@ -550,6 +584,11 @@ void Model::ensure_buffers(int n) {
     tmp_.resize(n * std::max({d, qd + 2 * kvd, 2 * ff}));
     logits_.resize(hp.n_vocab);
     qbuf_.resize(n * (std::max({d, qd, ff}) / 32 + 1));
+    if (hp.mla_rank) {
+        const size_t nh = hp.n_head;
+        ml1_.resize(n * nh * std::max(hp.mla_nope + hp.n_rot, hp.mla_v)); ml2_.resize(n * (size_t)(hp.mla_rank + hp.n_rot));
+        ml3_.resize(n * (size_t)std::max(hp.mla_rank, hp.mla_qlora)); ml4_.resize(n * nh * (hp.mla_nope + hp.mla_v));
+    }
 }
 
 void Model::matmul(Lin& w, const float* X, int n, float* Y) {
@@ -626,6 +665,11 @@ bool Model::alloc_dev_buffers() {
         {&dSC_, (size_t)sc_rows_ * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
         {&dR_, B * (size_t)std::max(1, hp.n_expert)}, {&dG_, B * d}, {&dIdx_, B * (size_t)std::max(1, hp.n_expert_used)}, {&dWt_, B * (size_t)std::max(1, hp.n_expert_used)},
         {&dPM_, (size_t)hp.n_head * 16}, {&dPL_, (size_t)hp.n_head * 16}, {&dPO_, (size_t)hp.n_head * 16 * hp.hd}};
+    if (hp.mla_rank) {
+        const size_t nh = hp.n_head;
+        struct { uint64_t* p; size_t n; } mb[] = {{&dML1_, B * nh * std::max(hp.mla_nope + hp.n_rot, hp.mla_v)}, {&dML2_, B * (hp.mla_rank + hp.n_rot)}, {&dML3_, B * std::max(hp.mla_rank, hp.mla_qlora)}};
+        for (auto& b : mb) { *b.p = cuda().alloc(b.n * 4); if (!*b.p) return false; dev_allocs_.push_back(*b.p); }
+    }
     if (recurrent_) {
         const size_t xbc = hp.ssm_inner + 2 * hp.ssm_groups * hp.ssm_state, tot = std::max<size_t>(hp.ssm_inner + xbc + hp.ssm_heads, 3 * d);
         struct { uint64_t* p; size_t n; } sb[] = {{&dZX_, B * tot}, {&dXC_, B * std::max<size_t>(xbc, 1)}, {&dSY_, B * std::max<size_t>(hp.ssm_inner, d)}};
@@ -837,7 +881,7 @@ void Model::moe_cpu(Layer& L, int n) {
         matmul_raw(L.down_exps.t->type, L.down_exps.t->data + e * ed, d, ff, ff1_.data(), c, tmp_.data());
         bias(L.b_down, e, tmp_.data(), c, d);
         for (int i = 0; i < c; i++) {
-            float w = pe[e][i].second * hp.res_scale;
+            float w = pe[e][i].second * hp.res_scale * hp.exp_scale;
             float* xr = &x_[(size_t)pe[e][i].first * d]; const float* yr = &tmp_[(size_t)i * d];
             for (int j = 0; j < d; j++) xr[j] += w * yr[j];
         }
@@ -865,7 +909,7 @@ void Model::moe_gpu(Layer& L, int n) {
     if (n == 1) {
         // Decode: route on the device and run the K experts as slots of one launch each (graph-capturable).
         const int K = std::min(hp.n_expert_used, E);
-        cu.topk(dR_, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_);
+        cu.topk(dR_, E, K, hp.expert_norm, hp.res_scale * hp.exp_scale, dIdx_, dWt_);
         cu.matmul_experts(L.gate_exps.dptr.load(), L.gate_exps.gqoff, L.gate_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF1_);
         cu.matmul_experts(L.up_exps.dptr.load(), L.up_exps.gqoff, L.up_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF2_);
         if (L.d_bgate) { cu.ew(CudaTier::XBIAS, K * ff, {&dF1_, &L.d_bgate, &dIdx_, &ff}); cu.ew(CudaTier::XBIAS, K * ff, {&dF2_, &L.d_bup, &dIdx_, &ff}); }
@@ -882,7 +926,7 @@ void Model::moe_gpu(Layer& L, int n) {
     std::vector<uint32_t> idx; std::vector<float> w; std::vector<size_t> off(E + 1);
     for (int e = 0; e < E; e++) {
         off[e] = idx.size();
-        for (auto& p : pe[e]) { idx.push_back(p.first); w.push_back(p.second * hp.res_scale); }
+        for (auto& p : pe[e]) { idx.push_back(p.first); w.push_back(p.second * hp.res_scale * hp.exp_scale); }
     }
     off[E] = idx.size();
     if (idx.empty()) return;
@@ -922,7 +966,7 @@ bool Model::moe_grouped(Layer& L, int n) {
             if (need > w16_cap_) { cu.sync(); if (dW16_) cu.free(dW16_); dW16_ = cu.alloc(need); w16_cap_ = dW16_ ? need : 0; }
             if (!dW16_) return false;
         }
-    if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
+    if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale * hp.exp_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
     auto grouped = [&](const Lin& l, uint64_t x, unsigned K_, unsigned N, uint64_t y, bool same_x) {
         const size_t nb = l.cols / 32, R = l.rows / E;
         if (l.gkind >= CudaTier::K_IQ) {   // a few experts at a time through the Q8_0 scratch (rows come from the absolute offsets)
@@ -1027,6 +1071,49 @@ void Model::mamba_gpu(Layer& L, int n, bool same_x) {
     mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
 }
 
+// DeepSeek V2 multi-head latent attention, expanded: kv_a = W x -> latent (RMS-normed) + one shared RoPE key;
+// [k_nope | v] per head = W_kvb latent. Heads are written padded to hp.hd as [rope | nope | 0] (q and k) and
+// [v | 0], so RoPE (first n_rot dims), the KV cache and the attention kernels are the ordinary ones.
+void Model::mla_gpu(Layer& L, int n, bool same_x) {
+    CudaTier& cu = cuda();
+    unsigned un = n, nh = hp.n_head, hd = hp.hd, nope = hp.mla_nope, nr = hp.n_rot, vd = hp.mla_v, rank = hp.mla_rank, ka = rank + nr;
+    float eps = hp.eps;
+    mmq(L.kva.dptr.load(), L.kva.gqoff, L.kva.gkind, dXN_, n, L.kva.cols, L.kva.rows, dML2_, same_x);
+    if (L.qa.t) {
+        unsigned ql = L.qa.rows;
+        mmq(L.qa.dptr.load(), L.qa.gqoff, L.qa.gkind, dXN_, n, L.qa.cols, L.qa.rows, dML3_, true);
+        cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dML3_, &L.d_qan, &dML3_, &ql, &eps});
+        mmq(L.qb.dptr.load(), L.qb.gqoff, L.qb.gkind, dML3_, n, L.qb.cols, L.qb.rows, dML1_);
+    } else mmq(L.q.dptr.load(), L.q.gqoff, L.q.gkind, dXN_, n, L.q.cols, L.q.rows, dML1_, true);
+    cu.ew(CudaTier::COPY2D, un * rank, {&dML2_, &ka, &dML3_, &rank, &rank});
+    cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dML3_, &L.d_kvan, &dML3_, &rank, &eps});
+    mmq(L.kvb.dptr.load(), L.kvb.gqoff, L.kvb.gkind, dML3_, n, L.kvb.cols, L.kvb.rows, dT_);
+    cu.ew(CudaTier::MLA, un * nh * hd, {&dML1_, &dML2_, &dT_, &dQ_, &dK_, &dV_, &nh, &hd, &nope, &nr, &vd, &rank});
+}
+
+void Model::mla_cpu(Layer& L, int n) {
+    const int nh = hp.n_head, hd = hp.hd, nope = hp.mla_nope, nr = hp.n_rot, vd = hp.mla_v, rank = hp.mla_rank, ka = rank + nr, qk = nope + nr;
+    matmul(L.kva, xn_.data(), n, ml2_.data());
+    if (L.qa.t) {
+        matmul(L.qa, xn_.data(), n, ml3_.data());
+        rmsnorm(ml3_.data(), L.qa_norm.data(), ml3_.data(), n, L.qa.rows);
+        matmul(L.qb, ml3_.data(), n, ml1_.data());
+    } else matmul(L.q, xn_.data(), n, ml1_.data());
+    for (int t = 0; t < n; t++) memcpy(&ml3_[(size_t)t * rank], &ml2_[(size_t)t * ka], rank * 4);
+    rmsnorm(ml3_.data(), L.kva_norm.data(), ml3_.data(), n, rank);
+    matmul(L.kvb, ml3_.data(), n, ml4_.data());
+    std::fill(q_.begin(), q_.begin() + (size_t)n * nh * hd, 0.f); std::fill(k_.begin(), k_.begin() + (size_t)n * nh * hd, 0.f); std::fill(v_.begin(), v_.begin() + (size_t)n * nh * hd, 0.f);
+    for (int t = 0; t < n; t++)
+        for (int h = 0; h < nh; h++) {
+            const size_t th = (size_t)t * nh + h;
+            float* q = &q_[th * hd]; float* k = &k_[th * hd]; float* v = &v_[th * hd];
+            const float* qs = &ml1_[th * qk]; const float* kv = &ml4_[th * (nope + vd)];
+            memcpy(q, qs + nope, nr * 4); memcpy(q + nr, qs, nope * 4);
+            memcpy(k, &ml2_[(size_t)t * ka + rank], nr * 4); memcpy(k + nr, kv, nope * 4);
+            memcpy(v, kv + nope, vd * 4);
+        }
+}
+
 // Prompt batches go through the int8 tensor-core kernels; single tokens use the dp4a kernels.
 void Model::mmq(uint64_t W, uint64_t qoff, int kind, uint64_t x, int n, int cols, int rows, uint64_t y, bool same_x) {
     if (kind >= CudaTier::K_IQ && n >= 16 && tc_prefill_ && gx().can_mmq(CudaTier::K_Q8_0)) {
@@ -1073,7 +1160,8 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     }
     else if (L.ssm_in.t) mamba_gpu(L, n, fa);
     else {
-    if (L.qkv.t) {
+    if (L.kva.t) mla_gpu(L, n, fa);
+    else if (L.qkv.t) {
         mm(L.qkv, dXN_, dT_, fa);
         unsigned W = qd + 2 * kvd;
         uint64_t sk = dT_ + qd * 4ull, sv = dT_ + (qd + kvd) * 4ull;
@@ -1120,6 +1208,11 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
     if (ppn) { cu.sync(); t_attn += now_sec() - Ta; }
     if (L.qgate) { unsigned W2 = 2 * hd; uint64_t g = dT_ + (uint64_t)hd * 4; cu.ew(CudaTier::SIGMUL, un * qd, {&dATT_, &g, &hd, &W2}); }
+    if (L.kva.t) {   // MLA: the first value_length of each padded head
+        unsigned vd = hp.mla_v, nhv = un * nh;
+        cu.ew(CudaTier::COPY2D, nhv * vd, {&dATT_, &hd, &dML1_, &vd, &vd});
+        mm(L.o, dML1_, dT_);
+    } else
     mm(L.o, dATT_, dT_);
     if (L.d_bo) cu.ew(CudaTier::BIAS, un * d, {&dT_, &L.d_bo, &d});
     }
@@ -1134,7 +1227,17 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         if (hp.no_prenorm) cu.dtod(dXN_, dX_, (size_t)n * d * 4);
         else cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
     }
-    if (L.gate_exps.t) { moe_gpu(L, n); return; }
+    if (L.gate.t) ff = L.gate.rows; else if (L.gateup.t) ff = L.gateup.rows / 2;
+    if (L.gate_exps.t) {
+        if (L.shexp) {   // shared experts: dense SwiGLU on every token, (gated and) added, then the routed experts
+            mm(L.gate, dXN_, dF1_, fb); mm(L.up, dXN_, dF2_, true);
+            if (n >= 16 && tc_prefill_ && gx().can_mmq(L.down.gkind) && gx().act_quantize(dF1_, dF2_, n, ff, false)) mm(L.down, dF1_, dT_, true);
+            else { cu.ew(CudaTier::SILU, un * ff, {&dF1_, &dF2_}); mm(L.down, dF1_, dT_); }
+            if (L.d_shg) cu.launch(CudaTier::GADD, un, 1, 256, {&dX_, &dT_, &dXN_, &L.d_shg, &d, &res});
+            else cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
+        }
+        moe_gpu(L, n); return;
+    }
     if (L.gateup.t) {
         mm(L.gateup, dXN_, dT_, fb);
         cu.ew(CudaTier::SILU_SPLIT, un * ff, {&dT_, &dF1_, &ff});
@@ -1266,7 +1369,7 @@ const float* Model::eval(const int* toks, int n_all) {
         const unsigned nc = img ? (unsigned)n : 0;
         const int* tk = toks + c0;
         ensure_buffers(n);
-        const int d = hp.n_embd, hd = hp.hd, qd = hp.n_head * hd, kvd = hp.n_kv * hd, ff = hp.n_ff;
+        const int d = hp.n_embd, hd = hp.hd, qd = hp.n_head * hd, kvd = hp.n_kv * hd, ff_all = hp.n_ff;
         size_t erb = gtype_row_bytes(embd_->type, d);
         for (int t = 0; t < n; t++) {
             if (tk[t] < 0) {   // precomputed embedding (image): used as is, no embedding scale
@@ -1359,7 +1462,8 @@ const float* Model::eval(const int* toks, int n_all) {
             else if (L.sconv) sconv_cpu(L, n);
             else if (L.ssm_in.t) mamba_cpu(L, n);
             else {
-            if (L.qkv.t) {
+            if (L.kva.t) mla_cpu(L, n);
+            else if (L.qkv.t) {
                 matmul(L.qkv, xn_.data(), n, tmp_.data());
                 for (int t = 0; t < n; t++) {
                     const float* s = &tmp_[(size_t)t * (qd + 2 * kvd)];
@@ -1419,6 +1523,11 @@ const float* Model::eval(const int* toks, int n_all) {
             if (L.qgate)
                 for (int t = 0; t < n; t++) for (int h = 0; h < hp.n_head; h++) for (int i = 0; i < hd; i++)
                     att_[(size_t)t * qd + (size_t)h * hd + i] /= 1.f + std::exp(-qg_[(size_t)t * 2 * qd + (size_t)h * 2 * hd + hd + i]);
+            if (L.kva.t) {   // MLA: the first value_length of each padded head
+                const int vd = hp.mla_v;
+                for (size_t r = 0; r < (size_t)n * hp.n_head; r++) memcpy(&ml1_[r * vd], &att_[r * hd], vd * 4);
+                matmul(L.o, ml1_.data(), n, tmp_.data());
+            } else
             matmul(L.o, att_.data(), n, tmp_.data());
             if (!L.bo.empty()) for (int t = 0; t < n; t++) for (int i = 0; i < d; i++) tmp_[(size_t)t * d + i] += L.bo[i];
             }
@@ -1427,7 +1536,20 @@ const float* Model::eval(const int* toks, int n_all) {
 
             if (hp.no_prenorm) memcpy(xn_.data(), x_.data(), (size_t)n * d * 4);
             else rmsnorm(x_.data(), L.ffn_norm.data(), xn_.data(), n, d);
-            if (L.gate_exps.t) { moe_cpu(L, n); continue; }
+            const int ff = L.gate.t ? L.gate.rows : L.gateup.t ? L.gateup.rows / 2 : ff_all;
+            if (L.gate_exps.t) {
+                if (L.shexp) {   // shared experts: dense SwiGLU on every token, (gated and) added, then the routed experts
+                    matmul(L.gate, xn_.data(), n, ff1_.data()); matmul(L.up, xn_.data(), n, ff2_.data());
+                    for (size_t i = 0; i < (size_t)n * ff; i++) ff1_[i] = silu(ff1_[i]) * ff2_[i];
+                    matmul(L.down, ff1_.data(), n, tmp_.data());
+                    for (int t = 0; t < n; t++) {
+                        float g = hp.res_scale;
+                        if (!L.shg.empty()) { float s = 0; for (int i = 0; i < d; i++) s += xn_[(size_t)t * d + i] * L.shg[i]; g /= 1.f + std::exp(-s); }
+                        for (int i = 0; i < d; i++) x_[(size_t)t * d + i] += g * tmp_[(size_t)t * d + i];
+                    }
+                }
+                moe_cpu(L, n); continue;
+            }
             if (L.gateup.t) {
                 matmul(L.gateup, xn_.data(), n, tmp_.data());
                 for (int t = 0; t < n; t++)

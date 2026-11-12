@@ -37,12 +37,18 @@ struct Layer {
     Lin dn_z, dn_a, dn_b;   // Qwen3.5 Gated DeltaNet: output gate, decay (alpha) and write strength (beta) projections
     bool dnet = false, qgate = false;   // qgate: the q projection carries a sigmoid output gate per head
     std::vector<float> conv_w, conv_b, ssm_a, ssm_d, ssm_dtb, ssm_norm, conv_st, ssm_st;
-    std::array<Lin*, 18> lins() { return {&q, &k, &v, &o, &qkv, &gate, &up, &gateup, &down, &gate_inp, &gate_exps, &up_exps, &down_exps, &ssm_in, &ssm_out, &dn_z, &dn_a, &dn_b}; }
+    // DeepSeek V2 multi-head latent attention: KV down-projection (latent + shared RoPE key), its up-projection,
+    // and the optional low-rank q pair. MoE shared experts (Qwen2-MoE, DeepSeek) live in gate / up / down.
+    Lin qa, qb, kva, kvb;
+    std::vector<float> qa_norm, kva_norm, shg;   // shg: Qwen2-MoE's sigmoid gate on the shared expert
+    bool shexp = false;
+    std::array<Lin*, 22> lins() { return {&q, &k, &v, &o, &qkv, &gate, &up, &gateup, &down, &gate_inp, &gate_exps, &up_exps, &down_exps, &ssm_in, &ssm_out, &dn_z, &dn_a, &dn_b, &qa, &qb, &kva, &kvb}; }
     const uint8_t* lo = nullptr; const uint8_t* hi = nullptr;
     std::atomic<int> plan{TIER_DISK}, state{TIER_DISK};
     // VRAM-resident copies used when the whole layer runs on the GPU
     uint64_t d_an = 0, d_fn = 0, d_qn = 0, d_kn = 0, d_bq = 0, d_bk = 0, d_bv = 0, d_kc = 0, d_vc = 0, d_pan = 0, d_pfn = 0;
     uint64_t d_ks = 0, d_vs = 0;   // int8 KV cache: f32 scale per (position, kv head)
+    uint64_t d_qan = 0, d_kvan = 0, d_shg = 0;
     uint64_t d_bo = 0, d_sinks = 0, d_binp = 0, d_bgate = 0, d_bup = 0, d_bdown = 0;   // gpt-oss
     uint64_t d_convw = 0, d_convb = 0, d_ssma = 0, d_ssmd = 0, d_dtb = 0, d_ssmnorm = 0, d_convst = 0, d_ssmst = 0;   // Mamba-2 (state: in VRAM while the layer is)
     int kv_dev = 0;  // device KV cache valid for positions [0, kv_dev)
@@ -64,6 +70,8 @@ struct HParams {
     int nope_step = 0;   // SmolLM3: every nope_step-th layer has no RoPE
     bool no_prenorm = false;   // OLMo 2: only post-norms
     float attn_softcap = 0, final_softcap = 0;   // Gemma 2: cap * tanh(x / cap) on attention scores / output logits
+    int mla_rank = 0, mla_nope = 0, mla_v = 0, mla_qlora = 0;   // DeepSeek V2: latent size, non-RoPE key part, value size, q rank
+    float exp_scale = 1.f;   // routed expert weights are multiplied by this
     int ssm_inner = 0, ssm_state = 0, ssm_groups = 1, ssm_heads = 0, ssm_conv = 0;   // Mamba-2   // gpt-oss: clamped SwiGLU (gate * sigmoid(1.702 gate) * (up + 1)), biases, attention sinks
 };
 
@@ -173,6 +181,10 @@ private:
     std::atomic<bool> dev_ok_{false};
     int gpu_batch_ = 256, sc_rows_ = 256;   // sc_rows_: token rows of the attention score buffer
     uint64_t dCS2_ = 0, dR_ = 0, dG_ = 0, dIdx_ = 0, dWt_ = 0;
+    uint64_t dML1_ = 0, dML2_ = 0, dML3_ = 0;   // MLA: raw q (later the compacted output), KV down-projection, normed latent
+    std::vector<float> ml1_, ml2_, ml3_, ml4_;
+    void mla_gpu(Layer& L, int n, bool same_x);
+    void mla_cpu(Layer& L, int n);
     uint64_t dZX_ = 0, dXC_ = 0, dSY_ = 0;   // Mamba-2 prompts: in-projection, conv output, scan output
     void mamba_gpu(Layer& L, int n, bool same_x);
     bool ssm_gpu_ok() const { return hp.ssm_conv == 4 && hp.ssm_state >= 32 && 256 % hp.ssm_state == 0 && hp.ssm_heads && hp.ssm_inner % (256 / hp.ssm_state) == 0; }

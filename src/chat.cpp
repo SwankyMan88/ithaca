@@ -86,6 +86,14 @@ std::string Chat::render(const std::vector<Msg>& msgs) const {
         });
         return out + "Assistant: ";
     }
+    if (has(t, "User: ") && has(t, "Assistant:")) {  // DeepSeek V2 (BOS comes from the tokenizer)
+        if (!sys.empty()) out += sys + "\n\n";
+        each([&](const std::string& r, const std::string& c) {
+            if (r == "user") out += "User: " + c + "\n\n";
+            else out += "Assistant: " + c + "<\xEF\xBD\x9C" "end\xE2\x96\x81of\xE2\x96\x81sentence\xEF\xBD\x9C>";
+        });
+        return out + "Assistant:";
+    }
     // ChatML default (Qwen 2/2.5/3 and most others)
     auto blk = [&](const std::string& r, const std::string& c) { out += "<|im_start|>" + r + "\n" + c + "<|im_end|>\n"; };
     if (!sys.empty()) blk("system", sys);

@@ -161,23 +161,23 @@ static std::string model_info_json(const std::wstring& path, uint64_t size) {
     else {
         const std::string a = g.gets("general.architecture");
         double total = 0, exps = 0; std::string bad_type;
-        bool shexp = false, ssm = false;
+        bool ssm = false;
         for (auto& t : g.tensors) {
             double n = (double)t.ne[0] * t.ne[1] * t.ne[2] * t.ne[3];
             total += n;
             if (t.name.find("_exps.") != std::string::npos) exps += n;
-            if (t.name.find("_shexp") != std::string::npos) shexp = true;
             if (t.name.find(".ssm_") != std::string::npos) ssm = true;
             if (!gtype_supported(t.type) && bad_type.empty()) bad_type = gtype_name(t.type);
         }
         const int64_t E = g.geti(a + ".expert_count", 0), K = g.geti(a + ".expert_used_count", 0);
-        static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
+        static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35", "qwen2moe", "deepseek2"};
         const bool arch_ok = std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) != std::end(ok_arch);
         std::string why;
         if (a == "clip" || a == "mmproj") why = "Image projector for a vision model, not a chat model. Keep it next to its model.";
         else if (g.geti("split.count", 1) > 1 && g.geti("split.no", 0) > 0) why = "Later part of a split model: load its first part (-00001-of-...).";
         else if (ssm && !arch_ok) why = "Hybrid models (Mamba or linear-attention layers) aren't supported yet.";
-        else if (shexp) why = "Mixture-of-experts with shared experts (Qwen2-MoE) isn't supported yet.";
+        else if (a == "deepseek2" && g.geti(a + ".expert_gating_func", 1) == 2) why = "DeepSeek V3-style routing isn't supported yet.";
+        else if (a == "deepseek2" && !g.get("blk.0.attn_kv_b.weight")) why = "This DeepSeek file was made by a newer converter (split attn_kv_b), which isn't supported yet.";
         else if (!arch_ok) why = "The '" + a + "' architecture isn't supported yet.";
         else if (!bad_type.empty()) why = "Uses the " + bad_type + " weight format, which isn't supported yet.";
         out = ",\"arch\":" + json_esc(a) + ",\"params\":" + json_esc(total > 0 ? fmt_params(total) : "");
@@ -220,7 +220,7 @@ static std::vector<std::wstring> find_drafts() {
     uint64_t main_sz = 0;
     for (auto& f : model_files()) if (_wcsicmp(f.first.c_str(), main.c_str()) == 0) main_sz = f.second;
     if (!main_sz) return {};
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss", "granitehybrid", "ernie4_5", "smollm3", "olmo2", "olmoe", "gemma2", "lfm2", "qwen35", "qwen2moe", "deepseek2"};
     std::vector<std::pair<int, std::wstring>> found;
     const int nv = g_model.tok.n_vocab();
     for (auto& f : model_files()) {

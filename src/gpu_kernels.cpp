@@ -1100,6 +1100,38 @@ std::string gpu_ops_ptx() {
          " add.u32 %r11,%r7,%r10; add.u32 %r12,%r8,%r11; mul.wide.u32 %rd4,%r12,4; add.u64 %rd4,%rd1,%rd4; ld.global.f32 %f3,[%rd4];\n"
          " mul.wide.u32 %rd6,%r11,4; add.u64 %rd6,%rd3,%rd6; ld.global.f32 %f9,[%rd6]; mul.f32 %f3,%f3,%f2; mul.f32 %f3,%f3,%f9; st.global.f32 [%rd4],%f3;\n"
          " add.u32 %r10,%r10,256; bra L2;\nE2:\n ret;\n}\n";
+    // DeepSeek MLA: padded heads from the projections. i over (token, head, c < pHd):
+    // Q = [q_rope | q_nope | 0], K = [shared k_rope | k_nope | 0], V = [v | 0].
+    s += ".visible .entry k_mla(.param .u64 pQr, .param .u64 pKa, .param .u64 pKV, .param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u32 pNh, .param .u32 pHd,"
+         " .param .u32 pNope, .param .u32 pNr, .param .u32 pVd, .param .u32 pRank, .param .u32 pN)\n{\n"
+         " .reg .pred %p<8>; .reg .b32 %r<32>; .reg .f32 %f<8>; .reg .b64 %rd<16>;\n"
+         " ld.param.u64 %rd1,[pQr]; ld.param.u64 %rd2,[pKa]; ld.param.u64 %rd3,[pKV]; ld.param.u64 %rd4,[pQ]; ld.param.u64 %rd5,[pK]; ld.param.u64 %rd6,[pV];\n"
+         " ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pNh]; ld.param.u32 %r3,[pHd]; ld.param.u32 %r4,[pNope]; ld.param.u32 %r5,[pNr]; ld.param.u32 %r6,[pVd]; ld.param.u32 %r7,[pRank];\n"
+         " mov.u32 %r8,%ctaid.x; mov.u32 %r9,%ntid.x; mov.u32 %r10,%tid.x; mad.lo.u32 %r11,%r8,%r9,%r10; setp.ge.u32 %p1,%r11,%r1; @%p1 bra DONE;\n"
+         " rem.u32 %r12,%r11,%r3; div.u32 %r13,%r11,%r3; div.u32 %r14,%r13,%r2;\n"                     // c, token * nh + head, token
+         " add.u32 %r15,%r4,%r5; add.u32 %r16,%r4,%r6; add.u32 %r17,%r7,%r5;\n"                       // qk, nope + vd, rank + nr
+         " setp.lt.u32 %p2,%r12,%r5; setp.lt.u32 %p3,%r12,%r15; setp.ge.u32 %p5,%r12,%r5; and.pred %p4,%p3,%p5; setp.lt.u32 %p6,%r12,%r6;\n"
+         " sub.u32 %r21,%r12,%r5;\n"                                                                   // c - nr
+         " mul.lo.u32 %r19,%r13,%r15; add.u32 %r20,%r19,%r4; add.u32 %r20,%r20,%r12; add.u32 %r22,%r19,%r21; selp.b32 %r22,%r20,%r22,%p2;\n"
+         " mov.f32 %f1,0f00000000; @%p3 mul.wide.u32 %rd7,%r22,4; @%p3 add.u64 %rd7,%rd1,%rd7; @%p3 ld.global.f32 %f1,[%rd7];\n"
+         " mad.lo.u32 %r23,%r14,%r17,%r7; add.u32 %r23,%r23,%r12; mul.lo.u32 %r24,%r13,%r16; add.u32 %r25,%r24,%r21;\n"
+         " mov.f32 %f2,0f00000000; @%p2 mul.wide.u32 %rd8,%r23,4; @%p2 add.u64 %rd8,%rd2,%rd8; @%p2 ld.global.f32 %f2,[%rd8];\n"
+         " @%p4 mul.wide.u32 %rd9,%r25,4; @%p4 add.u64 %rd9,%rd3,%rd9; @%p4 ld.global.f32 %f2,[%rd9];\n"
+         " add.u32 %r27,%r24,%r4; add.u32 %r27,%r27,%r12; mov.f32 %f3,0f00000000; @%p6 mul.wide.u32 %rd10,%r27,4; @%p6 add.u64 %rd10,%rd3,%rd10; @%p6 ld.global.f32 %f3,[%rd10];\n"
+         " mul.wide.u32 %rd11,%r11,4; add.u64 %rd12,%rd4,%rd11; st.global.f32 [%rd12],%f1; add.u64 %rd13,%rd5,%rd11; st.global.f32 [%rd13],%f2; add.u64 %rd14,%rd6,%rd11; st.global.f32 [%rd14],%f3;\n"
+         "DONE:\n ret;\n}\n";
+    // Qwen2-MoE shared expert: grid = tokens, 256 threads: X += pS * sigmoid(XN . W) * T, per token.
+    s += ".visible .entry k_gadd(.param .u64 pX, .param .u64 pT, .param .u64 pXN, .param .u64 pW, .param .u32 pD, .param .f32 pS)\n{\n"
+         " .reg .pred %p<4>; .reg .b32 %r<16>; .reg .f32 %f<16>; .reg .b64 %rd<16>;\n";
+    s += kRedPrologue;
+    s += " ld.param.u64 %rd1,[pX]; ld.param.u64 %rd2,[pT]; ld.param.u64 %rd3,[pXN]; ld.param.u64 %rd4,[pW]; ld.param.u32 %r1,[pD]; ld.param.f32 %f1,[pS];\n"
+         " mov.u32 %r2,%ctaid.x; mul.lo.u32 %r3,%r2,%r1; mov.u32 %r4,%tid.x; mov.f32 %f2,0f00000000; mov.u32 %r5,%r4;\n"
+         "L1:\n setp.ge.u32 %p1,%r5,%r1; @%p1 bra E1; add.u32 %r6,%r3,%r5; mul.wide.u32 %rd5,%r6,4; add.u64 %rd6,%rd3,%rd5; ld.global.f32 %f3,[%rd6];\n"
+         " mul.wide.u32 %rd7,%r5,4; add.u64 %rd7,%rd4,%rd7; ld.global.f32 %f4,[%rd7]; fma.rn.f32 %f2,%f3,%f4,%f2; add.u32 %r5,%r5,256; bra L1;\nE1:\n";
+    s += bred("%f2", "add.f32");
+    s += " mul.f32 %f5,%f2,0fBFB8AA3B; ex2.approx.f32 %f5,%f5; add.f32 %f5,%f5,0f3F800000; div.approx.f32 %f6,%f1,%f5; mov.u32 %r5,%r4;\n"
+         "L2:\n setp.ge.u32 %p1,%r5,%r1; @%p1 bra E2; add.u32 %r6,%r3,%r5; mul.wide.u32 %rd5,%r6,4; add.u64 %rd8,%rd1,%rd5; add.u64 %rd9,%rd2,%rd5;\n"
+         " ld.global.f32 %f7,[%rd8]; ld.global.f32 %f8,[%rd9]; fma.rn.f32 %f7,%f6,%f8,%f7; st.global.f32 [%rd8],%f7; add.u32 %r5,%r5,256; bra L2;\nE2:\n ret;\n}\n";
     // y[r*W+c] *= sigmoid(g[r*GS+c]): Qwen3.5 attention output gate
     s += ew("k_sigmul", ".param .u64 pY, .param .u64 pG, .param .u32 pW, .param .u32 pGS",
             " ld.param.u64 %rd1,[pY]; ld.param.u64 %rd2,[pG]; ld.param.u32 %r7,[pW]; ld.param.u32 %r8,[pGS];\n",
