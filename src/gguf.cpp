@@ -82,8 +82,12 @@ bool read_scalar(Reader& r, int t, GValue& v) {
 }
 }  // namespace
 
+// Header of one GGUF file: metadata (when kvout) and tensors, appended to `out` with data pointers into the mapping.
+static bool parse_gguf(const uint8_t* base, size_t size, std::unordered_map<std::string, GValue>* kvout, std::vector<GTensor>& out, int shard, std::string& err);
+
 bool GGUF::open(const std::wstring& path, std::string& err) {
     close();
+    paths.push_back(path);
     hfile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hfile == INVALID_HANDLE_VALUE) { err = "cannot open file"; return false; }
@@ -93,10 +97,37 @@ bool GGUF::open(const std::wstring& path, std::string& err) {
     base = (const uint8_t*)MapViewOfFile(hmap, FILE_MAP_READ, 0, 0, 0);
     if (!base) { err = "cannot map view (out of address space?)"; close(); return false; }
 
+    if (!parse_gguf(base, size, &kv, tensors, 0, err)) { close(); return false; }
+    // Split GGUF (name-00001-of-0000N.gguf): open the other parts too; their tensors join this one's list.
+    const int nsplit = (int)geti("split.count", 1);
+    if (nsplit > 1) {
+        std::wstring p = path; size_t at = p.rfind(L"-00001-of-");
+        if (at == std::wstring::npos) { err = "this is part of a split model: open its first part (-00001-of-...)"; close(); return false; }
+        for (int i = 1; i < nsplit; i++) {
+            wchar_t num[8]; swprintf(num, 8, L"%05d", i + 1);
+            std::wstring q = p.substr(0, at + 1) + num + p.substr(at + 6);
+            Shard s;
+            s.hfile = CreateFileW(q.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (s.hfile == INVALID_HANDLE_VALUE) { err = "missing split part " + w_to_utf8(q.substr(q.find_last_of(L'\\') + 1)); close(); return false; }
+            LARGE_INTEGER z; GetFileSizeEx(s.hfile, &z); s.size = (size_t)z.QuadPart;
+            s.hmap = CreateFileMappingW(s.hfile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+            s.base = s.hmap ? (const uint8_t*)MapViewOfFile(s.hmap, FILE_MAP_READ, 0, 0, 0) : nullptr;
+            extra.push_back(s); paths.push_back(q);
+            if (!s.base) { err = "cannot map split part"; close(); return false; }
+            if (!parse_gguf(s.base, s.size, nullptr, tensors, i, err)) { close(); return false; }
+        }
+    }
+    for (size_t i = 0; i < tensors.size(); i++) index[tensors[i].name] = (int)i;
+    return true;
+}
+
+static bool parse_gguf(const uint8_t* base, size_t size, std::unordered_map<std::string, GValue>* kvout, std::vector<GTensor>& out, int shard, std::string& err) {
+    std::unordered_map<std::string, GValue> kvl;
+    std::unordered_map<std::string, GValue>& kv = kvout ? *kvout : kvl;
     Reader r{base, base + size};
-    if (r.rd<uint32_t>() != 0x46554747) { err = "not a GGUF file"; close(); return false; }
+    if (r.rd<uint32_t>() != 0x46554747) { err = "not a GGUF file"; return false; }
     uint32_t ver = r.rd<uint32_t>();
-    if (ver < 2) { err = "GGUF v1 not supported"; close(); return false; }
+    if (ver < 2) { err = "GGUF v1 not supported"; return false; }
     uint64_t nt = r.rd<uint64_t>(), nk = r.rd<uint64_t>();
     for (uint64_t i = 0; i < nk && !r.bad; i++) {
         std::string k = r.str();
@@ -118,25 +149,26 @@ bool GGUF::open(const std::wstring& path, std::string& err) {
         kv[k] = std::move(v);
     }
     std::vector<uint64_t> offs;
-    tensors.resize(nt);
+    const size_t first = out.size();
+    out.resize(first + nt);
     for (uint64_t i = 0; i < nt && !r.bad; i++) {
-        GTensor& t = tensors[i];
+        GTensor& t = out[first + i];
         t.name = r.str();
         t.nd = (int)r.rd<uint32_t>();
         for (int d = 0; d < t.nd && d < 4; d++) t.ne[d] = (int64_t)r.rd<uint64_t>();
         t.type = (int)r.rd<uint32_t>();
         offs.push_back(r.rd<uint64_t>());
-        index[t.name] = (int)i;
     }
-    if (r.bad) { err = "truncated / corrupt GGUF header"; close(); return false; }
-    uint64_t align = (uint64_t)geti("general.alignment", 32);
+    if (r.bad) { err = "truncated / corrupt GGUF header"; return false; }
+    auto ai = kv.find("general.alignment");
+    uint64_t align = ai != kv.end() && ai->second.i > 0 ? (uint64_t)ai->second.i : 32;
     uint64_t data0 = (uint64_t)(r.p - base);
     data0 = (data0 + align - 1) / align * align;
     for (uint64_t i = 0; i < nt; i++) {
-        GTensor& t = tensors[i];
-        t.data = base + data0 + offs[i];
+        GTensor& t = out[first + i];
+        t.data = base + data0 + offs[i]; t.shard = shard; t.foff = data0 + offs[i];
         t.nbytes = gtype_row_bytes(t.type, t.ne[0]) * t.ne[1] * t.ne[2] * t.ne[3];
-        if (data0 + offs[i] + t.nbytes > size) { err = "tensor " + t.name + " out of file bounds (incomplete download?)"; close(); return false; }
+        if (data0 + offs[i] + t.nbytes > size) { err = "tensor " + t.name + " out of file bounds (incomplete download?)"; return false; }
     }
     return true;
 }
@@ -146,5 +178,7 @@ void GGUF::close() {
     if (hmap) CloseHandle(hmap);
     if (hfile != INVALID_HANDLE_VALUE) CloseHandle(hfile);
     base = nullptr; hmap = nullptr; hfile = INVALID_HANDLE_VALUE; size = 0;
+    for (auto& s : extra) { if (s.base) UnmapViewOfFile(s.base); if (s.hmap) CloseHandle(s.hmap); if (s.hfile != INVALID_HANDLE_VALUE) CloseHandle(s.hfile); }
+    extra.clear(); paths.clear();
     kv.clear(); tensors.clear(); index.clear();
 }

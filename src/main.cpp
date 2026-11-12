@@ -175,7 +175,7 @@ static std::string model_info_json(const std::wstring& path, uint64_t size) {
         const bool arch_ok = std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* x) { return a == x; }) != std::end(ok_arch);
         std::string why;
         if (a == "clip" || a == "mmproj") why = "Image projector for a vision model, not a chat model. Keep it next to its model.";
-        else if (g.geti("split.count", 1) > 1) why = "Split GGUF (several files); join it into one file first.";
+        else if (g.geti("split.count", 1) > 1 && g.geti("split.no", 0) > 0) why = "Later part of a split model: load its first part (-00001-of-...).";
         else if (ssm && !arch_ok) why = "Hybrid models (Mamba or linear-attention layers) aren't supported yet.";
         else if (shexp) why = "Mixture-of-experts with shared experts (Qwen2-MoE) isn't supported yet.";
         else if (!arch_ok) why = "The '" + a + "' architecture isn't supported yet.";

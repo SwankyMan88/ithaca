@@ -185,8 +185,11 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
             if (err.empty()) err = "layer " + std::to_string(i) + " is incomplete (MoE / hybrid models aren't supported yet)";
             layers_.clear(); g_.close(); return false;
         }
+        int lshard = -1;   // split GGUF: the range covers the file holding the layer's first matrix (a range can't span two mappings)
         for (Lin* l : L.lins()) {
             if (!l->t) continue;
+            if (lshard < 0) lshard = l->t->shard;
+            if (l->t->shard != lshard) continue;
             if (!L.lo || l->t->data < L.lo) L.lo = l->t->data;
             if (l->t->data + l->t->nbytes > L.hi) L.hi = l->t->data + l->t->nbytes;
         }
@@ -310,13 +313,16 @@ static void prefetch_range(const void* p, size_t n) {
 void Model::tier_thread() {
     cuda().bind_thread();
     // Separate read handle: big positioned reads into pinned memory beat page-faulting the mapping.
-    HANDLE fh = CreateFileW(utf8_to_w(path_utf8).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);   // no SEQUENTIAL_SCAN: it evicts the file from the cache right behind the reader
-    struct FH { HANDLE h; ~FH() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } fh_guard{fh};
+    // One per file of a split GGUF.
+    std::vector<HANDLE> fhs;
+    for (auto& p : g_.paths) fhs.push_back(CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0));   // no SEQUENTIAL_SCAN: it evicts the file from the cache right behind the reader
+    struct FH { std::vector<HANDLE>& v; ~FH() { for (HANDLE h : v) if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } fh_guard{fhs};
     auto upload = [&](Lin& l) -> bool {
         if (!l.t) return true;
+        HANDLE fh = l.t->shard < (int)fhs.size() ? fhs[l.t->shard] : INVALID_HANDLE_VALUE;
         if (fh != INVALID_HANDLE_VALUE && CudaTier::can_load(l.t->type) && !getenv("ITHACA_SLOW_LOAD")) {
             int kind = 0; uint64_t qoff = 0;
-            uint64_t p = cuda().load_weight(fh, (uint64_t)(l.t->data - g_.base), l.t->nbytes, l.t->type, l.rows, l.cols, kind, qoff);
+            uint64_t p = cuda().load_weight(fh, l.t->foff, l.t->nbytes, l.t->type, l.rows, l.cols, kind, qoff);
             if (p) {
                 l.gkind = kind; l.gqoff = qoff;
                 l.dptr.store(p, std::memory_order_release);

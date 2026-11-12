@@ -28,6 +28,8 @@ struct GTensor {
     int64_t ne[4] = {1, 1, 1, 1};
     const uint8_t* data = nullptr;
     size_t nbytes = 0;
+    int shard = 0;        // split GGUF: which file (0 = the one opened)
+    uint64_t foff = 0;    // byte offset of the data in that file
 };
 
 const char* gtype_name(int t);
@@ -41,6 +43,9 @@ struct GGUF {
     std::unordered_map<std::string, GValue> kv;
     std::vector<GTensor> tensors;
     std::unordered_map<std::string, int> index;
+    struct Shard { HANDLE hfile = INVALID_HANDLE_VALUE, hmap = nullptr; const uint8_t* base = nullptr; size_t size = 0; };
+    std::vector<Shard> extra;              // split GGUF: parts 2..N, opened with the first
+    std::vector<std::wstring> paths;       // every part's path, the opened one first
 
     ~GGUF() { close(); }
     bool open(const std::wstring& path, std::string& err);

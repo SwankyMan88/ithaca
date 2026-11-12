@@ -78,6 +78,14 @@ std::string Chat::render(const std::vector<Msg>& msgs) const {
         });
         return out + "<start_of_turn>model\n";
     }
+    if (has(t, "<|begin_of_sentence|>") && has(t, "Assistant: ")) {  // ERNIE 4.5
+        out = "<|begin_of_sentence|>" + (sys.empty() ? std::string() : sys + "\n");
+        each([&](const std::string& r, const std::string& c) {
+            if (r == "user") out += "User: " + c + "\n";
+            else out += "Assistant: " + c + "<|end_of_sentence|>";
+        });
+        return out + "Assistant: ";
+    }
     // ChatML default (Qwen 2/2.5/3 and most others)
     auto blk = [&](const std::string& r, const std::string& c) { out += "<|im_start|>" + r + "\n" + c + "<|im_end|>\n"; };
     if (!sys.empty()) blk("system", sys);
