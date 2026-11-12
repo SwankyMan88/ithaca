@@ -63,5 +63,49 @@
   "lc_build": "7fe450e19 #11146",
   "lc_fa": -1,
   "lc_load": 3.94
+ },
+ {
+  "model": "gpt-oss 20B (Q2_K)",
+  "group": "newer families",
+  "size_gb": 11.5,
+  "ith_pp": 1614.8,
+  "ith_tg": 107.08,
+  "ith_vram": 10593,
+  "lc_pp": 2112.0,
+  "lc_tg": 105.5,
+  "lc_build": "#11146"
+ },
+ {
+  "model": "DeepSeek-V2-Lite 16B (Q3_K_M)",
+  "group": "newer families",
+  "size_gb": 8.1,
+  "ith_pp": 2114.8,
+  "ith_tg": 127.52,
+  "ith_vram": 9387,
+  "lc_pp": 2570.5,
+  "lc_tg": 102.14,
+  "lc_build": "#11146"
+ },
+ {
+  "model": "Qwen1.5-MoE 14B (Q3_K_M)",
+  "group": "newer families",
+  "size_gb": 7.4,
+  "ith_pp": 2576.3,
+  "ith_tg": 144.33,
+  "ith_vram": 8455,
+  "lc_pp": 2952.1,
+  "lc_tg": 120.14,
+  "lc_build": "#11146"
+ },
+ {
+  "model": "Granite 4.0 H 1B (Q4_0)",
+  "group": "newer families",
+  "size_gb": 0.9,
+  "ith_pp": 4244.4,
+  "ith_tg": 210.17,
+  "ith_vram": 831,
+  "lc_pp": 5654.0,
+  "lc_tg": 184.37,
+  "lc_build": "#11146"
  }
 ]

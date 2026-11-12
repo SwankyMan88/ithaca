@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="862" viewBox="0 0 1100 862" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+<style>
+.bar{transform-box:fill-box;transform-origin:left center;transform:scaleX(0);animation:grow 1.1s cubic-bezier(.2,.8,.2,1) forwards}
+.up{opacity:0;transform-box:fill-box;transform:translateY(10px);animation:up .6s cubic-bezier(.2,.8,.2,1) forwards}
+.num{opacity:0;animation:show .5s ease-out forwards}
+.flow{stroke-dasharray:6 8;animation:flow 1.2s linear infinite}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes grow{to{transform:scaleX(1)}}
+@keyframes up{to{opacity:1;transform:none}}
+@keyframes show{to{opacity:1}}
+@keyframes flow{to{stroke-dashoffset:-28}}
+@keyframes pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.bar,.up,.num,.flow,.pulse{animation:none;opacity:1;transform:none}}
+</style>
+
+<defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b7dff"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs>
+<rect width="1100" height="862" rx="16" fill="#0d1117"/>
+<text x="36" y="48" font-size="22" fill="#e6edf3" font-weight="600">Newer model families, RTX 3060 12 GB</text>
+<text x="36" y="76" font-size="15" fill="#8b949e">Mixture-of-experts, latent attention and Mamba hybrids. Same files, all on the GPU, llama.cpp build 11146.</text>
+<rect x="770" y="36" width="14" height="14" rx="3" fill="#8b7dff"/>
+<text x="792" y="48" font-size="14" fill="#e6edf3">Ithaca</text>
+<rect x="870" y="36" width="14" height="14" rx="3" fill="#6e7681"/>
+<text x="892" y="48" font-size="14" fill="#e6edf3">llama.cpp</text>
+<text x="290" y="126" font-size="14" fill="#8b949e" font-weight="600">GENERATING (tokens per second, higher is better)</text>
+<text x="36" y="168" font-size="16" fill="#e6edf3" font-weight="600">gpt-oss 20B</text>
+<text x="36" y="190" font-size="13" fill="#8b949e">Q2_K · 11.5 GB · MoE</text>
+<rect class="bar" style="animation-delay:0.15s" x="290" y="150" width="305.7" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:0.90s" x="603.7" y="164" font-size="13" fill="#e6edf3">107 <tspan font-weight="600" fill="#3fb950">101%</tspan></text>
+<rect class="bar" style="animation-delay:0.20s" x="290" y="174" width="301.2" height="18" rx="4" fill="#6e7681"/>
+<text x="599.2" y="188" font-size="13" fill="#8b949e" class="num" style="animation-delay:0.95s">106</text>
+<line x1="36" y1="208" x2="1064" y2="208" stroke="#21262d"/>
+<text x="36" y="242" font-size="16" fill="#e6edf3" font-weight="600">DeepSeek-V2-Lite 16B</text>
+<text x="36" y="264" font-size="13" fill="#8b949e">Q3_K_M · 8.1 GB · MoE + latent attention</text>
+<rect class="bar" style="animation-delay:0.25s" x="290" y="224" width="364.0" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.00s" x="662.0" y="238" font-size="13" fill="#e6edf3">128 <tspan font-weight="600" fill="#3fb950">125%</tspan></text>
+<rect class="bar" style="animation-delay:0.30s" x="290" y="248" width="291.6" height="18" rx="4" fill="#6e7681"/>
+<text x="589.6" y="262" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.05s">102</text>
+<line x1="36" y1="282" x2="1064" y2="282" stroke="#21262d"/>
+<text x="36" y="316" font-size="16" fill="#e6edf3" font-weight="600">Qwen1.5-MoE 14B</text>
+<text x="36" y="338" font-size="13" fill="#8b949e">Q3_K_M · 7.4 GB · MoE + shared experts</text>
+<rect class="bar" style="animation-delay:0.35s" x="290" y="298" width="412.0" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.10s" x="710.0" y="312" font-size="13" fill="#e6edf3">144 <tspan font-weight="600" fill="#3fb950">120%</tspan></text>
+<rect class="bar" style="animation-delay:0.40s" x="290" y="322" width="343.0" height="18" rx="4" fill="#6e7681"/>
+<text x="641.0" y="336" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.15s">120</text>
+<line x1="36" y1="356" x2="1064" y2="356" stroke="#21262d"/>
+<text x="36" y="390" font-size="16" fill="#e6edf3" font-weight="600">Granite 4.0 H 1B</text>
+<text x="36" y="412" font-size="13" fill="#8b949e">Q4_0 · 0.9 GB · Mamba-2 hybrid</text>
+<rect class="bar" style="animation-delay:0.45s" x="290" y="372" width="600.0" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.20s" x="898.0" y="386" font-size="13" fill="#e6edf3">210 <tspan font-weight="600" fill="#3fb950">114%</tspan></text>
+<rect class="bar" style="animation-delay:0.50s" x="290" y="396" width="526.3" height="18" rx="4" fill="#6e7681"/>
+<text x="824.3" y="410" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.25s">184</text>
+<line x1="36" y1="430" x2="1064" y2="430" stroke="#21262d"/>
+<text x="290" y="482" font-size="14" fill="#8b949e" font-weight="600">READING A 512-TOKEN PROMPT (tokens per second)</text>
+<text x="36" y="524" font-size="16" fill="#e6edf3" font-weight="600">gpt-oss 20B</text>
+<text x="36" y="546" font-size="13" fill="#8b949e">Q2_K · 11.5 GB · MoE</text>
+<rect class="bar" style="animation-delay:0.55s" x="290" y="506" width="171.4" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.30s" x="469.4" y="520" font-size="13" fill="#e6edf3">1,615 <tspan font-weight="600" fill="#8b949e">76%</tspan></text>
+<rect class="bar" style="animation-delay:0.60s" x="290" y="530" width="224.1" height="18" rx="4" fill="#6e7681"/>
+<text x="522.1" y="544" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.35s">2,112</text>
+<line x1="36" y1="564" x2="1064" y2="564" stroke="#21262d"/>
+<text x="36" y="598" font-size="16" fill="#e6edf3" font-weight="600">DeepSeek-V2-Lite 16B</text>
+<text x="36" y="620" font-size="13" fill="#8b949e">Q3_K_M · 8.1 GB · MoE + latent attention</text>
+<rect class="bar" style="animation-delay:0.65s" x="290" y="580" width="224.4" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.40s" x="522.4" y="594" font-size="13" fill="#e6edf3">2,115 <tspan font-weight="600" fill="#8b949e">82%</tspan></text>
+<rect class="bar" style="animation-delay:0.70s" x="290" y="604" width="272.8" height="18" rx="4" fill="#6e7681"/>
+<text x="570.8" y="618" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.45s">2,570</text>
+<line x1="36" y1="638" x2="1064" y2="638" stroke="#21262d"/>
+<text x="36" y="672" font-size="16" fill="#e6edf3" font-weight="600">Qwen1.5-MoE 14B</text>
+<text x="36" y="694" font-size="13" fill="#8b949e">Q3_K_M · 7.4 GB · MoE + shared experts</text>
+<rect class="bar" style="animation-delay:0.75s" x="290" y="654" width="273.4" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.50s" x="571.4" y="668" font-size="13" fill="#e6edf3">2,576 <tspan font-weight="600" fill="#8b949e">87%</tspan></text>
+<rect class="bar" style="animation-delay:0.80s" x="290" y="678" width="313.3" height="18" rx="4" fill="#6e7681"/>
+<text x="611.3" y="692" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.55s">2,952</text>
+<line x1="36" y1="712" x2="1064" y2="712" stroke="#21262d"/>
+<text x="36" y="746" font-size="16" fill="#e6edf3" font-weight="600">Granite 4.0 H 1B</text>
+<text x="36" y="768" font-size="13" fill="#8b949e">Q4_0 · 0.9 GB · Mamba-2 hybrid</text>
+<rect class="bar" style="animation-delay:0.85s" x="290" y="728" width="450.4" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.60s" x="748.4" y="742" font-size="13" fill="#e6edf3">4,244 <tspan font-weight="600" fill="#8b949e">75%</tspan></text>
+<rect class="bar" style="animation-delay:0.90s" x="290" y="752" width="600.0" height="18" rx="4" fill="#6e7681"/>
+<text x="898.0" y="766" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.65s">5,654</text>
+<line x1="36" y1="786" x2="1064" y2="786" stroke="#21262d"/>
+<text x="36" y="840" font-size="13" fill="#8b949e">Percent: Ithaca as a share of llama.cpp (green: faster). Raw numbers: docs/bench-results.json.</text>
+</svg>

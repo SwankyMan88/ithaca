@@ -63,6 +63,15 @@ Settings, chats and memories are kept next to the exe, so the folder is portable
 
 Ithaca generates at 96–104% of llama.cpp's speed and reads prompts at 85–116% of it, on the same files and the same GPU.
 
+### Newer model families
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bench-new-dark.svg">
+  <img src="docs/bench-new-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on gpt-oss, DeepSeek-V2-Lite, Qwen1.5-MoE and Granite 4.0 H">
+</picture>
+
+On mixture-of-experts, latent-attention and Mamba-hybrid models Ithaca generates faster than llama.cpp (101–125%); prompts are at 75–87% of it.
+
 ### Every quant type
 
 Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU at their compact size.
@@ -74,7 +83,7 @@ Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU
 
 ## Models
 
-**Chat (GGUF):** Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Qwen3.5, Phi-3/4, Granite, Granite-MoE, Granite 4.0 H, Gemma 2, Gemma 3, gpt-oss, OLMo 2, OLMoE, SmolLM3, LFM2, ERNIE 4.5 and the DeepSeek-R1 distills. Split GGUFs load from their first part.
+**Chat (GGUF):** Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen2-MoE (Qwen1.5-MoE), Qwen3-MoE, Qwen3.5, Phi-3/4, Granite, Granite-MoE, Granite 4.0 H, Gemma 2, Gemma 3, gpt-oss, OLMo 2, OLMoE, SmolLM3, LFM2, ERNIE 4.5, DeepSeek V2 and V2-Lite and the DeepSeek-R1 distills. Split GGUFs load from their first part.
 
 **Quantizations:** F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K to Q6_K, IQ1_S to IQ4_XS, and MXFP4 (gpt-oss). Low-bit weights stay that small on the GPU.
 
@@ -86,7 +95,7 @@ Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU
 | Video | Wan 2.2 TI2V-5B | Needs the umT5 encoder and the Wan 2.2 VAE; saves MP4 |
 | Speech | F5-TTS + Vocos | Voice cloning from a 5 to 12 second clip |
 
-Not supported yet: Qwen2-MoE, DeepSeek V2/V3, Llama 4, Flux/SD3, LoRAs, image-to-video. Settings → Model shows whether each of your files is supported.
+Not supported yet: DeepSeek V3/R1 (full size), Llama 4, Flux/SD3, LoRAs, image-to-video. Settings → Model shows whether each of your files is supported.
 
 ## Questions
 
@@ -246,7 +255,7 @@ src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 ## Roadmap
 
 - Close the rest of the prompt-speed gap on Gemma 3 and mixture-of-experts models.
-- Faster gpt-oss and hybrid-model prompts, Qwen2-MoE, DeepSeek V2/V3.
+- Faster gpt-oss prompts; DeepSeek V3 routing.
 - Flux and SD3 image models, LoRAs, image-to-video.
 - AMD and Intel GPUs (Vulkan).
 
