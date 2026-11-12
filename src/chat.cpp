@@ -1,6 +1,7 @@
 #include "chat.h"
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 
 static bool has(const std::string& s, const char* x) { return s.find(x) != std::string::npos; }
 
@@ -25,6 +26,17 @@ std::string Chat::render(const std::vector<Msg>& msgs) const {
             else out += "<\xEF\xBD\x9C" "Assistant\xEF\xBD\x9C>" + c + "<\xEF\xBD\x9C" "end\xE2\x96\x81of\xE2\x96\x81sentence\xEF\xBD\x9C>";
         });
         return out + "<\xEF\xBD\x9C" "Assistant\xEF\xBD\x9C><think>\n";
+    }
+    if (has(t, "<|channel|>")) {  // gpt-oss (harmony): reasoning goes to the analysis channel, the answer to final
+        char date[16]; time_t now = time(nullptr); strftime(date, sizeof date, "%Y-%m-%d", localtime(&now));
+        out = std::string("<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: ") + date +
+              "\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>";
+        if (!sys.empty()) out += "<|start|>developer<|message|># Instructions\n\n" + sys + "<|end|>";
+        each([&](const std::string& r, const std::string& c) {
+            if (r == "user") out += "<|start|>user<|message|>" + c + "<|end|>";
+            else out += "<|start|>assistant<|channel|>final<|message|>" + c + "<|end|>";
+        });
+        return out + "<|start|>assistant";
     }
     if (has(t, "<|start_header_id|>")) {  // Llama 3
         auto blk = [&](const std::string& r, const std::string& c) { out += "<|start_header_id|>" + r + "<|end_header_id|>\n\n" + c + "<|eot_id|>"; };
@@ -71,6 +83,26 @@ std::string Chat::render(const std::vector<Msg>& msgs) const {
     if (!sys.empty()) blk("system", sys);
     each(blk);
     return out + "<|im_start|>assistant\n";
+}
+
+bool Chat::token_text(int id, std::string& out) {
+    out.clear();
+    if (!harmony()) { if (m_.tok.is_stop(id)) return true; out = m_.tok.piece(id); return false; }
+    const std::string& t = m_.tok.text(id);
+    if (t == "<|return|>" || t == "<|call|>" || id == m_.tok.eos) { if (hs_.think) { out = "\n</think>\n\n"; hs_.think = false; } return true; }
+    if (t == "<|start|>" || t == "<|channel|>") { hs_.header = true; if (t == "<|channel|>") hs_.chan.clear(); return false; }
+    if (t == "<|message|>") {
+        hs_.header = false;
+        const bool fin = hs_.chan.compare(0, 5, "final") == 0;
+        if (!fin && !hs_.think) { out = "<think>\n"; hs_.think = true; }
+        else if (fin && hs_.think) { out = "\n</think>\n\n"; hs_.think = false; }
+        return false;
+    }
+    if (t == "<|end|>" || t == "<|constrain|>") return false;
+    if (m_.tok.is_stop(id)) return true;
+    if (hs_.header) { hs_.chan += m_.tok.piece(id); return false; }
+    out = m_.tok.piece(id);
+    return false;
 }
 
 int Chat::sample(const float* logits, const GenOpts& o, const std::vector<int>& recent) {
@@ -189,9 +221,11 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     std::vector<int> recent;
     // Emits one sampled token; false = stop (end token, budget, client gone).
     bool done = false;
+    hs_ = {};
+    std::string pc;
     auto emit = [&](int id) -> bool {
-        if (m_.tok.is_stop(id) || st.gen_tokens >= budget) { done = true; return false; }
-        pending += m_.tok.piece(id);
+        if (token_text(id, pc) || st.gen_tokens >= budget) { pending += pc; done = true; return false; }
+        pending += pc;
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {
             unsigned char c = pending[pending.size() - back];
@@ -293,8 +327,8 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     }
     else for (int i = 0; i < budget; i++) {
         int id = sample(logits, o, recent);
-        if (m_.tok.is_stop(id)) break;
-        pending += m_.tok.piece(id);
+        if (token_text(id, pc)) { pending += pc; break; }
+        pending += pc;
         // Emit only complete UTF-8 sequences.
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {

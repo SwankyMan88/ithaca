@@ -74,9 +74,9 @@ Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU
 
 ## Models
 
-**Chat (GGUF):** Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Phi-3/4, Granite, Granite-MoE, Gemma 3 and the DeepSeek-R1 distills.
+**Chat (GGUF):** Llama 2/3, Mistral, Mixtral, Qwen 2/2.5/3, Qwen3-MoE, Phi-3/4, Granite, Granite-MoE, Gemma 3, gpt-oss and the DeepSeek-R1 distills.
 
-**Quantizations:** F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K to Q6_K, and IQ1_S to IQ4_XS. Low-bit weights stay that small on the GPU.
+**Quantizations:** F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K to Q6_K, IQ1_S to IQ4_XS, and MXFP4 (gpt-oss). Low-bit weights stay that small on the GPU.
 
 **Pictures in:** put the model's `mmproj` file next to it (for example `gemma-3-4b-it-Q4_K_M.gguf` with `mmproj-model-f16.gguf`) and Ithaca picks it up.
 
@@ -246,7 +246,7 @@ src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 ## Roadmap
 
 - Close the rest of the prompt-speed gap on Gemma 3 and mixture-of-experts models.
-- IQ quants in mixture-of-experts models, gpt-oss, Mamba hybrids, Qwen2-MoE, split GGUFs.
+- Faster gpt-oss prompts, Mamba hybrids, Qwen2-MoE, split GGUFs.
 - Flux and SD3 image models, LoRAs, image-to-video.
 - AMD and Intel GPUs (Vulkan).
 

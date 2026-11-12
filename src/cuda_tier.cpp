@@ -567,6 +567,7 @@ bool CudaTier::init(std::string& info) {
         const char* v[3] = {"4_1", "1_1", "2_8"};
         for (int j = 0; j < 3; j++) cuModuleGetFunction(&fiq_[i][j], mod, (std::string("iqmv_") + iq_name(i) + "_" + v[j]).c_str());
         cuModuleGetFunction(&fiqq8_[i], mod, (std::string("iqq8_") + iq_name(i)).c_str());
+        cuModuleGetFunction(&fiqx_[i], mod, (std::string("iqmx_") + iq_name(i)).c_str());
     }
     cuModuleGetFunction(&ftopk_, mod, "k_topk"); cuModuleGetFunction(&fwsum_, mod, "k_wsum"); cuModuleGetFunction(&fsort_, mod, "k_moe_sort");
     cuModuleGetFunction(&fn1_[K_Q4_0], mod, "mv1_q4"); cuModuleGetFunction(&fn1_[K_Q8_0], mod, "mv1_q8"); cuModuleGetFunction(&fn1_[K_Q4M], mod, "mv1_q4m"); cuModuleGetFunction(&fn1_[K_Q6], mod, "mv1_q6"); cuModuleGetFunction(&fn1_[K_Q4K], mod, "mv1_q4k");
@@ -574,7 +575,7 @@ bool CudaTier::init(std::string& info) {
     if (cuModuleGetFunction(&fn_[K_Q4_0], mod, "mv_q4") || cuModuleGetFunction(&fn_[K_Q8_0], mod, "mv_q8") || cuModuleGetFunction(&fn_[K_Q4M], mod, "mv_q4m") || cuModuleGetFunction(&fn_[K_Q6], mod, "mv_q6") || cuModuleGetFunction(&fn_[K_Q4K], mod, "mv_q4k")) {
         info = "kernel lookup failed"; return false;
     }
-    static const char* opn[N_OPS] = {"k_add", "k_bias", "k_silu", "k_silu_split", "k_f16", "k_copy2d", "k_rmsnorm", "k_rope", "k_attn", "k_kvstore", "k_attn_comb", "k_gelu", "k_gather", "k_scatter", "k_kvstore_q8"};
+    static const char* opn[N_OPS] = {"k_add", "k_bias", "k_silu", "k_silu_split", "k_f16", "k_copy2d", "k_rmsnorm", "k_rope", "k_attn", "k_kvstore", "k_attn_comb", "k_gelu", "k_gather", "k_scatter", "k_kvstore_q8", "k_oai", "k_xbias"};
     if (cuModuleGetFunction(&quant_, mod, "k_quant")) { info = "kernel lookup failed: k_quant"; return false; }
     for (int i = 0; i < N_OPS; i++)
         if (cuModuleGetFunction(&ops_[i], mod, opn[i])) { info = std::string("kernel lookup failed: ") + opn[i]; return false; }
@@ -764,12 +765,18 @@ bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int 
 bool CudaTier::matmul_experts(uint64_t W, uint64_t qoff, int kind, uint64_t ids, int slots, uint64_t dX, int xrows, int xstep, int cols, int R, uint64_t dY) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
-    if (kind >= N_KINDS || !fe_[kind]) return false;
+    const int iq = kind - K_IQ;
+    if (iq >= 0 && iq < N_IQ ? !fiqx_[iq] || !iqtab_ : kind >= N_KINDS || !fe_[kind]) return false;
     if ((size_t)xrows * cols > cap_q_ && !reserve_act((size_t)xrows * cols)) return false;
     unsigned c = (unsigned)cols, r = (unsigned)R, xn = (unsigned)xrows, xs = (unsigned)xstep;
     void* qa[5] = {&dX, &xq_, &xd_, &xs_, &c};
     if (cuLaunchKernel(quant_, c / 32, xn, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
     uint64_t Q = W + qoff;
+    if (iq >= 0 && iq < N_IQ) {
+        uint64_t T = iqtab_;
+        void* ia[10] = {&W, &T, &xq_, &xd_, &xs_, &dY, &c, &r, &ids, &xs};
+        return cuLaunchKernel(fiqx_[iq], (r + 7) / 8, (unsigned)slots, 1, 256, 1, 1, 0, st_, ia, nullptr) == 0;
+    }
     void* args[10] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &ids, &xs};
     return cuLaunchKernel(fe_[kind], (r + 7) / 8, (unsigned)slots, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
 }
@@ -840,7 +847,7 @@ size_t CudaTier::gpu_bytes(int gtype, int rows, int cols) {
 
 uint64_t CudaTier::load_weight(void* file, uint64_t off, size_t nbytes, int gtype, int rows, int cols, int& kind, uint64_t& qoff) {
     if (iq_index(gtype) >= 0) {   // IQ: the GGUF blocks go to VRAM as they are
-        if (!ok_ || cols % 256 && gtype != GT_IQ4_NL || nbytes != gtype_row_bytes(gtype, cols) * rows) return 0;
+        if (!ok_ || cols % 256 && gtype != GT_IQ4_NL && gtype != GT_MXFP4 || nbytes != gtype_row_bytes(gtype, cols) * rows) return 0;
         kind = K_IQ + iq_index(gtype); qoff = 0;
         uint64_t dst = alloc(nbytes);
         if (!dst) return 0;

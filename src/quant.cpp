@@ -251,6 +251,12 @@ void dequant_row(int type, const uint8_t* s, float* y, int64_t n) {
             for (int j = 0; j < 16; j++) { y[j] = d * kvalues_iq4nl[s[2 + j] & 15]; y[j + 16] = d * kvalues_iq4nl[s[2 + j] >> 4]; }
         }
         return;
+    case GT_MXFP4:   // [e8m0 scale][16 bytes: low nibbles = values 0..15, high = 16..31]
+        for (int64_t b = 0; b < n / 32; b++, s += 17, y += 32) {
+            const float d = e8m0_half(s[0]);
+            for (int j = 0; j < 16; j++) { y[j] = d * kvalues_mxfp4[s[1 + j] & 15]; y[j + 16] = d * kvalues_mxfp4[s[1 + j] >> 4]; }
+        }
+        return;
     case GT_IQ4_XS:
         for (int64_t b = 0; b < n / 256; b++, s += 136) {
             const float d = h2f(rd16(s)); const uint16_t sh = rd16(s + 2); const uint8_t *sl = s + 4, *qs = s + 8;

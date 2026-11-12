@@ -551,7 +551,7 @@ std::string gen_flash_kv(const char* name, int D, int DV, bool q8 = false) {
 
     const int KC = (D + 15) / 16, DP = KC * 16, DT = DV / 8, NT = 256, G4 = D / 4, GV4 = DV / 4;
     o(".visible .entry %s(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pO, .param .u32 pT, .param .u32 pP0, .param .u32 pLdq,"
-      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0%s)", name,
+      " .param .u32 pKvd, .param .u32 pGrp, .param .f32 pScale, .param .u32 pWin, .param .u32 pNC, .param .u32 pDV0%s, .param .u64 pSink)", name,
       q8 ? ", .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV" : "");
     o("{");
     o(" .reg .b32 %%e<8>; .reg .f32 %%g<6>;");
@@ -591,6 +591,9 @@ std::string gen_flash_kv(const char* name, int D, int DV, bool q8 = false) {
         }
     for (int i = 0; i < DT * 4; i++) o(" mov.f32 %%o%d,0f00000000;", i);
     o(" mov.f32 %%m0,0fF149F2CA; mov.f32 %%m1,0fF149F2CA; mov.f32 %%l0,0f00000000; mov.f32 %%l1,0f00000000;");
+    // attention sinks (gpt-oss): the softmax starts at the head's sink logit (log2 units) with a sum of 1
+    o(" ld.param.u64 %%rd30,[pSink]; setp.ne.u64 %%p4,%%rd30,0; mov.u32 %%r21,%%ctaid.y; mul.wide.u32 %%rd31,%%r21,4; add.u64 %%rd30,%%rd30,%%rd31;");
+    o(" @%%p4 ld.global.nc.f32 %%m0,[%%rd30]; @%%p4 mul.f32 %%m0,%%m0,0f3FB8AA3B; @%%p4 mov.f32 %%m1,%%m0; @%%p4 mov.f32 %%l0,0f3F800000; @%%p4 mov.f32 %%l1,0f3F800000;");
     if (DP > D) {
         o(" mov.u32 %%r21,%%r4;");
         o("PZ:");

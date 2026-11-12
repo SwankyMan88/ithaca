@@ -18,6 +18,7 @@ private:
     void spm_text(const std::string& s, std::vector<int>& out) const;
     bool gpt2_ = true;
     int digits_ = 3;
+    bool o200k_ = false;   // gpt-4o pre-tokenizer: contractions stay on their word, "/" and newlines trail punctuation
     std::vector<std::string> tokens_;
     std::vector<float> scores_;
     std::vector<int> types_;

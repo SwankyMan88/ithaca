@@ -8,7 +8,7 @@ enum GType {
     GT_F32 = 0, GT_F16 = 1, GT_Q4_0 = 2, GT_Q4_1 = 3, GT_Q5_0 = 6, GT_Q5_1 = 7, GT_Q8_0 = 8,
     GT_Q2_K = 10, GT_Q3_K = 11, GT_Q4_K = 12, GT_Q5_K = 13, GT_Q6_K = 14, GT_BF16 = 30,
     GT_IQ2_XXS = 16, GT_IQ2_XS = 17, GT_IQ3_XXS = 18, GT_IQ1_S = 19, GT_IQ4_NL = 20, GT_IQ3_S = 21, GT_IQ2_S = 22,
-    GT_IQ4_XS = 23, GT_IQ1_M = 29,
+    GT_IQ4_XS = 23, GT_IQ1_M = 29, GT_MXFP4 = 39,
 };
 
 struct GValue {

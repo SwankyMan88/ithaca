@@ -13,7 +13,7 @@ public:
     enum { K_IQ = 16 };   // K_IQ + i: IQ weights kept in their GGUF blocks (i: see iq_index), decoded inside the matmul
     // bytes of the scale area for `blocks` blocks of 32 (K_Q4K: blocks must be a multiple of 8)
     static size_t scale_bytes(int kind, size_t blocks) { return kind == K_Q4K ? blocks / 8 * 20 : blocks * (kind == K_Q4M || kind == K_Q6 ? 4 : 2); }
-    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, N_OPS };
+    enum Op { ADD, BIAS, SILU, SILU_SPLIT, F16, COPY2D, RMSNORM, ROPE, ATTN, KVSTORE, ATTN_COMB, GELU, GATHER, SCATTER, KVSTORE_Q8, OAI, XBIAS, N_OPS };
     bool init(std::string& info);   // safe to call when no NVIDIA GPU: returns false
     bool ok() const { return ok_; }
     void bind_thread();             // make context current on calling thread
@@ -77,9 +77,10 @@ private:
     void* fns_[N_KINDS] = {};   // n == 1, 1 row per warp (small matrices)
     uint64_t qx_src_ = 0; int qx_n_ = 0, qx_cols_ = 0;   // input of the last activation quantization
     void* fe_[N_KINDS] = {};
-    static const int N_IQ = 11;   // IQ types plus Q2_K, Q3_K (see iq_index)
+    static const int N_IQ = 12;   // IQ types plus Q2_K, Q3_K (see iq_index)
     void* fiq_[N_IQ][3] = {};      // per type: 4 rows x 1 token, 1 row x 1 token, 2 rows x 8 tokens
-    void* fiqq8_[N_IQ] = {};       // the matrix -> the Q8_0 layout, for prompts on the int8 tensor cores
+    void* fiqq8_[N_IQ] = {};
+    void* fiqx_[N_IQ] = {};        // mixture-of-experts form (decode)       // the matrix -> the Q8_0 layout, for prompts on the int8 tensor cores
     uint64_t iqtab_ = 0;     // their lookup grids
     void* ftopk_ = nullptr; void* fwsum_ = nullptr; void* fsort_ = nullptr;
     void* cv_[11] = {};

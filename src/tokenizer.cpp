@@ -27,6 +27,7 @@ bool Tokenizer::load(const GGUF& g, std::string& err) {
     std::string model = g.gets("tokenizer.ggml.model", "gpt2");
     gpt2_ = model != "llama";
     std::string pre = g.gets("tokenizer.ggml.pre", "");
+    o200k_ = pre == "gpt-4o" || pre == "o200k";
     digits_ = (pre.find("qwen") != std::string::npos || pre.find("deepseek") != std::string::npos) ? 1 : 3;
     if (auto sv = g.find("tokenizer.ggml.scores")) for (double d : sv->arr_n) scores_.push_back((float)d);
     if (auto ty = g.find("tokenizer.ggml.token_type")) for (double d : ty->arr_n) types_.push_back((int)d);
@@ -167,6 +168,12 @@ void Tokenizer::encode_text(const std::string& s, std::vector<int>& out) const {
         if (is_letter(c) || (c != '\r' && c != '\n' && !is_digit_cp(c) && i + 1 < n && is_letter(cp[i + 1]))) {
             size_t j = i + 1;
             while (j < n && is_letter(cp[j])) j++;
+            if (o200k_ && j + 1 < n && cp[j] == '\'') {   // gpt-4o: (?i:'s|'t|'re|'ve|'m|'ll|'d)? stays on the word
+                auto lc = [&](size_t k) { return k < n ? (cp[k] | 32) : 0u; };
+                uint32_t a = lc(j + 1), b = lc(j + 2);
+                if (a == 's' || a == 't' || a == 'm' || a == 'd') j += 2;
+                else if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) j += 3;
+            }
             emit(i, j); i = j; continue;
         }
         if (is_digit_cp(c)) {
@@ -180,7 +187,7 @@ void Tokenizer::encode_text(const std::string& s, std::vector<int>& out) const {
             if (cp[j] == ' ' && j + 1 < n) j++;
             if (!is_space_cp(cp[j]) && !is_letter(cp[j]) && !is_digit_cp(cp[j])) {
                 while (j < n && !is_space_cp(cp[j]) && !is_letter(cp[j]) && !is_digit_cp(cp[j])) j++;
-                while (j < n && (cp[j] == '\r' || cp[j] == '\n')) j++;
+                while (j < n && (cp[j] == '\r' || cp[j] == '\n' || (o200k_ && cp[j] == '/'))) j++;
                 emit(i, j); i = j; continue;
             }
         }

@@ -162,7 +162,7 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); s += b; s += "\n"; };
     s += ".visible .entry k_attn_gqa(.param .u64 pQ, .param .u64 pK, .param .u64 pV, .param .u64 pPM, .param .u64 pPL, .param .u64 pPO,"
          " .param .u32 pHD, .param .u32 pKVD, .param .u32 pGRP, .param .u64 pPOS, .param .f32 pSCALE, .param .u32 pSPL, .param .u32 pWIN,"
-         " .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV)\n{\n"
+         " .param .u64 pKs, .param .u64 pVs, .param .u32 pNKV, .param .u64 pSink)\n{\n"
          " .reg .pred %p<8>; .reg .pred %ps<8>; .reg .b32 %r<56>; .reg .f32 %f<24>; .reg .b64 %rd<32>; .reg .b16 %h;\n";
     L(" .reg .f32 %%q<%d>; .reg .f32 %%o<%d>; .reg .f32 %%m<%d>; .reg .f32 %%l<%d>; .reg .f32 %%k<%d>; .reg .f32 %%v<%d>;", G * NT, G * NT, G, G, NT, NT);
     L(" .shared .align 4 .f32 sO[%d]; .shared .align 4 .f32 sM[%d]; .shared .align 4 .f32 sL[%d];", 8 * G * NT * 32, 8 * G, 8 * G);
@@ -177,8 +177,12 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
          " mul.f32 %f1,%f1,0f3FB8AA3B;\n";
     L(" mul.lo.u32 %%r16,%%r6,%d; mul.lo.u32 %%r17,%%r6,%%r1;", G);
     for (int t = 0; t < NT; t++) L(" add.u32 %%r%d,%%r10,%d; setp.lt.u32 %%ps%d,%%r%d,%%r1;", 20 + t, 32 * t, t, 20 + t);
+    // attention sinks (gpt-oss): a per-head logit with no value. It starts every softmax (max = sink), and is counted
+    // once in the sum: in warp 0 of split 0.
+    s += " ld.param.u64 %rd29,[pSink]; setp.ne.u64 %p7,%rd29,0; setp.eq.u32 %p6,%r9,0; setp.eq.and.u32 %p6,%r7,0,%p6; and.pred %p6,%p6,%p7;\n";
     for (int g = 0; g < G; g++) {
         L(" add.u32 %%r18,%%r16,%d; mul.lo.u32 %%r18,%%r18,%%r1; mov.f32 %%m%d,0fF149F2CA; mov.f32 %%l%d,0f00000000;", g, g, g);
+        L(" add.u32 %%r19,%%r16,%d; mul.wide.u32 %%rd30,%%r19,4; add.u64 %%rd30,%%rd29,%%rd30; @%%p7 ld.global.nc.f32 %%m%d,[%%rd30]; @%%p7 mul.f32 %%m%d,%%m%d,0f3FB8AA3B; @%%p6 mov.f32 %%l%d,0f3F800000;", g, g, g, g, g);
         for (int t = 0; t < NT; t++)
             L(" add.u32 %%r19,%%r18,%%r%d; mul.wide.u32 %%rd8,%%r19,4; add.u64 %%rd8,%%rd1,%%rd8; mov.f32 %%q%d,0f00000000; @%%ps%d ld.global.f32 %%q%d,[%%rd8]; mul.f32 %%q%d,%%q%d,%%f1; mov.f32 %%o%d,0f00000000;",
               20 + t, g * NT + t, t, g * NT + t, g * NT + t, g * NT + t, g * NT + t);
@@ -276,6 +280,20 @@ std::string gpu_ops_ptx() {
                                         " ld.global.f32 %f2,[%rd4]; ld.global.f32 %f3,[%rd5];\n") + kGelu +
                             " mul.f32 %f5,%f7,%f3; st.global.f32 [%rd4],%f5;\n";
     s += ew("k_gelu", ".param .u64 pG, .param .u64 pU", " ld.param.u64 %rd1,[pG]; ld.param.u64 %rd2,[pU];\n", gelu_body.c_str());
+    // gpt-oss: g = min(g, 7), u = clamp(u, -7, 7); g * sigmoid(1.702 g) * (u + 1) -> G
+    s += ew("k_oai", ".param .u64 pG, .param .u64 pU",
+            " ld.param.u64 %rd1,[pG]; ld.param.u64 %rd2,[pU];\n",
+            " mul.wide.u32 %rd3,%r5,4; add.u64 %rd4,%rd1,%rd3; add.u64 %rd5,%rd2,%rd3;\n"
+            " ld.global.f32 %f2,[%rd4]; ld.global.f32 %f3,[%rd5]; min.f32 %f2,%f2,0f40E00000; min.f32 %f3,%f3,0f40E00000; max.f32 %f3,%f3,0fC0E00000;\n"
+            " mul.f32 %f4,%f2,0fC01D265F; ex2.approx.f32 %f4,%f4; add.f32 %f4,%f4,0f3F800000; div.approx.f32 %f4,%f2,%f4;\n"
+            " add.f32 %f3,%f3,0f3F800000; mul.f32 %f4,%f4,%f3; st.global.f32 [%rd4],%f4;\n");
+    // y[s*W+c] += b[ids[s]*W+c]: per-slot expert bias
+    s += ew("k_xbias", ".param .u64 pY, .param .u64 pB, .param .u64 pI, .param .u32 pW",
+            " ld.param.u64 %rd1,[pY]; ld.param.u64 %rd2,[pB]; ld.param.u64 %rd6,[pI]; ld.param.u32 %r7,[pW];\n",
+            " div.u32 %r8,%r5,%r7; mul.lo.u32 %r9,%r8,%r7; sub.u32 %r9,%r5,%r9;\n"
+            " mul.wide.u32 %rd3,%r8,4; add.u64 %rd3,%rd6,%rd3; ld.global.u32 %r10,[%rd3]; mad.lo.u32 %r10,%r10,%r7,%r9;\n"
+            " mul.wide.u32 %rd4,%r10,4; add.u64 %rd4,%rd2,%rd4; ld.global.f32 %f2,[%rd4];\n"
+            " mul.wide.u32 %rd5,%r5,4; add.u64 %rd5,%rd1,%rd5; ld.global.f32 %f3,[%rd5]; add.f32 %f3,%f3,%f2; st.global.f32 [%rd5],%f3;\n");
     // dst[r*D+c] = src[idx[r]*D+c]
     s += ew("k_gather", ".param .u64 pS, .param .u64 pI, .param .u64 pD, .param .u32 pDim",
             " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pI]; ld.param.u64 %rd6,[pD]; ld.param.u32 %r7,[pDim];\n",

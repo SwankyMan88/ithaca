@@ -8,11 +8,12 @@
 #include <cstdarg>
 
 // Lookup tables in one device buffer, at these byte offsets.
-enum { T_IQ2XXS = 0, T_IQ2XS = 2048, T_IQ2S = 6144, T_IQ3XXS = 14336, T_IQ3S = 15360, T_IQ1S = 17408, T_KSIGNS = 33792, T_KVAL = 33920, T_END = 33936 };
+enum { T_IQ2XXS = 0, T_IQ2XS = 2048, T_IQ2S = 6144, T_IQ3XXS = 14336, T_IQ3S = 15360, T_IQ1S = 17408, T_KSIGNS = 33792, T_KVAL = 33920, T_MXV = 33936, T_END = 33952 };
 
-static const int kIqN = 11;
-static const int kIqTypes[kIqN] = {GT_IQ2_XXS, GT_IQ2_XS, GT_IQ2_S, GT_IQ3_XXS, GT_IQ3_S, GT_IQ1_S, GT_IQ1_M, GT_IQ4_NL, GT_IQ4_XS, GT_Q2_K, GT_Q3_K};
-static const char* kIqNames[kIqN] = {"iq2xxs", "iq2xs", "iq2s", "iq3xxs", "iq3s", "iq1s", "iq1m", "iq4nl", "iq4xs", "q2k", "q3k"};
+static const int kIqN = 12;
+static const int kIqTypes[kIqN] = {GT_IQ2_XXS, GT_IQ2_XS, GT_IQ2_S, GT_IQ3_XXS, GT_IQ3_S, GT_IQ1_S, GT_IQ1_M, GT_IQ4_NL, GT_IQ4_XS, GT_Q2_K, GT_Q3_K, GT_MXFP4};
+static const char* kIqNames[kIqN] = {"iq2xxs", "iq2xs", "iq2s", "iq3xxs", "iq3s", "iq1s", "iq1m", "iq4nl", "iq4xs", "q2k", "q3k", "mxfp4"};
+static bool small_blk(int it) { return it == GT_IQ4_NL || it == GT_MXFP4; }   // one 32-value block, no super-block
 int iq_index(int gtype) { for (int i = 0; i < kIqN; i++) if (kIqTypes[i] == gtype) return i; return -1; }
 
 std::vector<uint8_t> iq_tables_blob() {
@@ -25,6 +26,7 @@ std::vector<uint8_t> iq_tables_blob() {
     memcpy(&b[T_IQ1S], iq1s_grid, sizeof iq1s_grid);
     memcpy(&b[T_KSIGNS], ksigns_iq2xs, sizeof ksigns_iq2xs);
     memcpy(&b[T_KVAL], kvalues_iq4nl, sizeof kvalues_iq4nl);
+    memcpy(&b[T_MXV], kvalues_mxfp4, sizeof kvalues_mxfp4);
     return b;
 }
 
@@ -58,6 +60,18 @@ void ld32u(K& k, const char* r, int off) { k(" ld.global.nc.u16 %%t30,[%%qa+%d];
 // and %s1 (16..31). IQ1: %dg0..3 = delta sign of each 8-group; the values are 8 x grid and the scales d/8.
 // Q2_K: value = s * q - m, the mins in %m0 / %m1.
 void decode(K& k, int t) {
+    if (kIqTypes[t] == GT_MXFP4) {   // 17-byte blocks: byte loads only. Scale 2^(e - 128) (e >= 2; smaller e is ~0 anyway)
+        k(" ld.global.nc.u8 %%t1,[%%rb]; max.u32 %%t1,%%t1,1; sub.u32 %%t1,%%t1,1; shl.b32 %%t1,%%t1,23; mov.b32 %%fd,%%t1; mov.f32 %%s0,%%fd; mov.f32 %%s1,%%fd;");
+        for (int i = 0; i < 4; i++) {
+            k(" ld.global.nc.u8 %%t30,[%%rb+%d]; ld.global.nc.u8 %%t31,[%%rb+%d]; bfi.b32 %%t30,%%t31,%%t30,8,8;", 1 + 4 * i, 2 + 4 * i);
+            k(" ld.global.nc.u8 %%t31,[%%rb+%d]; bfi.b32 %%t30,%%t31,%%t30,16,8; ld.global.nc.u8 %%t31,[%%rb+%d]; bfi.b32 %%t%d,%%t31,%%t30,24,8;", 3 + 4 * i, 4 + 4 * i, 10 + i);
+        }
+        for (int i = 0; i < 4; i++) {
+            k(" and.b32 %%t20,%%t%d,0x0F0F0F0F;", 10 + i); nl_word(k, i);
+            k(" shr.u32 %%t20,%%t%d,4; and.b32 %%t20,%%t20,0x0F0F0F0F;", 10 + i); nl_word(k, 4 + i);
+        }
+        return;
+    }
     k(" ld.global.nc.b16 %%h0,[%%rb]; cvt.f32.f16 %%fd,%%h0;");
     switch (kIqTypes[t]) {
     case GT_IQ2_XXS:
@@ -201,31 +215,41 @@ void decode(K& k, int t) {
 
 // Y[tok][row] = sum over k of W[row][k] * X[tok][k], X given as int8 blocks of 32 (XQ) with scales (XD).
 // Each warp owns R rows; each CTA (8 warps) covers TT tokens.
-std::string gen_iqmv(int t, int R, int TT) {
+// ex: mixture-of-experts form (iqmx_<type>, R = TT = 1): grid y = slot; the weights are expert pIds[slot]'s rows of a
+// stacked matrix, the activations are row slot * pXs of X, the result row slot of Y.
+std::string gen_iqmv(int t, int R, int TT, bool ex = false) {
     K k;
     const int it = kIqTypes[t];
-    const bool sb = it != GT_IQ4_NL, iq1 = it == GT_IQ1_S || it == GT_IQ1_M, km = it == GT_Q2_K;
-    const int blk = (int)gtype_row_bytes(it, it == GT_IQ4_NL ? 32 : 256);
-    k(".visible .entry iqmv_%s_%d_%d(.param .u64 pW, .param .u64 pT, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY, .param .u32 pC, .param .u32 pR, .param .u32 pN)",
+    const bool sb = !small_blk(it), iq1 = it == GT_IQ1_S || it == GT_IQ1_M, km = it == GT_Q2_K;
+    const int blk = (int)gtype_row_bytes(it, small_blk(it) ? 32 : 256);
+    if (ex) k(".visible .entry iqmx_%s(.param .u64 pW, .param .u64 pT, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY, .param .u32 pC, .param .u32 pR, .param .u64 pIds, .param .u32 pXs)", kIqNames[t]);
+    else k(".visible .entry iqmv_%s_%d_%d(.param .u64 pW, .param .u64 pT, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY, .param .u32 pC, .param .u32 pR, .param .u32 pN)",
       kIqNames[t], R, TT);
     k("{");
     k(" .reg .pred %%p<8>; .reg .pred %%pr<%d>; .reg .pred %%pt<%d>; .reg .b32 %%t<40>; .reg .b32 %%w<8>; .reg .b32 %%x<8>; .reg .b32 %%k<4>; .reg .b32 %%dg<4>; .reg .b32 %%gs<4>;", R, TT);
     k(" .reg .b32 %%ib, %%nb, %%row, %%tok0, %%lane, %%C, %%NR, %%NT, %%bi; .reg .b64 %%rb, %%qa, %%qb, %%qc, %%tb, %%wb, %%xq, %%xd, %%yp, %%rowb<%d>, %%rbytes, %%qo; .reg .b16 %%h<2>;", R);
     k(" .reg .f32 %%fd, %%s0, %%s1, %%m0, %%m1, %%f<8>, %%xs; .reg .f32 %%a<%d>;", R * TT);
     k(" ld.param.u64 %%wb,[pW]; ld.param.u64 %%tb,[pT]; ld.param.u64 %%xq,[pXQ]; ld.param.u64 %%xd,[pXD]; ld.param.u64 %%yp,[pY];");
-    k(" ld.param.u32 %%C,[pC]; ld.param.u32 %%NR,[pR]; ld.param.u32 %%NT,[pN];");
+    k(" .reg .b32 %%ys;");
+    if (ex) k(" ld.param.u32 %%C,[pC]; ld.param.u32 %%NR,[pR]; mov.u32 %%NT,0x7FFFFFFF;");
+    else k(" ld.param.u32 %%C,[pC]; ld.param.u32 %%NR,[pR]; ld.param.u32 %%NT,[pN];");
     k(" mov.u32 %%t1,%%tid.x; and.b32 %%lane,%%t1,31; shr.u32 %%t1,%%t1,5; mov.u32 %%t2,%%ctaid.x; mul.lo.u32 %%t2,%%t2,%d; mad.lo.u32 %%row,%%t1,%d,%%t2;", 8 * R, R);
-    k(" mov.u32 %%tok0,%%ctaid.y; mul.lo.u32 %%tok0,%%tok0,%d; shr.u32 %%nb,%%C,5;", TT);
+    k(" mov.u32 %%tok0,%%ctaid.y; mov.u32 %%ys,%%tok0; mul.lo.u32 %%tok0,%%tok0,%d; shr.u32 %%nb,%%C,5;", TT);
+    if (ex) k(" ld.param.u32 %%t3,[pXs]; mul.lo.u32 %%tok0,%%ys,%%t3;");
     k(" setp.ge.u32 %%p1,%%row,%%NR; @%%p1 bra DONE;");
     // row stride in bytes
     if (sb) k(" shr.u32 %%t3,%%C,8; mul.wide.u32 %%rbytes,%%t3,%d;", blk);
     else k(" mul.wide.u32 %%rbytes,%%nb,%d;", blk);
+    if (ex) {   // this slot's expert: its rows start NR rows further per expert
+        k(" ld.param.u64 %%qa,[pIds]; mul.wide.u32 %%qb,%%ys,4; add.u64 %%qa,%%qa,%%qb; ld.global.u32 %%t3,[%%qa];");
+        k(" mul.lo.u32 %%t3,%%t3,%%NR; cvt.u64.u32 %%qa,%%t3; mul.lo.u64 %%qa,%%qa,%%rbytes; add.u64 %%wb,%%wb,%%qa;");
+    }
     for (int j = 0; j < R; j++) {
         k(" add.u32 %%t3,%%row,%d; setp.lt.u32 %%pr%d,%%t3,%%NR; cvt.u64.u32 %%qa,%%t3; mul.lo.u64 %%rowb%d,%%qa,%%rbytes; add.u64 %%rowb%d,%%rowb%d,%%wb;", j, j, j, j, j);
     }
     for (int i = 0; i < TT; i++) k(" add.u32 %%t3,%%tok0,%d; setp.lt.u32 %%pt%d,%%t3,%%NT;", i, i);
     for (int i = 0; i < R * TT; i++) k(" mov.f32 %%a%d,0f00000000;", i);
-    if (it == GT_IQ4_NL || it == GT_IQ4_XS) k(" ld.global.nc.v4.u32 {%%k0,%%k1,%%k2,%%k3},[%%tb+%d];", T_KVAL);
+    if (it == GT_IQ4_NL || it == GT_IQ4_XS || it == GT_MXFP4) k(" ld.global.nc.v4.u32 {%%k0,%%k1,%%k2,%%k3},[%%tb+%d];", it == GT_MXFP4 ? T_MXV : T_KVAL);
     k(" mov.u32 %%bi,%%lane; mov.u32 %%t32,0x01010101;");
     k("LOOP:");
     k(" setp.ge.u32 %%p2,%%bi,%%nb; @%%p2 bra END;");
@@ -268,7 +292,7 @@ std::string gen_iqmv(int t, int R, int TT) {
     k(" setp.ne.u32 %%p3,%%lane,0; @%%p3 bra DONE;");
     for (int j = 0; j < R; j++)
         for (int i = 0; i < TT; i++) {
-            k(" and.pred %%p4,%%pr%d,%%pt%d; add.u32 %%t3,%%tok0,%d; mul.lo.u32 %%t3,%%t3,%%NR; add.u32 %%t3,%%t3,%%row; add.u32 %%t3,%%t3,%d;", j, i, i, j);
+            k(" and.pred %%p4,%%pr%d,%%pt%d; add.u32 %%t3,%s,%d; mul.lo.u32 %%t3,%%t3,%%NR; add.u32 %%t3,%%t3,%%row; add.u32 %%t3,%%t3,%d;", j, i, ex ? "%ys" : "%tok0", i, j);
             k(" mul.wide.u32 %%qa,%%t3,4; add.u64 %%qa,%%qa,%%yp; @%%p4 st.global.f32 [%%qa],%%a%d;", j * TT + i);
         }
     k("DONE:");
@@ -284,9 +308,9 @@ std::string gen_iqmv(int t, int R, int TT) {
 std::string gen_iqq8(int t) {
     K k;
     const int it = kIqTypes[t];
-    const bool sb = it != GT_IQ4_NL, iq1 = it == GT_IQ1_S || it == GT_IQ1_M, km = it == GT_Q2_K,
+    const bool sb = !small_blk(it), iq1 = it == GT_IQ1_S || it == GT_IQ1_M, km = it == GT_Q2_K,
                half = it == GT_IQ2_XS || it == GT_IQ2_S || it == GT_IQ1_M || it == GT_Q2_K || it == GT_Q3_K;
-    const int blk = (int)gtype_row_bytes(it, it == GT_IQ4_NL ? 32 : 256);
+    const int blk = (int)gtype_row_bytes(it, small_blk(it) ? 32 : 256);
     k(".visible .entry iqq8_%s(.param .u64 pW, .param .u64 pT, .param .u64 pS, .param .u64 pQ, .param .u32 pC, .param .u32 pR)", kIqNames[t]);
     k("{");
     k(" .reg .pred %%p<8>; .reg .b32 %%t<40>; .reg .b32 %%w<8>; .reg .b32 %%k<4>; .reg .b32 %%dg<4>; .reg .b32 %%ib, %%nb, %%bi, %%row, %%C, %%NR, %%gi;");
@@ -297,7 +321,7 @@ std::string gen_iqq8(int t) {
     if (sb) k(" shr.u32 %%t3,%%C,8; mul.wide.u32 %%rbytes,%%t3,%d; and.b32 %%ib,%%bi,7; shr.u32 %%t3,%%bi,3; mul.wide.u32 %%qc,%%t3,%d;", blk, blk);
     else k(" mul.wide.u32 %%rbytes,%%nb,%d; mov.u32 %%ib,0; mul.wide.u32 %%qc,%%bi,%d;", blk, blk);
     k(" cvt.u64.u32 %%qa,%%row; mul.lo.u64 %%rb,%%qa,%%rbytes; add.u64 %%rb,%%rb,%%wb; add.u64 %%rb,%%rb,%%qc;");
-    if (it == GT_IQ4_NL || it == GT_IQ4_XS) k(" ld.global.nc.v4.u32 {%%k0,%%k1,%%k2,%%k3},[%%tb+%d];", T_KVAL);
+    if (it == GT_IQ4_NL || it == GT_IQ4_XS || it == GT_MXFP4) k(" ld.global.nc.v4.u32 {%%k0,%%k1,%%k2,%%k3},[%%tb+%d];", it == GT_MXFP4 ? T_MXV : T_KVAL);
     decode(k, t);
     if (iq1)   // int8 value 8 * grid + delta sign, per byte: in the biased (+128) domain no byte borrows or carries
         for (int w = 0; w < 8; w++) {
@@ -330,7 +354,7 @@ std::string gen_iqq8(int t) {
 // All IQ matmul kernels: iqmv_<type>_<rows per warp>_<tokens per CTA>.
 std::string iq_ptx() {
     std::string s;
-    for (int t = 0; t < kIqN; t++) s += gen_iqmv(t, 4, 1) + gen_iqmv(t, 1, 1) + gen_iqmv(t, 2, 8) + gen_iqq8(t);
+    for (int t = 0; t < kIqN; t++) s += gen_iqmv(t, 4, 1) + gen_iqmv(t, 1, 1) + gen_iqmv(t, 2, 8) + gen_iqq8(t) + gen_iqmv(t, 1, 1, true);
     return s;
 }
 const char* iq_name(int i) { return kIqNames[i]; }

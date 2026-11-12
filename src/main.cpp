@@ -178,7 +178,7 @@ static std::vector<std::wstring> find_drafts() {
     uint64_t main_sz = 0;
     for (auto& f : model_files()) if (_wcsicmp(f.first.c_str(), main.c_str()) == 0) main_sz = f.second;
     if (!main_sz) return {};
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
     std::vector<std::pair<int, std::wstring>> found;
     const int nv = g_model.tok.n_vocab();
     for (auto& f : model_files()) {
@@ -999,6 +999,28 @@ int main() {
                 printf("  n=%d  %.1f ms per forward\n", n, (now_sec() - t0) / 10 * 1e3);
             }
             return 0;
+        }
+        if (getenv("ITHACA_RAW")) {   // greedy continuation of the prompt as plain text (no chat template), for checks against llama.cpp
+            std::vector<int> t = g_model.tok.encode(prompt, true);
+            if (getenv("ITHACA_NLL")) {   // mean negative log-likelihood of the prompt: first half as one batch, the rest token by token
+                const int h = (int)t.size() / 2; double nll = 0; int cnt = 0;
+                auto acc = [&](const float* lg, int next) {
+                    const int V = g_model.hp.n_vocab; float mx = *std::max_element(lg, lg + V); double s = 0;
+                    for (int v = 0; v < V; v++) s += std::exp((double)lg[v] - mx);
+                    nll += std::log(s) + mx - lg[next]; cnt++;
+                };
+                const float* lg = g_model.eval(t.data(), h);
+                for (int i = h; i < (int)t.size(); i++) { acc(lg, t[i]); lg = g_model.eval(&t[i], 1); }
+                printf("NLL %.4f over %d tokens (%zu in the prompt)\n", nll / cnt, cnt, t.size()); g_model.unload(); return 0;
+            }
+            printf("[tokens:"); for (int id : t) printf(" %d", id); printf("]\n%s", prompt.c_str());
+            const float* lg = g_model.eval(t.data(), (int)t.size());
+            for (int i = 0; i < (n > 0 ? n : 32) && lg; i++) {
+                int id = (int)(std::max_element(lg, lg + g_model.hp.n_vocab) - lg);
+                std::string p = g_model.tok.piece(id); fwrite(p.data(), 1, p.size(), stdout); fflush(stdout);
+                lg = g_model.eval(&id, 1);
+            }
+            printf("\n"); g_model.unload(); return 0;
         }
         GenOpts o; o.max_tokens = n; o.temp = temp;
         Msg um{"user", prompt, {}};

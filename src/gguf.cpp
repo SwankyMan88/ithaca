@@ -25,6 +25,7 @@ static TypeInfo tinfo(int t) {
     case GT_IQ1_M: return {256, 56, "IQ1_M"};
     case GT_IQ4_NL: return {32, 18, "IQ4_NL"};
     case GT_IQ4_XS: return {256, 136, "IQ4_XS"};
+    case GT_MXFP4: return {32, 17, "MXFP4"};
     default: return {0, 0, "?"};
     }
 }
@@ -34,7 +35,7 @@ bool gtype_supported(int t) {
     case GT_F32: case GT_F16: case GT_BF16: case GT_Q4_0: case GT_Q4_1: case GT_Q5_0:
     case GT_Q5_1: case GT_Q8_0: case GT_Q2_K: case GT_Q3_K: case GT_Q4_K: case GT_Q5_K: case GT_Q6_K: return true;
     case GT_IQ2_XXS: case GT_IQ2_XS: case GT_IQ2_S: case GT_IQ3_XXS: case GT_IQ3_S: case GT_IQ1_S: case GT_IQ1_M:
-    case GT_IQ4_NL: case GT_IQ4_XS: return true;
+    case GT_IQ4_NL: case GT_IQ4_XS: case GT_MXFP4: return true;
     default: return false;
     }
 }

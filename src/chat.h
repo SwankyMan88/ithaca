@@ -31,6 +31,11 @@ public:
     int draft_k = 5;
 private:
     int sample(const float* logits, const GenOpts& o, const std::vector<int>& recent);
+    // Text of a generated token; true = stop. gpt-oss (harmony format): the analysis channel becomes a <think> block,
+    // the final channel the answer; the channel headers themselves are not shown.
+    bool token_text(int id, std::string& out);
+    bool harmony() const { return m_.chat_template.find("<|channel|>") != std::string::npos; }
+    struct { bool header = false, think = false; std::string chan; } hs_;
     Model& m_;
     Vision* vis_;
     Model* draft_ = nullptr;

@@ -567,6 +567,9 @@ static const uint32_t iq3s_grid[512] = {0x01010101, 0x01010103, 0x01010105, 0x01
     0x0f090307, 0x0f090501, 0x0f090b01, 0x0f0b0505, 0x0f0b0905, 0x0f0d0105, 0x0f0d0703, 0x0f0f0101};
 
 static const int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+// MXFP4 (OCP microscaling FP4, e2m1) values doubled, so the scale is 2^(e - 128)
+static const int8_t kvalues_mxfp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+static inline float e8m0_half(uint8_t e) { uint32_t b = e < 2 ? 0x00200000u << e : (uint32_t)(e - 1) << 23; float f; memcpy(&f, &b, 4); return f; }
 
 static const uint64_t iq1s_grid[NGRID_IQ1S] = {0xffffffffffffffff, 0xffffffffffffff01, 0xffffffffffff0000, 0xffffffffffff01ff,
     0xffffffffffff0101, 0xffffffffff00ff00, 0xffffffffff000000, 0xffffffffff01ffff,

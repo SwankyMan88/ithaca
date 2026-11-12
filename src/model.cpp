@@ -50,9 +50,9 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.arch = g_.gets("general.architecture");
     hp.name = g_.gets("general.name", "model");
     const std::string& a = hp.arch;
-    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe"};
+    static const char* ok_arch[] = {"llama", "qwen2", "qwen2vl", "qwen3", "phi3", "granite", "mistral", "gemma3", "granitemoe", "qwen3moe", "gpt-oss"};
     if (std::find_if(std::begin(ok_arch), std::end(ok_arch), [&](const char* s) { return a == s; }) == std::end(ok_arch)) {
-        err = "architecture '" + a + "' is not supported yet (supported: llama, mistral, mixtral, qwen2, qwen2.5-vl text, qwen3, qwen3-moe, phi3/phi4, granite, granite-moe, gemma3)";
+        err = "architecture '" + a + "' is not supported yet (supported: llama, mistral, mixtral, qwen2, qwen2.5-vl text, qwen3, qwen3-moe, phi3/phi4, granite, granite-moe, gemma3, gpt-oss)";
         g_.close(); return false;
     }
     std::string P = a + ".";
@@ -69,7 +69,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     hp.hd = (int)g_.geti(P + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
     hp.n_rot = (int)g_.geti(P + "rope.dimension_count", hp.hd);
     hp.ctx_train = (int)g_.geti(P + "context_length", 4096);
-    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3";
+    hp.neox = a == "qwen2" || a == "qwen2vl" || a == "qwen3" || a == "phi3" || a == "qwen3moe" || a == "gemma3" || a == "gpt-oss";
     hp.n_expert = (int)g_.geti(P + "expert_count", 0);
     hp.n_expert_used = (int)g_.geti(P + "expert_used_count", 0);
     { const GValue* en = g_.find(P + "expert_weights_norm"); hp.expert_norm = en ? en->i != 0 : true; }
@@ -79,6 +79,11 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         hp.swa_window = (int)g_.geti(P + "attention.sliding_window", 0); if (getenv("ITHACA_NO_SWA")) hp.swa_window = 0;
         hp.rope_base_swa = (float)g_.getf(P + "rope.local.freq_base", 10000.0);
         if (hp.n_layer == 62) hp.attn_scale = 1.f / std::sqrt((float)hp.n_embd / hp.n_head);   // 27B uses query_pre_attn_scalar
+    }
+    if (a == "gpt-oss") {   // every other layer (from the first) has a 128-token window; same RoPE on both kinds
+        hp.oai = true;
+        hp.swa_window = (int)g_.geti(P + "attention.sliding_window", 0); if (getenv("ITHACA_NO_SWA")) hp.swa_window = 0;
+        hp.rope_base_swa = hp.rope_base;
     }
     if (a == "granite" || a == "granitemoe") {
         hp.emb_scale = (float)g_.getf(P + "embedding_scale", 1.0);
@@ -106,7 +111,12 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         L.k_norm = vec(b + "attn_k_norm.weight");
         L.bq = vec(b + "attn_q.bias"); L.bk = vec(b + "attn_k.bias"); L.bv = vec(b + "attn_v.bias");
         L.post_attn_norm = vec(b + "post_attention_norm.weight"); L.post_ffn_norm = vec(b + "post_ffw_norm.weight");
-        L.swa = hp.swa_window > 0 && (i + 1) % 6 != 0;
+        L.swa = hp.swa_window > 0 && (hp.oai ? i % 2 == 0 : (i + 1) % 6 != 0);
+        if (hp.oai) {   // gpt-oss names the FFN input norm post_attention_norm
+            L.ffn_norm.swap(L.post_attn_norm);
+            L.bo = vec(b + "attn_output.bias"); L.sinks = vec(b + "attn_sinks.weight"); L.b_inp = vec(b + "ffn_gate_inp.bias");
+            L.b_gate = vec(b + "ffn_gate_exps.bias"); L.b_up = vec(b + "ffn_up_exps.bias"); L.b_down = vec(b + "ffn_down_exps.bias");
+        }
         bool ok = true;
         if (g_.get(b + "attn_qkv.weight")) ok &= bind(L.qkv, b + "attn_qkv.weight", err);
         else ok &= bind(L.q, b + "attn_q.weight", err) && bind(L.k, b + "attn_k.weight", err) && bind(L.v, b + "attn_v.weight", err);
@@ -145,6 +155,20 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         if (i < (int)factors.size() && factors[i] > 0) inv_freq_[i] /= factors[i];
         inv_freq_swa_[i] = std::pow(hp.rope_base_swa, -2.0f * i / hp.n_rot);
     }
+    if (g_.gets(P + "rope.scaling.type") == "yarn") {
+        // YaRN: low frequencies are interpolated by the factor, high ones kept, a linear ramp between; cos and sin are
+        // scaled by 1 + 0.1 ln(factor), which here goes into the attention scale (it multiplies both q and k).
+        const double f = g_.getf(P + "rope.scaling.factor", 1.0), orig = g_.getf(P + "rope.scaling.original_context_length", 4096.0);
+        const double bf = g_.getf(P + "rope.scaling.yarn_beta_fast", 32.0), bs = g_.getf(P + "rope.scaling.yarn_beta_slow", 1.0), dim = hp.n_rot;
+        auto corr = [&](double b) { return dim * std::log(orig / (b * 2 * 3.14159265358979)) / (2 * std::log((double)hp.rope_base)); };
+        double lo = std::max(0.0, corr(bf)), hi = std::min(dim / 2 - 1, corr(bs)); if (hi <= lo) hi = lo + 0.001;
+        for (int i = 0; i < hp.n_rot / 2; i++) {
+            const double fr = std::pow((double)hp.rope_base, -2.0 * i / dim), ramp = std::min(1.0, std::max(0.0, (i - lo) / (hi - lo)));
+            inv_freq_[i] = inv_freq_swa_[i] = (float)(fr / f * ramp + fr * (1 - ramp));
+        }
+        const double ms = f > 1 ? 1 + 0.1 * std::log(f) : 1;
+        hp.attn_scale = (float)(ms * ms / std::sqrt((double)hp.hd));
+    }
 
     ctx = std::max(256, std::min(o.ctx, hp.ctx_train > 0 ? hp.ctx_train : o.ctx));
     size_t kvd = (size_t)hp.n_kv * hp.hd;
@@ -170,6 +194,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         std::string ge;
         const bool flash = !getenv("ITHACA_NO_FLASH") && !getenv("ITHACA_NO_TC_PREFILL") && (gx().ok() || gx().init(ge)) && gx().tensor_cores() &&
                            (hp.hd == 64 || hp.hd == 80 || hp.hd == 96 || hp.hd == 128 || hp.hd == 256);
+        if (hp.oai && !flash) vram_budget = 0;   // attention sinks are only in the tensor-core kernels: CPU elsewhere
         gpu_batch_ = flash ? 512 : (int)std::max<int64_t>(1, std::min<int64_t>(256, (128ll << 20) / ((int64_t)hp.n_head * ctx * 4)));
         sc_rows_ = flash ? 1 : gpu_batch_;
         {   // int8 KV needs the flash prompt kernels and the generated decode kernel (they read int8)
@@ -180,6 +205,11 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
                       std::max<int64_t>({hp.n_embd, hp.n_head * hp.hd + 2 * (int64_t)kvd, 2ll * hp.n_ff}) + hp.n_rot) +
                       (int64_t)sc_rows_ * hp.n_head * ctx * 4 + hp.n_vocab * 4ll;
         vram_budget -= act + (64ll << 20);
+        if (o.vram_mb < 0) {   // a model that only misses by the headroom runs all on the GPU with a smaller one (a layer on the CPU halves the speed)
+            int64_t need = gpu_cost(out_);
+            for (auto& L : layers_) { for (Lin* l : L.lins()) need += gpu_cost(*l); need += (int64_t)ctx * kv_pos_bytes(); }
+            if (need > vram_budget && need <= vram_budget + (512ll << 20)) vram_budget = need;
+        }
     }
     MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms);
     int64_t kv_bytes = (int64_t)(kc_.size() + vc_.size()) * 2;
@@ -309,6 +339,7 @@ void Model::tier_thread() {
             L.d_qn = dev_vec(L.q_norm); L.d_kn = dev_vec(L.k_norm);
             L.d_bq = dev_vec(L.bq); L.d_bk = dev_vec(L.bk); L.d_bv = dev_vec(L.bv);
             L.d_pan = dev_vec(L.post_attn_norm); L.d_pfn = dev_vec(L.post_ffn_norm);
+            L.d_bo = dev_vec(L.bo); L.d_sinks = dev_vec(L.sinks); L.d_binp = dev_vec(L.b_inp); L.d_bgate = dev_vec(L.b_gate); L.d_bup = dev_vec(L.b_up); L.d_bdown = dev_vec(L.b_down);
             {   // the KV cache starts small and grows with the conversation (ensure_kv); the tier plan
                 // already budgets the full context, so growing never pushes this model out of VRAM
                 std::lock_guard<std::mutex> kl(kv_m_);
@@ -587,14 +618,18 @@ void Model::route(const float* lg, int n, std::vector<std::vector<std::pair<int,
 }
 
 static inline float act_silu(float x) { return x / (1.0f + std::exp(-x)); }
+// gpt-oss: gate clamped to <= 7, up to [-7, 7]; gate * sigmoid(1.702 gate) * (up + 1)
+static inline float act_oai(float g, float u) { g = std::min(g, 7.f); u = std::min(7.f, std::max(-7.f, u)); return g / (1.f + std::exp(-1.702f * g)) * (u + 1.f); }
 static inline float act_gelu(float x) { return 0.5f * x * (1.f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x))); }
 
 // Mixture-of-experts FFN on the CPU: tokens are grouped per expert so each expert's weights are read once.
 void Model::moe_cpu(Layer& L, int n) {
     const int d = hp.n_embd, ff = hp.n_ff_exp;
     matmul(L.gate_inp, xn_.data(), n, router_.data());
+    if (!L.b_inp.empty()) for (int t = 0; t < n; t++) for (int e = 0; e < hp.n_expert; e++) router_[(size_t)t * hp.n_expert + e] += L.b_inp[e];
     std::vector<std::vector<std::pair<int, float>>> pe;
     route(router_.data(), n, pe);
+    auto bias = [&](const std::vector<float>& b, int e, float* y, int c, int w) { if (!b.empty()) for (int i = 0; i < c; i++) for (int j = 0; j < w; j++) y[(size_t)i * w + j] += b[(size_t)e * w + j]; };
     const size_t eg = gtype_row_bytes(L.gate_exps.t->type, d) * ff, eu = gtype_row_bytes(L.up_exps.t->type, d) * ff,
                  ed = gtype_row_bytes(L.down_exps.t->type, ff) * d;
     for (int e = 0; e < hp.n_expert; e++) {
@@ -603,8 +638,11 @@ void Model::moe_cpu(Layer& L, int n) {
         for (int i = 0; i < c; i++) memcpy(&moe_x_[(size_t)i * d], &xn_[(size_t)pe[e][i].first * d], d * 4);
         matmul_raw(L.gate_exps.t->type, L.gate_exps.t->data + e * eg, ff, d, moe_x_.data(), c, ff1_.data());
         matmul_raw(L.up_exps.t->type, L.up_exps.t->data + e * eu, ff, d, moe_x_.data(), c, ff2_.data());
-        for (size_t i = 0; i < (size_t)c * ff; i++) ff1_[i] = (hp.gelu ? act_gelu(ff1_[i]) : act_silu(ff1_[i])) * ff2_[i];
+        bias(L.b_gate, e, ff1_.data(), c, ff); bias(L.b_up, e, ff2_.data(), c, ff);
+        if (hp.oai) for (size_t i = 0; i < (size_t)c * ff; i++) ff1_[i] = act_oai(ff1_[i], ff2_[i]);
+        else for (size_t i = 0; i < (size_t)c * ff; i++) ff1_[i] = (hp.gelu ? act_gelu(ff1_[i]) : act_silu(ff1_[i])) * ff2_[i];
         matmul_raw(L.down_exps.t->type, L.down_exps.t->data + e * ed, d, ff, ff1_.data(), c, tmp_.data());
+        bias(L.b_down, e, tmp_.data(), c, d);
         for (int i = 0; i < c; i++) {
             float w = pe[e][i].second * hp.res_scale;
             float* xr = &x_[(size_t)pe[e][i].first * d]; const float* yr = &tmp_[(size_t)i * d];
@@ -616,6 +654,7 @@ void Model::moe_cpu(Layer& L, int n) {
 // Expert slice of a stacked GPU weight: rows [e*R, (e+1)*R).
 static void expert_slice(const Lin& l, int e, int ne, uint64_t& W, uint64_t& qoff) {
     const size_t nb = l.cols / 32, R = l.rows / ne, boff = (size_t)e * R * nb;
+    if (l.gkind >= CudaTier::K_IQ) { W = l.dptr.load() + (uint64_t)e * R * gtype_row_bytes(l.t->type, l.cols); qoff = 0; return; }
     const size_t sbytes = CudaTier::scale_bytes(l.gkind, boff), qb = l.gkind == CudaTier::K_Q8_0 ? 32 : l.gkind == CudaTier::K_Q6 ? 24 : 16;
     W = l.dptr.load() + sbytes;
     qoff = l.gqoff + boff * qb - sbytes;
@@ -628,14 +667,18 @@ void Model::moe_gpu(Layer& L, int n) {
     const int E = hp.n_expert;
     unsigned d = hp.n_embd, ff = hp.n_ff_exp;
     cu.matmul_dev(L.gate_inp.dptr.load(), L.gate_inp.gqoff, L.gate_inp.gkind, dXN_, n, L.gate_inp.cols, L.gate_inp.rows, dR_);
+    if (L.d_binp) { unsigned ue = E; cu.ew(CudaTier::BIAS, (unsigned)n * E, {&dR_, &L.d_binp, &ue}); }
+    auto act = [&](uint64_t a, uint64_t b, unsigned cnt) { cu.ew(hp.oai ? CudaTier::OAI : hp.gelu ? CudaTier::GELU : CudaTier::SILU, cnt, {&a, &b}); };
     if (n == 1) {
         // Decode: route on the device and run the K experts as slots of one launch each (graph-capturable).
         const int K = std::min(hp.n_expert_used, E);
         cu.topk(dR_, E, K, hp.expert_norm, hp.res_scale, dIdx_, dWt_);
         cu.matmul_experts(L.gate_exps.dptr.load(), L.gate_exps.gqoff, L.gate_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF1_);
         cu.matmul_experts(L.up_exps.dptr.load(), L.up_exps.gqoff, L.up_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF2_);
-        cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, K * ff, {&dF1_, &dF2_});
+        if (L.d_bgate) { cu.ew(CudaTier::XBIAS, K * ff, {&dF1_, &L.d_bgate, &dIdx_, &ff}); cu.ew(CudaTier::XBIAS, K * ff, {&dF2_, &L.d_bup, &dIdx_, &ff}); }
+        act(dF1_, dF2_, K * ff);
         cu.matmul_experts(L.down_exps.dptr.load(), L.down_exps.gqoff, L.down_exps.gkind, dIdx_, K, dF1_, K, 1, ff, d, dT_);
+        if (L.d_bdown) cu.ew(CudaTier::XBIAS, K * d, {&dT_, &L.d_bdown, &dIdx_, &d});
         cu.wsum(dX_, dT_, dWt_, K, d);
         return;
     }
@@ -659,8 +702,13 @@ void Model::moe_gpu(Layer& L, int n) {
         cu.ew(CudaTier::GATHER, c * d, {&dXN_, &pI, &dG_, &d});
         expert_slice(L.gate_exps, e, E, W, q); mmq(W, q, L.gate_exps.gkind, dG_, c, d, ff, dF1_);
         expert_slice(L.up_exps, e, E, W, q); mmq(W, q, L.up_exps.gkind, dG_, c, d, ff, dF2_, true);
-        cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, c * ff, {&dF1_, &dF2_});
+        if (L.d_bgate) {
+            uint64_t bg = L.d_bgate + (uint64_t)e * ff * 4, bu = L.d_bup + (uint64_t)e * ff * 4;
+            cu.ew(CudaTier::BIAS, c * ff, {&dF1_, &bg, &ff}); cu.ew(CudaTier::BIAS, c * ff, {&dF2_, &bu, &ff});
+        }
+        act(dF1_, dF2_, c * ff);
         expert_slice(L.down_exps, e, E, W, q); mmq(W, q, L.down_exps.gkind, dF1_, c, ff, d, dT_);
+        if (L.d_bdown) { uint64_t bd = L.d_bdown + (uint64_t)e * d * 4; cu.ew(CudaTier::BIAS, c * d, {&dT_, &bd, &d}); }
         cu.ew(CudaTier::SCATTER, c * d, {&dX_, &dT_, &pI, &pW, &d});
     }
 }
@@ -808,16 +856,17 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     // Prompts: tensor-core flash attention straight from the KV cache. Decode: one CTA per kv head reads the
     // cache once for all query heads sharing it (GQA), split over 16 key ranges; else the per-head kernel.
     if (n == 1 && f_gqa_) {
-        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv};
+        void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv, &L.d_sinks};
         cu.launch_raw(f_gqa_, nkv, spl, 1, 256, 0, a);
     }
     else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc,
-                                                        kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0)))
+                                                        kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0, L.d_sinks)))
         cu.launch(CudaTier::ATTN, nh, un * spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &scale, &spl, &dPM_, &dPL_, &dPO_, &win, &nc});
     if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
     static double t_attn = 0, t_all = 0; static int calls = 0;
     if (ppn) { cu.sync(); t_attn += now_sec() - Ta; }
     mm(L.o, dATT_, dT_);
+    if (L.d_bo) cu.ew(CudaTier::BIAS, un * d, {&dT_, &L.d_bo, &d});
     if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
     struct PP { bool on; double t0; double& acc; ~PP() { if (on) { cuda().sync(); acc += now_sec() - t0; } } } pp_guard{ppn, T0, t_all};
     // MoE: the experts gather their own tokens, so only the add + norm are saved (the int8 copy goes unused)
@@ -889,7 +938,7 @@ void Model::bench_gpu() {
             unsigned z1 = 0;
             timeit(nm, (double)pos * kvd * 4, [&] {
                 unsigned nkv1 = hp.n_kv;
-                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1, &L.d_ks, &L.d_vs, &nkv1};
+                void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &sc, &spl, &z1, &L.d_ks, &L.d_vs, &nkv1, &L.d_sinks};
                 cu.launch_raw(f_gqa_, hp.n_kv, spl, 1, 256, 0, a);
             });
         }
@@ -1089,6 +1138,7 @@ const float* Model::eval(const int* toks, int n_all) {
                         sc[j] = s; if (s > mx) mx = s;
                     }
                     float sum = 0;
+                    if (!L.sinks.empty()) { mx = std::max(mx, L.sinks[h]); sum = std::exp(L.sinks[h] - mx); }   // a logit with no value
                     for (int j = j0; j <= pos; j++) { sc[j] = std::exp(sc[j] - mx); sum += sc[j]; }
                     float inv = 1.0f / sum;
                     float* o = &att_[(size_t)t * qd + (size_t)h * hd];
@@ -1097,6 +1147,7 @@ const float* Model::eval(const int* toks, int n_all) {
                 }
             });
             matmul(L.o, att_.data(), n, tmp_.data());
+            if (!L.bo.empty()) for (int t = 0; t < n; t++) for (int i = 0; i < d; i++) tmp_[(size_t)t * d + i] += L.bo[i];
             if (!L.post_attn_norm.empty()) rmsnorm(tmp_.data(), L.post_attn_norm.data(), tmp_.data(), n, d);
             for (size_t i = 0; i < (size_t)n * d; i++) x_[i] += tmp_[i] * hp.res_scale;
 

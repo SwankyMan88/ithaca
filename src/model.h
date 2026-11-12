@@ -26,6 +26,7 @@ struct Lin {
 
 struct Layer {
     std::vector<float> attn_norm, ffn_norm, q_norm, k_norm, bq, bk, bv, post_attn_norm, post_ffn_norm;
+    std::vector<float> bo, sinks, b_inp, b_gate, b_up, b_down;   // gpt-oss: output and expert biases, attention sinks
     Lin q, k, v, o, qkv, gate, up, gateup, down;
     Lin gate_inp, gate_exps, up_exps, down_exps;   // mixture of experts: router + stacked experts
     bool swa = false;                              // sliding-window attention layer (Gemma 3)
@@ -35,6 +36,7 @@ struct Layer {
     // VRAM-resident copies used when the whole layer runs on the GPU
     uint64_t d_an = 0, d_fn = 0, d_qn = 0, d_kn = 0, d_bq = 0, d_bk = 0, d_bv = 0, d_kc = 0, d_vc = 0, d_pan = 0, d_pfn = 0;
     uint64_t d_ks = 0, d_vs = 0;   // int8 KV cache: f32 scale per (position, kv head)
+    uint64_t d_bo = 0, d_sinks = 0, d_binp = 0, d_bgate = 0, d_bup = 0, d_bdown = 0;   // gpt-oss
     int kv_dev = 0;  // device KV cache valid for positions [0, kv_dev)
     int kv_cap = 0;  // positions the device KV buffers can hold (grows with the conversation)
     size_t bytes() const { return hi > lo ? (size_t)(hi - lo) : 0; }
@@ -49,6 +51,7 @@ struct HParams {
     float emb_scale = 1.f, res_scale = 1.f, attn_scale = 0.f, logit_scale = 1.f;
     int n_expert = 0, n_expert_used = 0, n_ff_exp = 0; bool expert_norm = true;
     int swa_window = 0; float rope_base_swa = 10000.f;
+    bool oai = false;   // gpt-oss: clamped SwiGLU (gate * sigmoid(1.702 gate) * (up + 1)), biases, attention sinks
 };
 
 class Model {

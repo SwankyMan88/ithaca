@@ -347,7 +347,7 @@ void Gx::linear(const GT& x, int M, int K, uint64_t W, int N, const GT* bias, GT
     gemm(f_linf_ && K % 32 == 0 && !getenv("ITHACA_NO_FASTLIN") ? (half_ ? f_linh_ : f_linf_) : f_lin_, x.p, W, y.p, bias ? bias->p : 0, M, N, K, K, K, N, 0, 0, 0, 1.f, beta, bias && bias->p ? 1 : 0, 1);
 }
 bool Gx::attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, int p0, int ldq, int kvd, int heads, int grp, int hd,
-                      float scale, int win, int nc, uint64_t Ks, uint64_t Vs) {
+                      float scale, int win, int nc, uint64_t Ks, uint64_t Vs, uint64_t sink) {
     const int ix = hd == 64 ? 0 : hd == 80 ? 1 : hd == 96 ? 2 : hd == 128 ? 3 : hd == 256 ? 4 : -1;
     void* f = ix < 0 ? nullptr : Ks ? f_fkq_[ix] : f_fkv_[ix];
     if (!f || getenv("ITHACA_NO_FLASH")) return false;
@@ -356,7 +356,7 @@ bool Gx::attn_prefill(uint64_t Q, uint64_t Kc, uint64_t Vc, uint64_t O, int n, i
     unsigned T = n, P0 = p0, L = ldq, KV = kvd, G = grp, W = win, NC = nc;
     for (unsigned dv0 = 0; dv0 < (unsigned)hd; dv0 += DV) {
         unsigned NKV = kvd / hd;
-        void* a[] = {&Q, &Kc, &Vc, &O, &T, &P0, &L, &KV, &G, &sc, &W, &NC, &dv0, &Ks, &Vs, &NKV};
+        void* a[] = {&Q, &Kc, &Vc, &O, &T, &P0, &L, &KV, &G, &sc, &W, &NC, &dv0, Ks ? (void*)&Ks : (void*)&sink, &Vs, &NKV, &sink};
         prof_launch(f, (n + 127) / 128, heads, 1, 256, 0, a);
     }
     return true;
