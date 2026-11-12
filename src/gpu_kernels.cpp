@@ -245,6 +245,84 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
 }
 }  // namespace
 
+// k_ssm_scan: block = 256 / pDs state rows (row = head * hdim + p) x pDs state entries, one entry per thread, in a
+// register for all N tokens: S = exp(dt A) S + dt x B; y = sum(S C) + D x. dt = softplus(raw + bias).
+// X: conv output [N][pC] (x at 0, B at pBo + group * pDs, C at pCo + group * pDs); dt raw at ZX[t * pLd + pDto + h].
+// Tokens go in chunks of 16. Per chunk: dt and exp(dt A) once per (row, token) into shared memory; all loads issued
+// up front; the 16 S*C sums reduced across the warp together (16 shuffles, not 5 per token); one barrier pair.
+std::string gen_ssm_scan() {
+    const int TC = 16;
+    std::string s;
+    s += ".visible .entry k_ssm_scan(.param .u64 pX, .param .u64 pZX, .param .u64 pDtb, .param .u64 pA, .param .u64 pD, .param .u64 pS, .param .u64 pY,"
+         " .param .u32 pN, .param .u32 pC, .param .u32 pLd, .param .u32 pDto, .param .u32 pDi, .param .u32 pDs, .param .u32 pHdim, .param .u32 pHpg, .param .u32 pBo, .param .u32 pCo)\n{\n"
+         " .reg .pred %p<12>; .reg .pred %pq<16>; .reg .b32 %r<64>; .reg .f32 %f<32>; .reg .f32 %qx<16>; .reg .f32 %qb<16>; .reg .f32 %qc<16>; .reg .b64 %rd<32>;\n"
+         " .shared .align 4 .f32 red[128]; .shared .align 4 .f32 sdt[256]; .shared .align 4 .f32 sda[256];\n"
+         " ld.param.u64 %rd1,[pX]; ld.param.u64 %rd2,[pZX]; ld.param.u64 %rd3,[pDtb]; ld.param.u64 %rd4,[pA]; ld.param.u64 %rd5,[pD]; ld.param.u64 %rd6,[pS]; ld.param.u64 %rd7,[pY];\n"
+         " ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pC]; ld.param.u32 %r3,[pLd]; ld.param.u32 %r4,[pDto]; ld.param.u32 %r5,[pDi]; ld.param.u32 %r6,[pDs]; ld.param.u32 %r7,[pHdim]; ld.param.u32 %r8,[pHpg];\n"
+         " ld.param.u32 %r30,[pBo]; ld.param.u32 %r31,[pCo];\n"
+         " mov.u32 %r9,%tid.x; rem.u32 %r10,%r9,%r6; div.u32 %r11,%r9,%r6;\n"                 // n, row in block
+         " div.u32 %r12,256,%r6; mov.u32 %r13,%ctaid.x; mad.lo.u32 %r14,%r13,%r12,%r11;\n"    // rows per block, row
+         " div.u32 %r15,%r14,%r7; div.u32 %r16,%r15,%r8; mul.lo.u32 %r16,%r16,%r6; add.u32 %r16,%r16,%r10;\n"   // h; group * ds + n
+         " add.u32 %r32,%r30,%r16; add.u32 %r33,%r31,%r16;\n"                                   // B, C columns
+         " mad.lo.u32 %r17,%r14,%r6,%r10; mul.wide.u32 %rd8,%r17,4; add.u64 %rd8,%rd6,%rd8; ld.global.f32 %f1,[%rd8];\n"   // state
+         " shr.u32 %r18,%r9,5; and.b32 %r19,%r9,31; mov.u32 %r22,red; shr.u32 %r20,%r6,5;\n"   // warp, lane, warps per row
+         " and.b32 %r25,%r19,1; setp.eq.u32 %p2,%r25,0; shr.u32 %r26,%r19,1; shl.b32 %r26,%r26,3; add.u32 %r26,%r26,%r18; shl.b32 %r26,%r26,2; add.u32 %r21,%r22,%r26;\n"   // red[(lane/2)*8 + warp]
+         " and.b32 %r27,%r19,16; setp.ne.u32 %p8,%r27,0; and.b32 %r27,%r19,8; setp.ne.u32 %p9,%r27,0; and.b32 %r27,%r19,4; setp.ne.u32 %p10,%r27,0; and.b32 %r27,%r19,2; setp.ne.u32 %p11,%r27,0;\n"
+         " mov.u32 %r28,sdt; mov.u32 %r29,sda; shl.b32 %r35,%r11,6; add.u32 %r36,%r28,%r35; add.u32 %r37,%r29,%r35;\n"   // this row's dt / dA
+         " mul.wide.u32 %rd21,%r14,4; add.u64 %rd21,%rd1,%rd21; mul.wide.u32 %rd22,%r32,4; add.u64 %rd22,%rd1,%rd22; mul.wide.u32 %rd23,%r33,4; add.u64 %rd23,%rd1,%rd23;\n"   // x, B, C pointers
+         " mul.wide.u32 %rd25,%r2,4;\n"
+         " mul.lo.u32 %r41,%r12," + std::to_string(TC) + ";\n"                                   // dt / finisher threads
+         // the dt / finisher thread's (row, token): rr = tid / 16, j = tid % 16
+         " shr.u32 %r42,%r9,4; and.b32 %r43,%r9,15; mad.lo.u32 %r46,%r13,%r12,%r42; div.u32 %r47,%r46,%r7; setp.lt.u32 %p3,%r9,%r41;\n"
+         " mov.f32 %f20,0f00000000; mov.f32 %f21,0f00000000; mov.f32 %f22,0f00000000;\n"
+         " @%p3 mul.wide.u32 %rd26,%r47,4; @%p3 add.u64 %rd27,%rd3,%rd26; @%p3 ld.global.f32 %f20,[%rd27]; @%p3 add.u64 %rd27,%rd4,%rd26; @%p3 ld.global.f32 %f21,[%rd27];\n"
+         " @%p3 add.u64 %rd27,%rd5,%rd26; @%p3 ld.global.f32 %f22,[%rd27]; mul.f32 %f21,%f21,0f3FB8AA3B;\n"   // dtb, A * log2(e), D of that row's head
+         " shl.b32 %r38,%r9,2; add.u32 %r39,%r28,%r38; add.u32 %r48,%r29,%r38;\n"
+         " mov.u32 %r24,0;\n"
+         "LC:\n setp.ge.u32 %p1,%r24,%r1; @%p1 bra ET;\n"
+         " add.u32 %r44,%r24,%r43; setp.lt.u32 %p6,%r44,%r1; and.pred %p7,%p6,%p3;\n"
+         " @!%p3 bra DT; mov.f32 %f5,0f00000000; mov.f32 %f7,0f3F800000; @!%p7 bra DS;\n"
+         " mad.lo.u32 %r23,%r44,%r3,%r4; add.u32 %r23,%r23,%r47; mul.wide.u32 %rd20,%r23,4; add.u64 %rd20,%rd2,%rd20; ld.global.f32 %f5,[%rd20]; add.f32 %f5,%f5,%f20;\n"
+         " mul.f32 %f6,%f5,0f3FB8AA3B; ex2.approx.f32 %f6,%f6; add.f32 %f6,%f6,0f3F800000; lg2.approx.f32 %f6,%f6; mul.f32 %f6,%f6,0f3F317218; setp.gt.f32 %p4,%f5,0f41A00000; selp.f32 %f5,%f5,%f6,%p4;\n"   // softplus
+         " mul.f32 %f7,%f5,%f21; ex2.approx.f32 %f7,%f7;\n"
+         "DS:\n st.shared.f32 [%r39],%f5; st.shared.f32 [%r48],%f7;\n"
+         "DT:\n bar.sync 0;\n";
+    for (int j = 0; j < TC; j++) {
+        std::string J = std::to_string(j);
+        s += " add.u32 %r40,%r24," + J + "; setp.lt.u32 %pq" + J + ",%r40,%r1;"
+             " mov.f32 %qx" + J + ",0f00000000; mov.f32 %qb" + J + ",0f00000000; mov.f32 %qc" + J + ",0f00000000;\n"
+             " @%pq" + J + " ld.global.f32 %qx" + J + ",[%rd21]; @%pq" + J + " ld.global.f32 %qb" + J + ",[%rd22]; @%pq" + J + " ld.global.f32 %qc" + J + ",[%rd23];\n"
+             " add.u64 %rd21,%rd21,%rd25; add.u64 %rd22,%rd22,%rd25; add.u64 %rd23,%rd23,%rd25;\n";
+    }
+    for (int j = 0; j < TC; j++) {
+        std::string J = std::to_string(j), O = std::to_string(j * 4);
+        s += " ld.shared.f32 %f5,[%r36+" + O + "]; ld.shared.f32 %f7,[%r37+" + O + "];"
+             " mul.f32 %f11,%f5,%qx" + J + "; mul.f32 %f11,%f11,%qb" + J + "; fma.rn.f32 %f1,%f1,%f7,%f11; mul.f32 %qc" + J + ",%f1,%qc" + J + ";\n";
+    }
+    // 16 values per lane -> lane pair (2t, 2t+1) holds token t's sum: halve the set at each of offsets 16, 8, 4, 2
+    int k = TC; const char* bp[4] = {"%p8", "%p9", "%p10", "%p11"};
+    for (int st = 0; st < 4; st++) {
+        k /= 2; std::string off = std::to_string(16 >> st);
+        for (int i = 0; i < k; i++) {
+            std::string lo = "%qc" + std::to_string(i), hi = "%qc" + std::to_string(i + k);
+            s += std::string(" selp.f32 %f13,") + lo + "," + hi + "," + bp[st] + "; selp.f32 %f14," + hi + "," + lo + "," + bp[st] + ";"
+                 " shfl.sync.bfly.b32 %f13,%f13," + off + ",31,0xffffffff; add.f32 " + lo + ",%f14,%f13;\n";
+        }
+    }
+    s += " shfl.sync.bfly.b32 %f13,%qc0,1,31,0xffffffff; add.f32 %qc0,%qc0,%f13; @%p2 st.shared.f32 [%r21],%qc0;\n"
+         " bar.sync 0;\n"
+         // finisher: thread = (row in block) * 16 + token in chunk: sum the warps' partials, + D x, store
+         " @!%p7 bra NF;\n"
+         " shl.b32 %r45,%r43,3; mad.lo.u32 %r45,%r42,%r20,%r45; shl.b32 %r45,%r45,2; add.u32 %r45,%r22,%r45;\n"
+         " mov.f32 %f14,0f00000000; mov.u32 %r34,0;\n"
+         "LS:\n setp.ge.u32 %p5,%r34,%r20; @%p5 bra ES; ld.shared.f32 %f15,[%r45]; add.f32 %f14,%f14,%f15; add.u32 %r45,%r45,4; add.u32 %r34,%r34,1; bra LS;\nES:\n"
+         " mad.lo.u32 %r49,%r44,%r2,%r46; mul.wide.u32 %rd28,%r49,4; add.u64 %rd28,%rd1,%rd28; ld.global.f32 %f17,[%rd28];\n"   // x
+         " fma.rn.f32 %f14,%f22,%f17,%f14; mad.lo.u32 %r49,%r44,%r5,%r46; mul.wide.u32 %rd28,%r49,4; add.u64 %rd28,%rd7,%rd28; st.global.f32 [%rd28],%f14;\n"
+         "NF:\n add.u32 %r24,%r24," + std::to_string(TC) + "; bra LC;\nET:\n"
+         " st.global.f32 [%rd8],%f1;\n ret;\n}\n";
+    return s;
+}
+
 std::string gpu_ops_ptx() {
     std::string s;
     // y[i] += s * x[i]
@@ -964,10 +1042,11 @@ std::string gpu_ops_ptx() {
          " add.u32 %r7,%r7,1; bra LT;\nET:\n"
          " st.global.f32 [%rd9],%f6; st.global.f32 [%rd11],%f7; st.global.f32 [%rd12],%f8;\n"
          "DONE:\n ret;\n}\n";
-    // k_ssm_scan: block = 256 / pDs state rows (row = head * hdim + p) x pDs state entries, one entry per thread, in a
+    s += gen_ssm_scan();
+    // k_ssm_scan1 (decode, one token): block = 256 / pDs state rows (row = head * hdim + p) x pDs state entries, one entry per thread, in a
     // register for all N tokens: S = exp(dt A) S + dt x B; y = sum(S C) + D x. dt = softplus(raw + bias).
     // X: conv output [N][pC] (x at 0, B at pBo + group * pDs, C at pCo + group * pDs); dt raw at ZX[t * pLd + pDto + h].
-    s += ".visible .entry k_ssm_scan(.param .u64 pX, .param .u64 pZX, .param .u64 pDtb, .param .u64 pA, .param .u64 pD, .param .u64 pS, .param .u64 pY,"
+    s += ".visible .entry k_ssm_scan1(.param .u64 pX, .param .u64 pZX, .param .u64 pDtb, .param .u64 pA, .param .u64 pD, .param .u64 pS, .param .u64 pY,"
          " .param .u32 pN, .param .u32 pC, .param .u32 pLd, .param .u32 pDto, .param .u32 pDi, .param .u32 pDs, .param .u32 pHdim, .param .u32 pHpg, .param .u32 pBo, .param .u32 pCo)\n{\n"
          " .reg .pred %p<6>; .reg .b32 %r<40>; .reg .f32 %f<24>; .reg .b64 %rd<24>; .shared .align 4 .f32 red[8];\n"
          " ld.param.u64 %rd1,[pX]; ld.param.u64 %rd2,[pZX]; ld.param.u64 %rd3,[pDtb]; ld.param.u64 %rd4,[pA]; ld.param.u64 %rd5,[pD]; ld.param.u64 %rd6,[pS]; ld.param.u64 %rd7,[pY];\n"

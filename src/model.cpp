@@ -1022,7 +1022,7 @@ void Model::mamba_gpu(Layer& L, int n, bool same_x) {
     float eps = hp.eps;
     mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, same_x);
     cu.launch(CudaTier::SSM_CONV, (xbc + 255) / 256, 1, 256, {&dZX_, &L.d_convw, &L.d_convb, &L.d_convst, &dXC_, &un, &xbc, &tot, &di});
-    cu.launch(CudaTier::SSM_SCAN, di / (256 / ds), 1, 256, {&dXC_, &dZX_, &L.d_dtb, &L.d_ssma, &L.d_ssmd, &L.d_ssmst, &dSY_, &un, &xbc, &tot, &dto, &di, &ds, &hdim, &hpg, &bo, &co});
+    cu.launch(n == 1 ? CudaTier::SSM_SCAN1 : CudaTier::SSM_SCAN, di / (256 / ds), 1, 256, {&dXC_, &dZX_, &L.d_dtb, &L.d_ssma, &L.d_ssmd, &L.d_ssmst, &dSY_, &un, &xbc, &tot, &dto, &di, &ds, &hdim, &hpg, &bo, &co});
     cu.launch(CudaTier::SSM_GNORM, ng, un, 256, {&dSY_, &dZX_, &L.d_ssmnorm, &di, &tot, &gs, &eps});
     mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
 }
