@@ -29,6 +29,7 @@ public:
     int64_t dit_bytes() const;
     bool vae_decode(const std::vector<float>& z, int F, int H, int W, std::vector<float>& rgb, int& oF, int& oH, int& oW);
     int dim = 0, heads = 0, layers = 0, zc = 48, ffn = 0;
+    int fps() const { return zc == 48 ? 24 : 16; }   // Wan 2.1 is trained at 16 fps, 2.2 TI2V at 24
 private:
     SafeTensors dit_, te_, vae_;
     bool loaded_ = false;

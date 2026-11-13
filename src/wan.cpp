@@ -16,6 +16,10 @@ static const float kWan22Std[48] = {0.4765f, 1.0364f, 0.4514f, 1.1677f, 0.5313f,
     0.6165f, 0.8454f, 0.4978f, 0.5759f, 0.3523f, 0.7135f, 0.6804f, 0.5833f, 1.4146f, 0.8986f, 0.5659f, 0.7069f, 0.5338f, 0.4889f, 0.4917f, 0.4069f, 0.4999f,
     0.6866f, 0.4093f, 0.5709f, 0.6065f, 0.6415f, 0.4944f, 0.5726f, 1.2042f, 0.5458f, 1.6887f, 0.3971f, 1.06f, 0.3943f, 0.5537f, 0.5444f, 0.4089f, 0.7468f, 0.7744f};
 
+// Wan 2.1 VAE (16 channels, 8x spatial)
+static const float kWan21Mean[16] = {-0.7571f, -0.7089f, -0.9113f, 0.1075f, -0.1745f, 0.9653f, -0.1517f, 1.5508f, 0.4134f, -0.0715f, 0.5517f, -0.3632f, -0.1922f, -0.9497f, 0.2503f, -0.2921f};
+static const float kWan21Std[16] = {2.8184f, 1.4541f, 2.3275f, 2.6558f, 1.2196f, 1.7708f, 2.6052f, 2.0743f, 3.2687f, 2.1526f, 2.8652f, 1.5579f, 1.6382f, 1.1253f, 2.8251f, 1.916f};
+
 static std::vector<float> host_f32(const STensor* t) {
     std::vector<float> v(t ? (size_t)t->numel() : 0);
     for (size_t i = 0; i < v.size(); i++) {
@@ -26,6 +30,23 @@ static std::vector<float> host_f32(const STensor* t) {
     return v;
 }
 
+// A Wan VAE whose latent channels match the model (the 2.1 and 2.2 VAEs often sit in the same folder).
+static std::wstring find_vae(const std::wstring& model, int zc) {
+    std::wstring dir = model.substr(0, model.find_last_of(L"\\/"));
+    for (auto& d : {dir + L"\\..\\vae", dir.substr(0, dir.find_last_of(L"\\/")) + L"\\vae", dir}) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((d + L"\\*.safetensors").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            std::wstring lo = fd.cFileName; for (auto& c : lo) c = towlower(c);
+            if (lo.find(L"wan") == std::wstring::npos || lo.find(L"vae") == std::wstring::npos) continue;
+            SafeTensors st; std::string e;
+            if (st.add(d + L"\\" + fd.cFileName, e) && st.has("decoder.conv1.weight") && (int)st.get("decoder.conv1.weight")->shape[1] == zc) { FindClose(h); return d + L"\\" + fd.cFileName; }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return L"";
+}
 // Finds a companion file in the usual ComfyUI layout (models/<sub>/...) or next to the model.
 static std::wstring find_companion(const std::wstring& model, const wchar_t* sub, std::initializer_list<const wchar_t*> must) {
     std::wstring dir = model.substr(0, model.find_last_of(L"\\/"));
@@ -64,9 +85,10 @@ bool WanEngine::load(const std::wstring& ditp, const std::wstring& tep, const st
         err = "This Wan model is an image-to-video variant; text-to-video models (like Wan 2.2 TI2V-5B) are supported so far."; unload(); return false;
     }
     std::wstring te = tep.empty() ? find_companion(ditp, L"text_encoders", {L"umt5"}) : tep;
-    std::wstring vae = vaep.empty() ? find_companion(ditp, L"vae", {zc == 48 ? L"wan2.2" : L"wan", L"vae"}) : vaep;
+    std::wstring vae = vaep.empty() ? find_vae(ditp, zc) : vaep;
     if (te.empty()) { err = "umT5-XXL text encoder not found (put umt5_xxl_*.safetensors in models\\text_encoders)"; unload(); return false; }
-    if (vae.empty()) { err = "Wan VAE not found (put wan2.2_vae.safetensors in models\\vae)"; unload(); return false; }
+    if (vae.empty()) { err = zc == 48 ? "Wan 2.2 VAE not found (put wan2.2_vae.safetensors in models\\vae)" : "Wan 2.1 VAE not found (put wan_2.1_vae.safetensors in models\\vae)"; unload(); return false; }
+    if (zc != 48 && zc != 16) { err = "unexpected Wan latent channels"; unload(); return false; }
     if (!te_.add(te, err) || !vae_.add(vae, err)) { unload(); return false; }
     if (!te_.has("encoder.block.0.layer.0.SelfAttention.q.weight") || !te_.has("spiece_model")) { err = "text encoder file is not a umT5 with an embedded tokenizer"; unload(); return false; }
     if (!vae_.has("decoder.conv1.weight") || vae_.get("decoder.conv1.weight")->shape[1] != zc) { err = "VAE does not match the video model's latent channels"; unload(); return false; }
@@ -488,6 +510,8 @@ bool WanEngine::vae_decode(const std::vector<float>& z, int F, int Hl, int Wl, s
     { GT b = g.wf32("conv2.bias"); g.conv3d(zall, zc, F, Hl, Wl, g.w16("conv2.weight"), zc, 1, 1, &b, zc2); }
     std::vector<std::vector<float>> chunks;
     int ups = 0; while (vae_.has("decoder.upsamples." + std::to_string(ups) + ".upsamples.0.residual.0.gamma")) ups++;
+    const bool v21 = ups == 0;   // Wan 2.1: decoder.upsamples.<i> is a flat list of residual blocks and resamples
+    int flat = 0; while (v21 && (vae_.has("decoder.upsamples." + std::to_string(flat) + ".residual.0.gamma") || vae_.has("decoder.upsamples." + std::to_string(flat) + ".resample.1.weight"))) flat++;
     for (int i = 0; i < F; i++) {
         bool first = i == 0;
         d.C = zc; d.T = 1; d.H = Hl; d.W = Wl;
@@ -500,6 +524,10 @@ bool WanEngine::vae_decode(const std::vector<float>& z, int F, int Hl, int Wl, s
         d.resblock("decoder.middle.0.");
         d.attn("decoder.middle.1.");
         d.resblock("decoder.middle.2.");
+        for (int u = 0; u < flat; u++) {
+            std::string p = "decoder.upsamples." + std::to_string(u) + ".";
+            if (vae_.has(p + "residual.0.gamma")) d.resblock(p); else d.resample(p, first);
+        }
         for (int u = 0; u < ups; u++) {
             std::string p = "decoder.upsamples." + std::to_string(u) + ".upsamples.";
             GT xin = d.x; int Cin = d.C, Tin = d.T, Hin = d.H, Win = d.W;
@@ -536,6 +564,17 @@ bool WanEngine::vae_decode(const std::vector<float>& z, int F, int Hl, int Wl, s
     for (auto& kv : d.cache) if (kv.second.t) g.free(kv.second.t);
     g.free(zall); g.free(zc2);
     g.weights_end();
+    if (v21) {   // 3 channels straight out
+        rgb.assign((size_t)oF * oH * oW * 3, 0.f);
+        int f0 = 0;
+        for (auto& ch : chunks) {
+            int Tn = (int)(ch.size() / (3 * (size_t)oH * oW));
+            for (int t = 0; t < Tn; t++) for (int y = 0; y < oH; y++) for (int x = 0; x < oW; x++) for (int c = 0; c < 3; c++)
+                rgb[(((size_t)(f0 + t) * oH + y) * oW + x) * 3 + c] = std::min(1.f, std::max(0.f, (ch[(((size_t)c * Tn + t) * oH + y) * oW + x] + 1.f) * 0.5f));
+            f0 += Tn;
+        }
+        return true;
+    }
     // unpatchify (12 channels = c*4 + r*2 + q; q = row offset, r = column offset) into RGB frames
     const int PH = oH * 2, PW = oW * 2;
     rgb.assign((size_t)oF * PH * PW * 3, 0.f);
@@ -566,7 +605,8 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
     VideoJob j = jb;
     j.width = std::max(64, j.width / 32 * 32); j.height = std::max(64, j.height / 32 * 32);
     j.frames = std::max(1, (j.frames - 1) / 4 * 4 + 1);
-    const int F = (j.frames - 1) / 4 + 1, H = j.height / 16, W = j.width / 16;
+    const int sp = zc == 48 ? 16 : 8;   // Wan 2.2's VAE also folds 2x2 pixels into channels
+    const int F = (j.frames - 1) / 4 + 1, H = j.height / sp, W = j.width / sp;
     const size_t n = (size_t)zc * F * H * W;
     if (!progress("Reading the prompt", 0, j.steps)) { err = "cancelled"; return false; }
     std::vector<float> cc, cu;
@@ -595,9 +635,13 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
     g.free(ce); g.free(ue);
     g.weights_end();
     if (!err.empty()) { g.trim(); return false; }
+    g.trim();   // sampling buffers out of the way: the VAE works at full resolution (Wan 2.1: 8x the latent)
     progress("Decoding video", j.steps, j.steps);
     const size_t per = (size_t)F * H * W;
-    for (int c = 0; c < zc && zc == 48; c++) for (size_t q = 0; q < per; q++) x[c * per + q] = x[c * per + q] * kWan22Std[c] + kWan22Mean[c];
+    for (int c = 0; c < zc; c++) {
+        const float sd = zc == 48 ? kWan22Std[c] : kWan21Std[c], mu = zc == 48 ? kWan22Mean[c] : kWan21Mean[c];
+        for (size_t q = 0; q < per; q++) x[c * per + q] = x[c * per + q] * sd + mu;
+    }
     std::vector<float> rgb;
     vae_decode(x, F, H, W, rgb, oF, oH, oW);
     g.trim();

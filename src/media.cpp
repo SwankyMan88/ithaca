@@ -181,7 +181,7 @@ std::string media_generate_video(const J& req) {
     if (model.empty()) return "{\"error\":" + json_esc("No video model is loaded or selected. Pick one in the Video studio (left sidebar).") + "}";
     std::string lo = model; for (auto& c : lo) c = (char)tolower(c);
     if (lo.size() > 5 && lo.compare(lo.size() - 5, 5, ".gguf") == 0)
-        return "{\"error\":" + json_esc("GGUF video models (like the Wan 2.2 14B files) aren't supported yet. Choose the Wan 2.2 TI2V 5B .safetensors model.") + "}";
+        return "{\"error\":" + json_esc("GGUF video models (like the Wan 2.2 14B files) aren't supported yet. Choose Wan 2.2 TI2V 5B or Wan 2.1 T2V 1.3B (.safetensors).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
@@ -199,8 +199,8 @@ std::string media_generate_video(const J& req) {
     j.width = (int)req["width"].num(prefs["vid_width"].num(640));
     j.height = (int)req["height"].num(prefs["vid_height"].num(352));
     double secs = req["seconds"].t == J::STR ? atof(req["seconds"].s.c_str()) : req["seconds"].num(prefs["vid_seconds"].num(2));
-    j.fps = 24;
-    j.frames = (int)req["frames"].num(std::max(1.0, secs) * 24 + 1);
+    j.fps = e.fps();
+    j.frames = (int)req["frames"].num(std::max(1.0, secs) * j.fps + 1);
     j.frames = std::min(j.frames, 241);
     j.steps = std::max(1, std::min(60, (int)req["steps"].num(prefs["vid_steps"].num(20))));
     j.cfg = (float)req["cfg"].num(prefs["vid_cfg"].num(5.0));
