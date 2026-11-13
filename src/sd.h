@@ -53,7 +53,10 @@ private:
     SafeTensors st_;
     bool loaded_ = false;
     SdInfo info_;
-    std::string unet_pfx_, vae_pfx_;
+    std::string unet_pfx_, vae_pfx_, clip_pfx_, t5_pfx_;
+    bool flux_generate(const ImageJob& j, std::vector<uint8_t>& rgb, std::string& err, const std::function<bool(const char*, int, int)>& progress);
+    void flux_dit(const GT& img, int hl, int wl, float t, float guidance, const GT& txt, int Lt, const GT& pooled, GT& out);
+    bool flux_tokenizer(std::string& t5, std::string& err);
     float vae_scale_ = 0.18215f;
     std::vector<float> sigmas_all_;
 };

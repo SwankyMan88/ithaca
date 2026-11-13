@@ -27,6 +27,8 @@ private:
     std::map<std::string, STensor> t_;
 };
 
+void to_f16(const STensor& t, std::vector<uint16_t>& out);   // any weight dtype (F32, BF16, F8, ...) as fp16
+
 // f32 device tensor
 struct GT {
     uint64_t p = 0;

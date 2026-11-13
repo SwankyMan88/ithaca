@@ -32,7 +32,7 @@ struct ClipTok {
     }
     bool load(std::string& err) {
         if (ok) return true;
-        std::vector<std::wstring> dirs = {g_store_dir + L"\\tokenizers\\clip"};
+        std::vector<std::wstring> dirs = {g_store_dir + L"\\models\\tokenizers\\clip", g_store_dir + L"\\tokenizers\\clip"};
         wchar_t buf[MAX_PATH];
         if (GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH)) {
             std::wstring u = buf;
@@ -41,7 +41,7 @@ struct ClipTok {
         }
         std::string vj, mt;
         for (auto& d : dirs) { vj = read(d + L"\\vocab.json"); mt = read(d + L"\\merges.txt"); if (!vj.empty() && !mt.empty()) break; }
-        if (vj.empty() || mt.empty()) { err = "CLIP tokenizer files not found (put vocab.json and merges.txt in tokenizers\\clip next to Ithaca.exe)"; return false; }
+        if (vj.empty() || mt.empty()) { err = "CLIP tokenizer files not found (Settings > Download models > Image gets them with any image model, or put vocab.json and merges.txt in models\\tokenizers\\clip)"; return false; }
         J j; if (!json_parse(vj, j)) { err = "bad vocab.json"; return false; }
         for (auto& kv : j.o) vocab[kv.first] = (int)kv.second.n;
         size_t pos = mt.find('\n') + 1; int rank = 0;   // first line is a version header
@@ -246,10 +246,21 @@ bool SdEngine::load(const std::wstring& ckpt, const std::wstring& vae, std::stri
         if (!st_.add(vae, err, "")) { st_.close(); return false; }
     }
     unet_pfx_ = st_.has("model.diffusion_model.input_blocks.0.0.weight") ? "model.diffusion_model." : (st_.has("input_blocks.0.0.weight") ? "" : "?");
+    if (unet_pfx_ == "?" && (st_.has("double_blocks.0.img_attn.qkv.weight") || st_.has("model.diffusion_model.double_blocks.0.img_attn.qkv.weight"))) {
+        // Flux: an all-in-one file (ComfyUI layout: model.diffusion_model., text_encoders.clip_l / t5xxl, vae.)
+        unet_pfx_ = st_.has("model.diffusion_model.img_in.weight") ? "model.diffusion_model." : "";
+        clip_pfx_ = "text_encoders.clip_l.transformer.text_model."; t5_pfx_ = "text_encoders.t5xxl.transformer.";
+        vae_pfx_ = st_.has("vae.decoder.conv_in.weight") ? "vae." : !vae.empty() && st_.has("decoder.conv_in.weight") ? "" : "?";
+        if (!st_.has(clip_pfx_ + "embeddings.token_embedding.weight") || !st_.has(t5_pfx_ + "shared.weight") || vae_pfx_ == "?") {
+            err = "This Flux file has only the transformer. Ithaca needs the all-in-one Flux checkpoint (with CLIP-L, T5-XXL and the VAE inside), like flux1-schnell-fp8.safetensors.";
+            st_.close(); return false;
+        }
+        info_ = SdInfo(); info_.arch = "flux"; info_.default_res = 1024;
+        path = ckpt; loaded_ = true;
+        return true;
+    }
     if (unet_pfx_ == "?") {
-        if (st_.has("double_blocks.0.img_attn.qkv.weight") || st_.has("model.diffusion_model.double_blocks.0.img_attn.qkv.weight"))
-            err = "This is a Flux model. Flux support is coming next; for now pick an SD 1.5, SD 2.x or SDXL checkpoint.";
-        else if (st_.has("model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight")) err = "This is an SD3 model, which isn't supported yet.";
+        if (st_.has("model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight")) err = "This is an SD3 model, which isn't supported yet.";
         else err = "Unrecognized image model (expected a single-file SD 1.x / 2.x / XL checkpoint).";
         st_.close(); return false;
     }
@@ -536,8 +547,9 @@ bool SdEngine::vae_decode(const std::vector<float>& z, int h, int w, std::vector
     auto has = [&](const std::string& n) { return st_.has(P + n); };
     auto shape = [&](const std::string& n, int i) { return (int)st_.get(P + n)->shape[i]; };
     g.weights_begin(&st_, 1ll << 40);
-    int C = 4;
-    GT x = g.alloc((size_t)4 * h * w);
+    const int ZC = shape("decoder.conv_in.weight", 1);   // latent channels: 4 (SD), 16 (Flux)
+    int C = ZC;
+    GT x = g.alloc((size_t)ZC * h * w);
     g.upload(x, z.data(), z.size());
     if (has("post_quant_conv.weight")) {
         GT o = g.alloc((size_t)4 * h * w), b = g.wf32(P + "post_quant_conv.bias");
@@ -575,7 +587,7 @@ bool SdEngine::vae_decode(const std::vector<float>& z, int h, int w, std::vector
         for (GT* t : {&n, &q, &k, &v, &qt, &kt, &vt}) g.free(*t);
     };
     int Cin = shape("decoder.conv_in.weight", 0);
-    { GT o = g.alloc((size_t)Cin * h * w); conv(x, 4, Cin, "decoder.conv_in", 3, o); g.free(x); x = o; C = Cin; }
+    { GT o = g.alloc((size_t)Cin * h * w); conv(x, ZC, Cin, "decoder.conv_in", 3, o); g.free(x); x = o; C = Cin; }
     res("decoder.mid.block_1.");
     attn("decoder.mid.attn_1.");
     res("decoder.mid.block_2.");
@@ -687,6 +699,10 @@ bool SdEngine::vae_encode(const std::vector<float>& img, int H, int W, std::vect
 bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::string& err,
                         const std::function<bool(const char*, int, int)>& progress) {
     if (!loaded_) { err = "no image model loaded"; return false; }
+    if (info_.arch == "flux") {
+        if (!jb.init_rgb.empty()) { err = "Editing pictures isn't supported with Flux yet; pick an SD or SDXL model for that."; return false; }
+        return flux_generate(jb, rgb, err, progress);
+    }
     ImageJob j = jb;
     j.width = std::max(64, j.width / 8 * 8); j.height = std::max(64, j.height / 8 * 8);
     const int lh = j.height / 8, lw = j.width / 8, n = 4 * lh * lw;
@@ -848,6 +864,362 @@ bool SdEngine::generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::stri
             for (int c = 0; c < 3; c++) rgb[p * 3 + c] = (uint8_t)std::lround(a * rgb[p * 3 + c] + (1 - a) * j.init_rgb[p * 3 + c]);
         }
     }
+    return true;
+}
+
+// =============================================================================================
+// Flux.1 (schnell / dev): T5-XXL + CLIP-L conditioning, a rectified-flow transformer (19 double-stream and 38
+// single-stream blocks, 3D RoPE over [text | image] tokens), and a 16-channel VAE. Follows the reference
+// implementation in black-forest-labs/flux (Apache 2.0). Weights may be fp8: they're stored as int8 on the GPU.
+// =============================================================================================
+namespace {
+// SentencePiece unigram tokenizer from a spiece.model protobuf (T5 v1.1)
+struct Spm {
+    std::vector<std::string> pieces; std::vector<float> scores; std::unordered_map<std::string, int> id; size_t maxp = 0;
+    bool load(const std::string& b) {
+        const uint8_t* p = (const uint8_t*)b.data(); const uint8_t* end = p + b.size();
+        auto varint = [&](const uint8_t*& q) { uint64_t v = 0; int s = 0; while (q < end) { uint8_t c = *q++; v |= (uint64_t)(c & 127) << s; s += 7; if (!(c & 128)) break; } return v; };
+        while (p < end) {
+            uint64_t key = varint(p); int field = (int)(key >> 3), wt = (int)(key & 7);
+            if (wt == 2) {
+                uint64_t len = varint(p); const uint8_t* q = p; const uint8_t* qe = p + len; p += len;
+                if (field != 1) continue;
+                std::string piece; float score = 0; int type = 1;
+                while (q < qe) {
+                    uint64_t k2 = varint(q); int f2 = (int)(k2 >> 3), w2 = (int)(k2 & 7);
+                    if (w2 == 2) { uint64_t l2 = varint(q); if (f2 == 1) piece.assign((const char*)q, l2); q += l2; }
+                    else if (w2 == 5) { if (f2 == 2) memcpy(&score, q, 4); q += 4; }
+                    else if (w2 == 0) { uint64_t v = varint(q); if (f2 == 3) type = (int)v; }
+                    else if (w2 == 1) q += 8;
+                    else break;
+                }
+                int i = (int)pieces.size();
+                pieces.push_back(piece); scores.push_back(score);
+                if (type == 1 || type == 4) { id.emplace(piece, i); maxp = std::max(maxp, piece.size()); }
+            } else if (wt == 0) varint(p);
+            else if (wt == 5) p += 4;
+            else if (wt == 1) p += 8;
+            else break;
+        }
+        return !pieces.empty();
+    }
+    std::vector<int> encode(const std::string& text) {
+        std::string s = "\xE2\x96\x81"; bool sp = true;
+        for (unsigned char c : text) { if (isspace(c)) { if (!sp) s += "\xE2\x96\x81"; sp = true; } else { s += (char)c; sp = false; } }
+        if (sp && s.size() > 3) s.resize(s.size() - 3);
+        const int n = (int)s.size();
+        float mn = 0; for (float v : scores) mn = std::min(mn, v);
+        std::vector<float> best(n + 1, -1e30f); std::vector<int> from(n + 1, -1), tok(n + 1, -1);
+        best[0] = 0;
+        for (int i = 0; i < n; i++) {
+            if (best[i] <= -1e29f) continue;
+            bool any = false;
+            for (size_t L = 1; L <= maxp && i + (int)L <= n; L++) {
+                auto it = id.find(s.substr(i, L)); if (it == id.end()) continue;
+                float sc = best[i] + scores[it->second];
+                if (sc > best[i + L]) { best[i + L] = sc; from[i + L] = i; tok[i + L] = it->second; }
+                any = true;
+            }
+            if (!any) { unsigned char c = s[i]; int L = std::min(c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4, n - i); float sc = best[i] + mn - 10; if (sc > best[i + L]) { best[i + L] = sc; from[i + L] = i; tok[i + L] = 2; } }
+        }
+        std::vector<int> rev;
+        for (int i = n; i > 0 && from[i] >= 0; i = from[i]) rev.push_back(tok[i]);
+        std::vector<int> ids(rev.rbegin(), rev.rend());
+        ids.push_back(1);   // </s>
+        return ids;
+    }
+};
+int t5_bucket_(int rel) {
+    int ret = rel > 0 ? 16 : 0, n = std::abs(rel);
+    if (n < 8) return ret + n;
+    return ret + std::min(8 + (int)(std::log(n / 8.0) / std::log(128 / 8.0) * 8), 15);
+}
+std::vector<float> host_vec(const STensor* t) {
+    std::vector<float> v(t ? (size_t)t->numel() : 0);
+    if (!t) return v;
+    std::vector<uint16_t> h; to_f16(*t, h);
+    for (size_t i = 0; i < v.size(); i++) v[i] = t->dtype == "F32" ? ((const float*)t->data)[i] : h2f(h[i]);
+    return v;
+}
+// T5 v1.1 encoder (gated GELU, relative position bias from block 0, no attention scaling). ids -> [T][D]
+void t5_encode(const SafeTensors& st, const std::string& P, const std::vector<int>& ids, std::vector<float>& out) {
+    Gx& g = gx();
+    const int T = (int)ids.size();
+    const STensor* emb = st.get(P + "shared.weight");
+    const int D = (int)emb->shape[1];
+    std::vector<float> xh((size_t)T * D);
+    {
+        std::vector<uint16_t> row;
+        for (int t = 0; t < T; t++) {
+            STensor r = *emb; r.shape = {D}; r.data = emb->data + (size_t)ids[t] * D * (emb->nbytes / emb->numel()); r.nbytes = (size_t)D * (emb->nbytes / emb->numel());
+            std::vector<float> v = host_vec(&r);
+            memcpy(&xh[(size_t)t * D], v.data(), D * 4);
+        }
+    }
+    const STensor* rb = st.get(P + "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight");
+    const int H = (int)rb->shape[1], dk = D / H;
+    std::vector<float> rel = host_vec(rb);
+    std::vector<float> bias((size_t)H * T * T);   // [h][i][j], same for every layer
+    for (int h = 0; h < H; h++) for (int i = 0; i < T; i++) for (int j = 0; j < T; j++) bias[((size_t)h * T + i) * T + j] = rel[(size_t)t5_bucket_(j - i) * H + h];
+    int L = 0; while (st.has(P + "encoder.block." + std::to_string(L) + ".layer.0.SelfAttention.q.weight")) L++;
+    const int F = (int)st.get(P + "encoder.block.0.layer.1.DenseReluDense.wi_0.weight")->shape[0];
+    GT x = g.alloc((size_t)T * D), h = g.alloc((size_t)T * D), q = g.alloc((size_t)T * D), k = g.alloc((size_t)T * D), v = g.alloc((size_t)T * D),
+       a = g.alloc((size_t)T * F), b = g.alloc((size_t)T * F), sc = g.alloc((size_t)H * T * T), bg = g.alloc(bias.size());
+    g.upload(x, xh.data(), xh.size()); g.upload(bg, bias.data(), bias.size());
+    for (int l = 0; l < L; l++) {
+        std::string p = P + "encoder.block." + std::to_string(l) + ".layer.";
+        g.rmsrow(x, T, D, g.wf32(p + "0.layer_norm.weight"), 1e-6f, h);
+        g.linear(h, T, D, g.w16(p + "0.SelfAttention.q.weight"), D, nullptr, q);
+        g.linear(h, T, D, g.w16(p + "0.SelfAttention.k.weight"), D, nullptr, k);
+        g.linear(h, T, D, g.w16(p + "0.SelfAttention.v.weight"), D, nullptr, v);
+        // scores[h][i][j] = q_i . k_j + bias, per head (batched gemm over heads: q/k rows strided by D)
+        g.gemm_nt(q, T, dk, D, k, T, D, sc, T, 1.f, H, dk, dk, (size_t)T * T, 0, 0, 0);
+        g.axpy(sc, bg, bias.size());
+        g.softmax(sc, H * T, T, 1.f);
+        g.gemm_nn(sc, T, T, T, v, dk, D, h, D, 1.f, H, (size_t)T * T, dk, dk, 0, 0, 0);
+        g.linear(h, T, D, g.w16(p + "0.SelfAttention.o.weight"), D, nullptr, x, 1.f);
+        g.rmsrow(x, T, D, g.wf32(p + "1.layer_norm.weight"), 1e-6f, h);
+        g.linear(h, T, D, g.w16(p + "1.DenseReluDense.wi_0.weight"), F, nullptr, a);
+        g.act(a, (size_t)T * F, Gx::GELU_TANH);
+        g.linear(h, T, D, g.w16(p + "1.DenseReluDense.wi_1.weight"), F, nullptr, b);
+        g.mul(a, b, (size_t)T * F);
+        g.linear(a, T, F, g.w16(p + "1.DenseReluDense.wo.weight"), D, nullptr, x, 1.f);
+    }
+    g.rmsrow(x, T, D, g.wf32(P + "encoder.final_layer_norm.weight"), 1e-6f, h);
+    out.resize((size_t)T * D);
+    g.download(out.data(), h, out.size());
+    for (GT* t : {&x, &h, &q, &k, &v, &a, &b, &sc, &bg}) g.free(*t);
+}
+GT view(const GT& t, size_t off, size_t n) { GT v = t; v.p += off * 4; v.n = n; return v; }
+}  // namespace
+
+bool SdEngine::flux_tokenizer(std::string& t5, std::string& err) {
+    std::wstring dir = path.substr(0, path.find_last_of(L"\\/")), up = dir.substr(0, dir.find_last_of(L"\\/"));
+    std::vector<std::wstring> c = {dir, up + L"\\text_encoders", g_store_dir + L"\\models\\text_encoders", g_store_dir + L"\\tokenizers\\t5"};
+    for (auto& d : c) for (auto n : {L"\\t5_spiece.model", L"\\spiece.model"}) { t5 = ClipTok::read(d + n); if (!t5.empty()) return true; }
+    err = "T5 tokenizer not found (put t5_spiece.model in models\\text_encoders; Settings > Download models > Image gets it with Flux)";
+    return false;
+}
+
+// One transformer pass: img [Li][64] tokens at time t -> velocity [Li][64]
+void SdEngine::flux_dit(const GT& img_in, int hl, int wl, float t, float guidance, const GT& txt_in, int Lt, const GT& pooled, GT& out) {
+    Gx& g = gx();
+    const std::string& P = unet_pfx_;
+    const int D = 3072, NH = 24, HD = 128, Hp = hl / 2, Wp = wl / 2, Li = Hp * Wp, L = Lt + Li, FF = 4 * D;
+    auto lin = [&](const GT& x, int M, int K, const std::string& n, int N, GT& y, float beta = 0.f) { GT b = g.wf32(P + n + ".bias"); g.linear(x, M, K, g.w16(P + n + ".weight"), N, &b, y, beta); };
+    auto mlp_emb = [&](const std::string& n, const GT& x, int K, GT& acc, float beta) {
+        GT h = g.alloc(D); lin(x, 1, K, n + ".in_layer", D, h); g.act(h, D, Gx::SILU); lin(h, 1, D, n + ".out_layer", D, acc, beta); g.free(h);
+    };
+    auto temb = [&](float v) { std::vector<float> e(256); for (int i = 0; i < 128; i++) { double f = std::exp(-std::log(10000.0) * i / 128.0); e[i] = (float)std::cos(v * f); e[128 + i] = (float)std::sin(v * f); } GT o = g.alloc(256); g.upload(o, e.data(), 256); return o; };
+    // conditioning vector
+    GT vec = g.alloc(D), sv = g.alloc(D);
+    { GT te = temb(t * 1000.f); mlp_emb("time_in", te, 256, vec, 0.f); g.free(te); }
+    if (st_.has(P + "guidance_in.in_layer.weight")) { GT ge = temb(guidance * 1000.f); mlp_emb("guidance_in", ge, 256, vec, 1.f); g.free(ge); }
+    mlp_emb("vector_in", pooled, 768, vec, 1.f);
+    g.copy(sv, vec, D); g.act(sv, D, Gx::SILU);
+    // rotary table: text at (0,0,0), image token (0, row, col); axes 16 / 56 / 56 dims
+    std::vector<float> cs((size_t)L * 64 * 2);
+    for (int l = 0; l < L; l++) {
+        const int pr = l < Lt ? 0 : (l - Lt) / Wp, pc = l < Lt ? 0 : (l - Lt) % Wp;
+        for (int j = 0; j < 64; j++) {
+            int ax = j < 8 ? 0 : j < 36 ? 1 : 2, jj = ax == 0 ? j : ax == 1 ? j - 8 : j - 36, dax = ax == 0 ? 16 : 56;
+            double om = 1.0 / std::pow(10000.0, 2.0 * jj / dax), pos = ax == 0 ? 0 : ax == 1 ? pr : pc;
+            cs[((size_t)l * 64 + j) * 2] = (float)std::cos(pos * om); cs[((size_t)l * 64 + j) * 2 + 1] = (float)std::sin(pos * om);
+        }
+    }
+    GT csg = g.alloc(cs.size()); g.upload(csg, cs.data(), cs.size());
+    GT img = g.alloc((size_t)Li * D), txt = g.alloc((size_t)Lt * D);
+    lin(img_in, Li, 64, "img_in", D, img);
+    g.copy(txt, txt_in, (size_t)Lt * D);
+    GT q = g.alloc((size_t)L * D), k = g.alloc((size_t)L * D), v = g.alloc((size_t)L * D), a = g.alloc((size_t)L * D), n = g.alloc((size_t)L * D), tmp = g.alloc((size_t)L * D),
+       big = g.alloc((size_t)L * (3 * D + FF)), bigT = g.alloc((size_t)L * (3 * D + FF)), modg = g.alloc((size_t)12 * D);
+    std::vector<float> mh((size_t)12 * D);
+    // modulation: returns device vectors [shift, 1+scale, gate] x count
+    // modulation vectors [shift, 1+scale, gate] x cnt/3 into modg at slot `at` (each stream of a double block once)
+    auto modulate = [&](const std::string& name, int cnt, int at = 0) {
+        GT m = g.alloc((size_t)cnt * D);
+        lin(sv, 1, D, name, cnt * D, m);
+        g.download(mh.data(), m, (size_t)cnt * D); g.free(m);
+        for (int s = 0; s < cnt / 3; s++) for (int c = 0; c < D; c++) mh[((size_t)s * 3 + 1) * D + c] += 1.f;
+        GT dst = view(modg, (size_t)at * D, (size_t)cnt * D);
+        g.upload(dst, mh.data(), (size_t)cnt * D);
+    };
+    auto M = [&](int i) { return view(modg, (size_t)i * D, D); };
+    // split rows of x [R][W] (W = parts * D...) into [R][D] pieces via a transpose: X^T rows are contiguous columns
+    auto qkv_split = [&](const GT& x, int R, int W, int col, GT dst) {   // dst [R][D] <- x[:, col:col+D]
+        g.transpose(view(bigT, (size_t)col * R, (size_t)D * R), D, R, dst);
+    };
+    for (int bi = 0; st_.has(P + "double_blocks." + std::to_string(bi) + ".img_mod.lin.weight"); bi++) {
+        std::string p = "double_blocks." + std::to_string(bi) + ".";
+        for (int s = 0; s < 2; s++) {   // 0 = text stream (rows [0, Lt)), 1 = image stream (rows [Lt, L))
+            const std::string sp = s ? "img" : "txt";
+            GT& x = s ? img : txt; const int R = s ? Li : Lt; const size_t r0 = s ? Lt : 0; const int o = s * 6;
+            modulate(p + sp + "_mod.lin", 6, o);
+            g.layernorm(x, R, D, M(o + 1), M(o + 0), 1e-6f, n);
+            lin(n, R, D, p + sp + "_attn.qkv", 3 * D, big);
+            g.transpose(big, R, 3 * D, bigT);
+            qkv_split(big, R, 3 * D, 0, view(q, r0 * D, (size_t)R * D));
+            qkv_split(big, R, 3 * D, D, view(k, r0 * D, (size_t)R * D));
+            qkv_split(big, R, 3 * D, 2 * D, view(v, r0 * D, (size_t)R * D));
+            GT qs = view(q, r0 * D, (size_t)R * D), ks = view(k, r0 * D, (size_t)R * D);
+            g.rmsrow(qs, R * NH, HD, g.wf32(P + p + sp + "_attn.norm.query_norm.scale"), 1e-6f, qs);
+            g.rmsrow(ks, R * NH, HD, g.wf32(P + p + sp + "_attn.norm.key_norm.scale"), 1e-6f, ks);
+        }
+        g.rope3(q, csg, L, NH, HD); g.rope3(k, csg, L, NH, HD);
+        g.attention(q, k, v, L, L, NH, HD, a);
+        for (int s = 0; s < 2; s++) {
+            const std::string sp = s ? "img" : "txt";
+            GT& x = s ? img : txt; const int R = s ? Li : Lt; const size_t r0 = s ? Lt : 0; const int o = s * 6;
+            lin(view(a, r0 * D, (size_t)R * D), R, D, p + sp + "_attn.proj", D, tmp);
+            g.gadd(x, tmp, M(o + 2), D, (size_t)R * D);
+            g.layernorm(x, R, D, M(o + 4), M(o + 3), 1e-6f, n);
+            lin(n, R, D, p + sp + "_mlp.0", FF, big);
+            g.act(big, (size_t)R * FF, Gx::GELU_TANH);
+            lin(big, R, FF, p + sp + "_mlp.2", D, tmp);
+            g.gadd(x, tmp, M(o + 5), D, (size_t)R * D);
+        }
+    }
+    // single stream over [text | image]
+    GT X = g.alloc((size_t)L * D);
+    g.copy(X, txt, (size_t)Lt * D); g.copy(X, img, (size_t)Li * D, (size_t)Lt * D);
+    const int W1 = 3 * D + FF;
+    for (int bi = 0; st_.has(P + "single_blocks." + std::to_string(bi) + ".linear1.weight"); bi++) {
+        std::string p = "single_blocks." + std::to_string(bi) + ".";
+        modulate(p + "modulation.lin", 3);
+        g.layernorm(X, L, D, M(1), M(0), 1e-6f, n);
+        lin(n, L, D, p + "linear1", W1, big);
+        g.transpose(big, L, W1, bigT);            // [W1][L]
+        g.transpose(view(bigT, 0, (size_t)D * L), D, L, q);
+        g.transpose(view(bigT, (size_t)D * L, (size_t)D * L), D, L, k);
+        g.transpose(view(bigT, (size_t)2 * D * L, (size_t)D * L), D, L, v);
+        g.rmsrow(q, L * NH, HD, g.wf32(P + p + "norm.query_norm.scale"), 1e-6f, q);
+        g.rmsrow(k, L * NH, HD, g.wf32(P + p + "norm.key_norm.scale"), 1e-6f, k);
+        g.rope3(q, csg, L, NH, HD); g.rope3(k, csg, L, NH, HD);
+        g.attention(q, k, v, L, L, NH, HD, a);
+        // [attn | gelu(mlp)] as columns: build the transposed concat in big (rows = features), then transpose back
+        { GT at = view(big, 0, (size_t)D * L); g.transpose(a, L, D, at); }
+        GT mlpT = view(big, (size_t)D * L, (size_t)FF * L);
+        g.copy(mlpT, view(bigT, (size_t)3 * D * L, (size_t)FF * L), (size_t)FF * L);
+        g.act(mlpT, (size_t)FF * L, Gx::GELU_TANH);
+        g.transpose(view(big, 0, (size_t)(D + FF) * L), D + FF, L, bigT);   // [L][D + FF]
+        lin(bigT, L, D + FF, p + "linear2", D, tmp);
+        g.gadd(X, tmp, M(2), D, (size_t)L * D);
+    }
+    // final layer on the image tokens: (shift, scale) = adaLN(silu(vec))
+    {
+        GT m = g.alloc((size_t)2 * D);
+        lin(sv, 1, D, "final_layer.adaLN_modulation.1", 2 * D, m);
+        g.download(mh.data(), m, (size_t)2 * D); g.free(m);
+        for (int c = 0; c < D; c++) mh[(size_t)D + c] += 1.f;
+        g.upload(modg, mh.data(), (size_t)2 * D);
+        GT xi = view(X, (size_t)Lt * D, (size_t)Li * D);
+        g.layernorm(xi, Li, D, M(1), M(0), 1e-6f, n);
+        lin(n, Li, D, "final_layer.linear", 64, out);
+    }
+    for (GT* tt : {&vec, &sv, &csg, &img, &txt, &q, &k, &v, &a, &n, &tmp, &big, &bigT, &modg, &X}) g.free(*tt);
+}
+
+bool SdEngine::flux_generate(const ImageJob& jb, std::vector<uint8_t>& rgb, std::string& err, const std::function<bool(const char*, int, int)>& progress) {
+    ImageJob j = jb;
+    j.width = std::max(64, j.width / 16 * 16); j.height = std::max(64, j.height / 16 * 16);
+    const int hl = j.height / 8, wl = j.width / 8, Li = (hl / 2) * (wl / 2), C = 16;
+    const bool dev = st_.has(unet_pfx_ + "guidance_in.in_layer.weight");
+    const int Lt = dev ? 512 : 256;
+    // schnell is distilled for 1-4 steps (more add nothing); dev takes a guidance strength (3.5 typical) instead of
+    // CFG, so the studio's SD default of 6 maps to 3.5.
+    if (!dev && j.steps > 8) j.steps = 4;
+    const float guidance = j.cfg == 6.f ? 3.5f : j.cfg;
+    Gx& g = gx();
+    g.set_half(false);
+    if (!progress("Reading the prompt", 0, j.steps)) { err = "cancelled"; return false; }
+    // CLIP-L: pooled output (final norm at the end-of-text token, no projection)
+    std::vector<float> pooled;
+    {
+        ClipTok& tk = clip_tok();
+        if (!tk.load(err)) return false;
+        std::vector<int> ids = tk.encode(j.prompt);
+        if (ids.size() > 75) ids.resize(75);
+        ids.insert(ids.begin(), 49406); ids.push_back(49407);
+        const int eos = (int)ids.size() - 1;
+        while (ids.size() < 77) ids.push_back(49407);
+        Clip l;
+        if (!l.detect(st_, clip_pfx_)) { err = "CLIP-L text encoder not found in the Flux file"; return false; }
+        g.weights_begin(&st_, 1ll << 40);
+        std::vector<float> hid;
+        l.encode(ids, l.layers, true, hid, &pooled, eos);
+        g.weights_end();
+    }
+    // T5-XXL, padded to the model's text length
+    std::vector<float> t5;
+    {
+        std::string tb; if (!flux_tokenizer(tb, err)) return false;
+        Spm sp; if (!sp.load(tb)) { err = "could not read the T5 tokenizer"; return false; }
+        std::vector<int> ids = sp.encode(j.prompt);
+        if ((int)ids.size() > Lt) { ids.resize(Lt - 1); ids.push_back(1); }
+        while ((int)ids.size() < Lt) ids.push_back(0);
+        g.trim();
+        g.weights_begin(&st_, std::max<int64_t>(0, (int64_t)g.vram_free() - (1536ll << 20)), true);
+        t5_encode(st_, t5_pfx_, ids, t5);
+        g.weights_end();
+    }
+    if (!progress("Generating", 0, j.steps)) { err = "cancelled"; return false; }
+    g.trim();
+    const int L = Lt + Li, D = 3072;
+    int64_t act = (int64_t)L * (D * 8 + (3 * D + 4 * D) * 2) * 4 + (int64_t)L * 4096 * 4 + (768ll << 20);
+    const int64_t budget = std::max<int64_t>(0, (int64_t)g.vram_free() - act);
+    g.weights_begin(&st_, budget, true);
+    const double T0 = now_sec();
+    GT txt = g.alloc((size_t)Lt * D), pg = g.alloc(768), xg = g.alloc((size_t)Li * 64), vg = g.alloc((size_t)Li * 64);
+    {
+        GT t5g = g.alloc(t5.size()); g.upload(t5g, t5.data(), t5.size());
+        GT b = g.wf32(unet_pfx_ + "txt_in.bias");
+        g.linear(t5g, Lt, 4096, g.w16(unet_pfx_ + "txt_in.weight"), D, &b, txt);
+        g.free(t5g);
+    }
+    g.upload(pg, pooled.data(), 768);
+    // noise in latent layout [16][hl][wl], packed to tokens (c*4 + i*2 + j over 2x2 cells)
+    std::mt19937_64 rng(j.seed ? j.seed : std::random_device{}());
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<float> z((size_t)C * hl * wl), tok((size_t)Li * 64);
+    for (auto& v : z) v = nd(rng);
+    const int Wp = wl / 2;
+    auto pack = [&](bool to_tok) {
+        for (int y = 0; y < hl / 2; y++) for (int x = 0; x < Wp; x++) for (int c = 0; c < C; c++) for (int i = 0; i < 2; i++) for (int jj = 0; jj < 2; jj++) {
+            float& a = tok[((size_t)y * Wp + x) * 64 + c * 4 + i * 2 + jj]; float& b = z[((size_t)c * hl + y * 2 + i) * wl + x * 2 + jj];
+            if (to_tok) a = b; else b = a;
+        }
+    };
+    pack(true);
+    g.upload(xg, tok.data(), tok.size());
+    // timesteps 1 -> 0; dev shifts them toward noise for bigger pictures
+    std::vector<float> ts(j.steps + 1);
+    for (int i = 0; i <= j.steps; i++) {
+        double t = 1.0 - (double)i / j.steps;
+        if (dev && t > 0 && t < 1) { double mu = 0.5 + (1.15 - 0.5) * (Li - 256) / (4096.0 - 256); t = std::exp(mu) / (std::exp(mu) + (1 / t - 1)); }
+        ts[i] = (float)t;
+    }
+    for (int i = 0; i < j.steps; i++) {
+        if (!progress("Generating", i, j.steps)) { err = "cancelled"; break; }
+        const double ts0 = now_sec();
+        flux_dit(xg, hl, wl, ts[i], guidance, txt, Lt, pg, vg);
+        if (getenv("ITHACA_FLUX_T")) { g.sync(); fprintf(stderr, "[flux] step %d: %.1f s, %lld MB streamed so far\n", i, now_sec() - ts0, (long long)(g.streamed_bytes() >> 20)); }
+        g.axpy(xg, vg, (size_t)Li * 64, ts[i + 1] - ts[i]);
+    }
+    fprintf(stderr, "[flux] %lld MB resident, %lld MB streamed, %.1f s\n", (long long)(g.resident_bytes() >> 20), (long long)(g.streamed_bytes() >> 20), now_sec() - T0);
+    g.download(tok.data(), xg, tok.size());
+    for (GT* t : {&txt, &pg, &xg, &vg}) g.free(*t);
+    g.weights_end();
+    if (!err.empty()) { g.trim(); return false; }
+    progress("Decoding", j.steps, j.steps);
+    pack(false);
+    for (auto& v : z) v = v / 0.3611f + 0.1159f;
+    g.trim();
+    std::vector<float> img;
+    vae_decode(z, hl, wl, img);
+    g.trim();
+    const int W = wl * 8, H = hl * 8;
+    rgb.resize((size_t)W * H * 3);
+    for (int c = 0; c < 3; c++) for (int p = 0; p < W * H; p++) rgb[(size_t)p * 3 + c] = (uint8_t)std::min(255.f, std::max(0.f, (img[(size_t)c * W * H + p] + 1.f) * 127.5f + 0.5f));
     return true;
 }
 

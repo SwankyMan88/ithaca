@@ -129,7 +129,7 @@ void Gx::trim() {
 size_t Gx::vram_free() { size_t f = 0, t = 0; cu().mem_info(f, t); return f; }
 
 // ---------------- weights ----------------
-static void to_f16(const STensor& t, std::vector<uint16_t>& out) {
+void to_f16(const STensor& t, std::vector<uint16_t>& out) {
     size_t n = (size_t)t.numel();
     out.resize(n);
     if (t.dtype == "F16") { memcpy(out.data(), t.data, n * 2); return; }

@@ -91,11 +91,11 @@ Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU
 
 | | Models | Notes |
 |---|---|---|
-| Images | SD 1.5, SD 2.x, SDXL single-file checkpoints and their fine-tunes | DPM++ 2M, Euler, Euler a; optional separate VAE |
-| Video | Wan 2.2 TI2V-5B | Needs the umT5 encoder and the Wan 2.2 VAE; saves MP4 |
+| Images | SD 1.5, SD 2.x, SDXL single-file checkpoints and their fine-tunes; Flux.1 schnell and dev (all-in-one fp8 files) | DPM++ 2M, Euler, Euler a; optional separate VAE. Flux on a 12 GB card: about 1.5 min at 512x512, 3 to 5 min at 1024x1024 |
+| Video | Wan 2.2 TI2V-5B, Wan 2.1 T2V (1.3B) | Needs the umT5 encoder and the matching Wan VAE; saves MP4 |
 | Speech | F5-TTS + Vocos | Voice cloning from a 5 to 12 second clip |
 
-Not supported yet: DeepSeek V3/R1 (full size), Llama 4, Flux/SD3, LoRAs, image-to-video. Settings → Model shows whether each of your files is supported.
+Not supported yet: DeepSeek V3/R1 (full size), Llama 4, SD3, Wan 14B and GGUF video files, LoRAs, image-to-video. Settings → Model shows whether each of your files is supported, and Settings → Download models gets image, video and speech models with everything they need.
 
 ## Questions
 
@@ -256,7 +256,7 @@ src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 
 - Close the rest of the prompt-speed gap on Gemma 3 and mixture-of-experts models.
 - Faster gpt-oss prompts; DeepSeek V3 routing.
-- Flux and SD3 image models, LoRAs, image-to-video.
+- SD3, Wan 14B (GGUF) video, LoRAs, image-to-video; faster Flux on 12 GB cards.
 - AMD and Intel GPUs (Vulkan).
 
 ## License

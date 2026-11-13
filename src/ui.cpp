@@ -1036,7 +1036,7 @@ function fitBadge(bytes){const f=fitFor(bytes);if(!f)return '';
   return `<span class="fit ${f.cls}" title="Rough estimate from your hardware${bench.results.ram_gbps?' and benchmark':''}">${f.label} · ~${f.tps>=10?Math.round(f.tps):f.tps.toFixed(1)} tok/s</span>`}
 const HUBTABS=[['curated','chat','Chat'],['image','image','Image'],['video','video','Video'],['audio','audio','Audio'],['hf','dl','Search Hugging Face']];
 const HUBSUB={curated:'Chat models from the GPT4All list. Each one shows how it would run on this PC.',
-  image:'Picture models the built-in image engine runs (SD 1.5 and SDXL families). Each download is one file; it shows up in the Image studio when it finishes.',
+  image:'Picture models the built-in image engine runs (SD 1.5, SDXL and Flux). Each one shows up in the Image studio when it finishes.',
   video:'Video models with everything they need (text encoder and VAE included). Shared files are only downloaded once.',
   audio:'Speech models with their vocabulary and vocoder. Add a voice clip in the Audio studio after downloading.',
   hf:'Search Hugging Face for chat models (GGUF) or single-file image checkpoints (SD 1.5 and SDXL fine-tunes).'};
@@ -1060,11 +1060,13 @@ function mediaRow(p){
   const dls=window._dls||[],files=p.files,total=files.reduce((a,f)=>a+f.bytes,0);
   const st=files.map(f=>({f,d:dls.find(d=>d.file==f.file)}));
   const have=st.every(x=>x.f.have||(x.d&&x.d.state=='done')),busy=st.some(x=>x.d&&(x.d.state=='downloading'||x.d.state=='queued'));
+  // the main file may already be elsewhere on this PC (a ComfyUI folder): then only its helpers are needed here
   const elsewhere=!have&&(mediaModels||[]).some(m=>m.name.toLowerCase()==files[0].file.split('/').pop().toLowerCase());
-  const missing=st.filter(x=>!x.f.have&&!(x.d&&x.d.state=='done')).reduce((a,x)=>a+x.f.bytes,0);
+  const need=st.filter((x,i)=>!(elsewhere&&i==0)&&!x.f.have&&!(x.d&&x.d.state=='done'));
+  const missing=need.reduce((a,x)=>a+x.f.bytes,0);
   const vram=sysinfo&&sysinfo.gpu?sysinfo.gpu.vram_mb*1048576:0,big=Math.max(...files.map(f=>f.bytes));
   const fit=!vram?'<span class="fit slow">No NVIDIA GPU: very slow</span>':big*1.05<vram-1.2e9?'<span class="fit fast">Fits in VRAM</span>':'<span class="fit ok">Streams from RAM (slower)</span>';
-  const btn=have?'<span class="fit fast">Downloaded</span>':elsewhere?'<span class="fit fast">Found on this PC</span>'
+  const btn=have||(elsewhere&&!need.length)?`<span class="fit fast">${have?'Downloaded':'Found on this PC'}</span>`
     :busy?`<button class="btn" data-mcancel="${esc(p.id)}">Cancel</button>`:`<button class="btn pri" data-mdl="${esc(p.id)}">Download${missing<total?' rest':''}</button>`;
   const parts=files.length>1?`<p>${files.map(x=>esc(x.file.split('/').pop())+' · '+GB(x.bytes)+(x.have?' ✓':'')).join('<br>')}</p>`:'';
   return `<div class="hubrow"><div class="hubmain"><b>${esc(p.name)}</b><span class="hubmeta">${esc(p.arch)} · ${GB(total)}${missing&&missing<total?' ('+GB(missing)+' left to get)':''} ${fit}</span><p>${esc(p.desc)}</p>${parts}</div>${btn}</div>`}
@@ -1075,8 +1077,8 @@ async function drawHub(){
     if(!mediaModels)mediaModels=await api('/api/media/models');
     if(mediaCat.error){el.innerHTML=`<p class="sub">${esc(mediaCat.error)}</p>`;return}
     const list=mediaCat.packs.filter(p=>p.kind==hubTab);
-    const more={image:'Also works: any single-file SD 1.5, SD 2.x or SDXL checkpoint (Pony, Illustrious and other fine-tunes). Find more under Search Hugging Face → Image checkpoints, or drop .safetensors files into the models folder. Flux and SD3 aren\'t supported yet.',
-      video:'Wan 2.2 TI2V 5B is the video model the engine runs today. Wan 2.1, the 14B models and image-to-video aren\'t supported yet.',
+    const more={image:'Also works: any single-file SD 1.5, SD 2.x or SDXL checkpoint (Pony, Illustrious and other fine-tunes) and all-in-one Flux checkpoints. Find more under Search Hugging Face → Image checkpoints, or drop .safetensors files into the models folder. SD3 isn\'t supported yet.',
+      video:'Wan 2.1 (16-channel, like the 1.3B) and Wan 2.2 TI2V 5B text-to-video run today. The 14B models, GGUF video files and image-to-video aren\'t supported yet.',
       audio:'F5-TTS is the speech engine today. Kokoro, Chatterbox, music, sound effects and speech-to-text aren\'t supported yet.'}[hubTab];
     el.innerHTML=list.map(mediaRow).join('')+`<p class="sub" style="margin-top:12px">${more}</p>`;
     bindHub();return}
@@ -1107,7 +1109,8 @@ function bindHub(){
   el.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=async()=>{await api('/api/hub/cancel',{file:b.dataset.cancel});pollDl()});
   const pack=id=>(mediaCat&&mediaCat.packs||[]).find(p=>p.id==id);
   el.querySelectorAll('[data-mdl]').forEach(b=>b.onclick=async()=>{const p=pack(b.dataset.mdl);if(!p)return;b.disabled=true;
-    for(const f of p.files)if(!f.have){const r=await api('/api/hub/download',{file:f.file,url:f.url,bytes:f.bytes,skip_have:true});if(r.error){toast(r.error);break}}
+    const away=(mediaModels||[]).some(m=>m.name.toLowerCase()==p.files[0].file.split('/').pop().toLowerCase());
+    for(const [i,f] of p.files.entries())if(!f.have&&!(away&&i==0)){const r=await api('/api/hub/download',{file:f.file,url:f.url,bytes:f.bytes,skip_have:true});if(r.error){toast(r.error);break}}
     pollDl()});
   el.querySelectorAll('[data-mcancel]').forEach(b=>b.onclick=async()=>{const p=pack(b.dataset.mcancel);if(!p)return;
     for(const f of p.files)await api('/api/hub/cancel',{file:f.file});pollDl()});
@@ -1237,9 +1240,9 @@ async function drawStudio(){
   if(!mediaModels)mediaModels=await api('/api/media/models');
   const kind=view,st=$('studio');
   const banner=kind=='image'
-    ?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs single-file <b>SD 1.5, SD 2.x and SDXL</b> checkpoints (including fine-tunes like Pony, Illustrious, Juggernaut). Layout is read from the file, so any checkpoint of these families works. Weights that don't fit in free VRAM are streamed from RAM. You can also just ask for an image in a normal chat. Flux and SD3 support is coming.</div>`
+    ?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs single-file <b>SD 1.5, SD 2.x and SDXL</b> checkpoints (including fine-tunes like Pony, Illustrious, Juggernaut) and all-in-one <b>Flux.1</b> checkpoints (schnell and dev). Layout is read from the file, so any checkpoint of these families works. Weights that don't fit in free VRAM are streamed from RAM. You can also just ask for an image in a normal chat. SD3 support is coming.</div>`
     :kind=='audio'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> speech with <b>F5-TTS</b> voice cloning and the Vocos vocoder. Pick a default voice and the chat can talk too ("say this out loud…"). Music, sound effects, Kokoro/Chatterbox voices and speech-to-text are next.</div>`
-    :kind=='video'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs <b>Wan 2.2 TI2V-5B</b> text-to-video (with the umT5-XXL text encoder and Wan 2.2 VAE, found automatically next to the model). Weights that don't fit in VRAM stream from RAM. You can also ask for a video in a normal chat. Image-to-video and the 14B GGUF models are coming.</div>`
+    :kind=='video'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs <b>Wan 2.2 TI2V-5B</b> and <b>Wan 2.1</b> (like T2V 1.3B) text-to-video, with the umT5-XXL text encoder and the matching Wan VAE found automatically next to the model. Weights that don't fit in VRAM stream from RAM. You can also ask for a video in a normal chat. Image-to-video and the 14B GGUF models are coming.</div>`
     :`<div class="banner"><b>Engine status:</b> Ithaca can already find and select ${kind} models and prepare prompts, and the chat model knows how to request ${kind}s. The ${kind} engine itself is still being built, so Generate reports that for now.</div>`;
   let body='';
   const adv=inner=>`<details class="card adv"><summary>More options</summary><div class="in">${inner}</div></details>`;
