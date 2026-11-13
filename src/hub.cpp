@@ -104,9 +104,10 @@ static std::string url_enc(const std::string& s) {
     for (unsigned char ch : s) { if (isalnum(ch) || strchr("-_.~", ch)) o += ch; else { snprintf(b, 4, "%%%02X", ch); o += b; } }
     return o;
 }
-static std::string hf_search_json(const std::string& q) {
+static std::string hf_search_json(const std::string& q, bool image) {
     std::string txt, err;
-    if (!fetch("https://huggingface.co/api/models?search=" + url_enc(q) + "&filter=gguf&sort=downloads&direction=-1&limit=30", txt, err))
+    const std::string filt = image ? "&pipeline_tag=text-to-image&filter=safetensors" : "&filter=gguf";
+    if (!fetch("https://huggingface.co/api/models?search=" + url_enc(q) + filt + "&sort=downloads&direction=-1&limit=30", txt, err))
         return "{\"error\":" + json_esc("Hugging Face search failed: " + err) + "}";
     J j; json_parse(txt, j);
     std::string s = "{\"repos\":[";
@@ -115,7 +116,7 @@ static std::string hf_search_json(const std::string& q) {
              ",\"likes\":" + std::to_string((int64_t)j.a[i]["likes"].num(0)) + "}";
     return s + "]}";
 }
-static std::string hf_files_json(const std::string& repo) {
+static std::string hf_files_json(const std::string& repo, bool image) {
     std::string txt, err;
     if (repo.find("..") != std::string::npos || !fetch("https://huggingface.co/api/models/" + repo + "/tree/main?recursive=true", txt, err))
         return "{\"error\":" + json_esc("Could not list files: " + err) + "}";
@@ -123,12 +124,81 @@ static std::string hf_files_json(const std::string& repo) {
     std::string s = "{\"files\":["; bool first = true;
     for (auto& f : j.a) {
         std::string p = f["path"].str();
-        if (p.size() < 5 || p.compare(p.size() - 5, 5, ".gguf") || f["type"].str() != "file") continue;
-        if (p.find("-of-0000") != std::string::npos || p.find("mmproj") != std::string::npos) continue;   // split shards and vision projectors don't load on their own
+        if (f["type"].str() != "file") continue;
         int64_t sz = (int64_t)f["size"].num(0); const J& lfs = f["lfs"]; if (lfs.t == J::OBJ) sz = (int64_t)lfs["size"].num((double)sz);
+        if (image) {   // single-file checkpoints: one big .safetensors at the top level (diffusers folders and LoRAs don't load)
+            std::string lo = p; for (auto& c : lo) c = (char)tolower(c);
+            if (lo.size() < 12 || lo.compare(lo.size() - 12, 12, ".safetensors") || p.find('/') != std::string::npos || sz < (1500ll << 20)) continue;
+            if (lo.find("lora") != std::string::npos || lo.find("vae") != std::string::npos || lo.find("unet") != std::string::npos || lo.find("inpaint") != std::string::npos) continue;
+        } else {
+            if (p.size() < 5 || p.compare(p.size() - 5, 5, ".gguf")) continue;
+            if (p.find("-of-0000") != std::string::npos || p.find("mmproj") != std::string::npos) continue;   // split shards and vision projectors don't load on their own
+        }
         s += std::string(first ? "" : ",") + "{\"path\":" + json_esc(p) + ",\"bytes\":" + std::to_string(sz) +
              ",\"url\":" + json_esc("https://huggingface.co/" + repo + "/resolve/main/" + p) + "}";
         first = false;
+    }
+    return s + "]}";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Image, video and speech models the built-in engines run, as complete sets: every file a model needs, placed in
+// the models folder the way the engines look for it (Wan finds text_encoders\ and vae\ beside diffusion_models\,
+// F5-TTS wants vocab.txt and a vocos folder next to it). Files shared between sets are fetched once.
+struct MFile { const char* path; const char* url; int64_t bytes; };
+struct MPack { const char* id; const char* kind; const char* name; const char* arch; const char* desc; std::vector<MFile> files; };
+static const char* HF = "https://huggingface.co/";
+static const std::vector<MPack>& media_packs() {
+    static const std::string W22 = std::string(HF) + "Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/";
+    static std::vector<MPack> p = {
+        {"sdxl", "image", "Stable Diffusion XL 1.0", "SDXL", "The original SDXL base model from Stability AI. Good all-rounder at 1024x1024.",
+         {{"checkpoints/sd_xl_base_1.0.safetensors", "stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors", 6938078334}}},
+        {"juggernaut", "image", "Juggernaut XL v9", "SDXL", "Photorealistic SDXL fine-tune: people, products, landscapes.",
+         {{"checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors", "RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors", 7105348188}}},
+        {"realvis", "image", "RealVisXL V5.0", "SDXL", "Photorealistic SDXL fine-tune with natural skin and lighting.",
+         {{"checkpoints/RealVisXL_V5.0_fp16.safetensors", "SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors", 6938065488}}},
+        {"animagine", "image", "Animagine XL 4.0", "SDXL", "Anime and illustration SDXL model. Works best with tag-style prompts (1girl, solo, ...).",
+         {{"checkpoints/animagine-xl-4.0-opt.safetensors", "cagliostrolab/animagine-xl-4.0/resolve/main/animagine-xl-4.0-opt.safetensors", 6938350040}}},
+        {"illustrious", "image", "Illustrious XL v0.1", "SDXL", "Anime illustration base model that many popular fine-tunes start from.",
+         {{"checkpoints/Illustrious-XL-v0.1.safetensors", "OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors", 6938040760}}},
+        {"sdxl-turbo", "image", "SDXL Turbo", "SDXL", "Very fast SDXL: 1 to 4 steps with guidance (CFG) at 1, at 512x512. Set them under More options.",
+         {{"checkpoints/sd_xl_turbo_1.0_fp16.safetensors", "stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors", 6938081905}}},
+        {"dreamshaper8", "image", "DreamShaper 8", "SD 1.5", "Versatile SD 1.5 fine-tune: art, portraits, fantasy. Small and quick at 512x512.",
+         {{"checkpoints/DreamShaper_8_pruned.safetensors", "Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors", 2132625894}}},
+        {"sd15", "image", "Stable Diffusion 1.5", "SD 1.5", "The classic 512x512 model. Runs on almost any GPU.",
+         {{"checkpoints/v1-5-pruned-emaonly.safetensors", "stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors", 4265146304}}},
+        {"wan22-5b", "video", "Wan 2.2 TI2V 5B", "Wan 2.2", "Text-to-video, 24 fps. About 3 minutes for 2 seconds at 640x352 on an RTX 3060. Includes the umT5 text encoder and the Wan 2.2 VAE.",
+         {{"diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "", 9999658848}, {"text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "", 6735906897}, {"vae/wan2.2_vae.safetensors", "", 1409400960}}},
+        {"f5tts", "audio", "F5-TTS v1 + Vocos", "F5-TTS", "Speech with voice cloning from a 5 to 12 second clip. Includes the vocabulary and the Vocos vocoder.",
+         {{"f5-tts/model_1250000.safetensors", "SWivid/F5-TTS/resolve/main/F5TTS_v1_Base/model_1250000.safetensors", 1348435761}, {"f5-tts/vocab.txt", "SWivid/F5-TTS/resolve/main/F5TTS_v1_Base/vocab.txt", 13800},
+          {"f5-tts/vocos/pytorch_model.bin", "charactr/vocos-mel-24khz/resolve/main/pytorch_model.bin", 54365991}, {"f5-tts/vocos/config.yaml", "charactr/vocos-mel-24khz/resolve/main/config.yaml", 461}}},
+    };
+    static bool init = false;
+    if (!init) {
+        static std::vector<std::string> keep; keep.reserve(64);   // no reallocation: f.url points into it
+        for (auto& m : p) for (auto& f : m.files) {
+            std::string u = f.url[0] ? std::string(HF) + f.url : W22 + std::string(f.path);
+            keep.push_back(u); f.url = keep.back().c_str();
+        }
+        init = true;
+    }
+    return p;
+}
+static bool model_file_exists(const std::string& rel) {
+    std::wstring w = utf8_to_w(rel); for (auto& c : w) if (c == L'/') c = L'\\';
+    return GetFileAttributesW((g_store_dir + L"\\models\\" + w).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+static std::string media_catalog_json() {
+    static std::mutex m; std::lock_guard<std::mutex> l(m);
+    const auto& packs = media_packs();
+    std::string s = "{\"packs\":["; bool first = true;
+    for (auto& p : packs) {
+        s += std::string(first ? "" : ",") + "{\"id\":" + json_esc(p.id) + ",\"kind\":" + json_esc(p.kind) + ",\"name\":" + json_esc(p.name) +
+             ",\"arch\":" + json_esc(p.arch) + ",\"desc\":" + json_esc(p.desc) + ",\"files\":[";
+        for (size_t i = 0; i < p.files.size(); i++)
+            s += std::string(i ? "," : "") + "{\"file\":" + json_esc(p.files[i].path) + ",\"url\":" + json_esc(p.files[i].url) +
+                 ",\"bytes\":" + std::to_string(p.files[i].bytes) + ",\"have\":" + (model_file_exists(p.files[i].path) ? "true" : "false") + "}";
+        s += "]}"; first = false;
     }
     return s + "]}";
 }
@@ -141,9 +211,25 @@ static std::mutex g_dl_m;
 static std::map<std::string, std::shared_ptr<Dl>> g_dls;
 static std::wstring models_dir() { std::wstring d = g_store_dir + L"\\models"; CreateDirectoryW(d.c_str(), 0); return d; }
 static bool safe_name(const std::string& f) { return !f.empty() && f.find_first_of("\\/:*?\"<>|") == std::string::npos && f.find("..") == std::string::npos; }
+// A file name, or up to three folders deep under models ("vae/wan2.2_vae.safetensors"): every part a safe name.
+static bool safe_rel(const std::string& f) {
+    size_t a = 0; int parts = 0;
+    while (true) {
+        size_t b = f.find('/', a);
+        if (!safe_name(f.substr(a, b == std::string::npos ? std::string::npos : b - a)) || ++parts > 4) return false;
+        if (b == std::string::npos) return true;
+        a = b + 1;
+    }
+}
+static std::wstring model_path(const std::string& rel, bool mkdirs) {
+    std::wstring w = utf8_to_w(rel), p = models_dir();
+    size_t a = 0;
+    for (size_t b; (b = w.find(L'/', a)) != std::wstring::npos; a = b + 1) { p += L"\\" + w.substr(a, b - a); if (mkdirs) CreateDirectoryW(p.c_str(), 0); }
+    return p + L"\\" + w.substr(a);
+}
 
 static void dl_run(std::shared_ptr<Dl> d) {
-    std::wstring fin = models_dir() + L"\\" + utf8_to_w(d->file), part = fin + L".part";
+    std::wstring fin = model_path(d->file, true), part = fin + L".part";
     for (int attempt = 0; attempt < 4 && !d->cancel; attempt++) {
         int64_t have = 0;
         WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -177,9 +263,8 @@ static void dl_run(std::shared_ptr<Dl> d) {
 }
 static std::string dl_start(const J& j) {
     std::string file = j["file"].str(), url = j["url"].str();
-    if (!safe_name(file) || (url.rfind("https://gpt4all.io/", 0) && url.rfind("https://huggingface.co/", 0) && url.rfind("https://", 0)))
-        return "{\"error\":\"bad file name or url\"}";
-    if (GetFileAttributesW((models_dir() + L"\\" + utf8_to_w(file)).c_str()) != INVALID_FILE_ATTRIBUTES) return "{\"error\":\"already downloaded\"}";
+    if (!safe_rel(file) || url.rfind("https://", 0)) return "{\"error\":\"bad file name or url\"}";
+    if (GetFileAttributesW(model_path(file, false).c_str()) != INVALID_FILE_ATTRIBUTES) return j["skip_have"].t == J::BOOL && j["skip_have"].b ? "{}" : "{\"error\":\"already downloaded\"}";
     std::lock_guard<std::mutex> l(g_dl_m);
     auto it = g_dls.find(file);
     if (it != g_dls.end() && (it->second->state == "downloading" || it->second->state == "queued")) return "{}";
@@ -472,18 +557,21 @@ static void bench_run() {
 bool handle_hub(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out) {
     code = 200; type = "application/json";
     if (path == "/api/hub/catalog") { out = catalog_json(); return true; }
+    if (path == "/api/hub/media") { out = media_catalog_json(); return true; }
     if (path.rfind("/api/hub/search?q=", 0) == 0) {
-        std::string q, e = path.substr(18);
+        const bool image = path.find("&kind=image") != std::string::npos;
+        std::string q, e = path.substr(18); e = e.substr(0, e.find('&'));
         for (size_t i = 0; i < e.size(); i++) {
             if (e[i] == '%' && i + 2 < e.size()) { q += (char)strtol(e.substr(i + 1, 2).c_str(), 0, 16); i += 2; }
             else q += e[i] == '+' ? ' ' : e[i];
         }
-        out = hf_search_json(q); return true;
+        out = hf_search_json(q, image); return true;
     }
     if (path.rfind("/api/hub/files?repo=", 0) == 0) {
-        std::string r = path.substr(20), q;
+        const bool image = path.find("&kind=image") != std::string::npos;
+        std::string r = path.substr(20), q; r = r.substr(0, r.find('&'));
         for (size_t i = 0; i < r.size(); i++) { if (r[i] == '%' && i + 2 < r.size()) { q += (char)strtol(r.substr(i + 1, 2).c_str(), 0, 16); i += 2; } else q += r[i]; }
-        out = hf_files_json(q); return true;
+        out = hf_files_json(q, image); return true;
     }
     if (path == "/api/hub/download" && method == "POST") { J j; json_parse(body, j); out = dl_start(j); return true; }
     if (path == "/api/hub/downloads") { out = dl_json(); return true; }

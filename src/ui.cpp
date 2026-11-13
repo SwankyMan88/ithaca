@@ -1019,7 +1019,7 @@ async function drawMem(){
     row.innerHTML=`<textarea rows="2">${esc(m.text)}</textarea><select>${Object.entries(CATS).map(([k,v])=>`<option value="${k}" ${normCat(m.category)==k?'selected':''}>${v}</option>`).join('')}</select><button class="btn pri">Save</button>`;
     row.querySelector('.btn').onclick=()=>{m.text=row.querySelector('textarea').value.trim();m.category=row.querySelector('select').value;m.updated=Date.now();save()}})}
 /* ---------- model hub + system ---------- */
-let sysinfo=null,bench={state:'idle',results:{}},hubTab='curated',hubData=null,dlTimer=0;
+let sysinfo=null,bench={state:'idle',results:{}},hubTab='curated',hubData=null,mediaCat=null,hfKind='chat',dlTimer=0;
 const GB=b=>(b/1073741824).toFixed(b>=10*1073741824?0:1)+' GB';
 async function getSys(){if(!sysinfo)sysinfo=await api('/api/sysinfo');return sysinfo}
 // How a model of `bytes` will run here: where it lives and a rough speed from measured bandwidth.
@@ -1034,22 +1034,52 @@ function fitFor(bytes){
   return {cls,label,tps}}
 function fitBadge(bytes){const f=fitFor(bytes);if(!f)return '';
   return `<span class="fit ${f.cls}" title="Rough estimate from your hardware${bench.results.ram_gbps?' and benchmark':''}">${f.label} · ~${f.tps>=10?Math.round(f.tps):f.tps.toFixed(1)} tok/s</span>`}
-TABS.hub=()=>`<h2>Download models</h2><p class="sub">Get chat models straight into Ithaca's models folder. Each one shows how it would run on this PC.</p>
- <div class="seg" id="hubSeg"><button data-h="curated" class="${hubTab=='curated'?'on':''}">GPT4All picks</button><button data-h="hf" class="${hubTab=='hf'?'on':''}">Search Hugging Face</button></div>
- <div id="hubSearch" style="display:${hubTab=='hf'?'flex':'none'};gap:8px;margin:12px 0"><input id="hfQ" class="search" style="margin:0;flex:1" placeholder="e.g. qwen 7b instruct, llama 3.1 8b, mistral"><button class="btn pri" id="hfGo">Search</button></div>
+const HUBTABS=[['curated','chat','Chat'],['image','image','Image'],['video','video','Video'],['audio','audio','Audio'],['hf','dl','Search Hugging Face']];
+const HUBSUB={curated:'Chat models from the GPT4All list. Each one shows how it would run on this PC.',
+  image:'Picture models the built-in image engine runs (SD 1.5 and SDXL families). Each download is one file; it shows up in the Image studio when it finishes.',
+  video:'Video models with everything they need (text encoder and VAE included). Shared files are only downloaded once.',
+  audio:'Speech models with their vocabulary and vocoder. Add a voice clip in the Audio studio after downloading.',
+  hf:'Search Hugging Face for chat models (GGUF) or single-file image checkpoints (SD 1.5 and SDXL fine-tunes).'};
+TABS.hub=()=>`<h2>Download models</h2><p class="sub">${HUBSUB[hubTab]}</p>
+ <div class="seg" id="hubSeg">${HUBTABS.map(([h,i,t])=>`<button data-h="${h}" class="${hubTab==h?'on':''}">${ico(i)}${t}</button>`).join('')}</div>
+ <div id="hubSearch" style="display:${hubTab=='hf'?'flex':'none'};gap:8px;margin:12px 0"><select id="hfKind" style="width:auto">${[['chat','Chat (GGUF)'],['image','Image checkpoints']].map(([v,t])=>`<option value="${v}" ${hfKind==v?'selected':''}>${t}</option>`).join('')}</select>
+  <input id="hfQ" class="search" style="margin:0;flex:1" placeholder="${hfKind=='image'?'e.g. sdxl anime, realistic vision, pony':'e.g. qwen 7b instruct, llama 3.1 8b, mistral'}"><button class="btn pri" id="hfGo">Search</button></div>
  <div id="dlBox"></div><div id="hubList"><p class="sub">Loading…</p></div>`;
 TABS.system=()=>`<h2>System &amp; benchmark</h2><p class="sub">What's in this PC and how fast each part is. Ithaca uses these numbers to say how models will run.</p>
  <div id="sysBox"><p class="sub">Reading hardware…</p></div>
  <div style="display:flex;align-items:center;gap:12px;margin:18px 0 10px"><button class="btn pri" id="benchGo">Run benchmark</button><span id="benchMsg" style="color:var(--dim);font-size:13px">Takes about 30 seconds. Writes a 1 GB test file to the models drive and deletes it.</span></div>
  <div id="benchBox"></div>`;
 function hubRow(m){
-  const st=(window._dls||[]).find(d=>d.file==m.file),have=(window._localNames||[]).includes(m.file.toLowerCase());
+  const st=(window._dls||[]).find(d=>d.file==m.file),have=(window._localNames||[]).includes(m.file.toLowerCase())||(st&&st.state=='done');
   const btn=have?'<span class="fit fast">Downloaded</span>':st&&(st.state=='downloading'||st.state=='queued')?`<button class="btn" data-cancel="${esc(m.file)}">Cancel</button>`
     :`<button class="btn pri" data-dl="${esc(m.file)}">Download</button>`;
-  return `<div class="hubrow"><div class="hubmain"><b>${esc(m.name)}</b><span class="hubmeta">${[m.params,m.quant,m.bytes?GB(m.bytes):'',m.ram_gb?m.ram_gb+' GB RAM suggested':''].filter(Boolean).map(esc).join(' · ')} ${fitBadge(m.bytes)}</span>
+  return `<div class="hubrow"><div class="hubmain"><b>${esc(m.name)}</b><span class="hubmeta">${[m.params,m.quant,m.bytes?GB(m.bytes):'',m.ram_gb?m.ram_gb+' GB RAM suggested':''].filter(Boolean).map(esc).join(' · ')} ${m.file.startsWith('checkpoints/')?'':fitBadge(m.bytes)}</span>
     ${m.desc?`<p>${esc(m.desc.slice(0,260))}${m.desc.length>260?'…':''}</p>`:''}</div>${btn}</div>`}
+// A media set: every file it needs; one button downloads the missing ones, progress is summed over them.
+function mediaRow(p){
+  const dls=window._dls||[],files=p.files,total=files.reduce((a,f)=>a+f.bytes,0);
+  const st=files.map(f=>({f,d:dls.find(d=>d.file==f.file)}));
+  const have=st.every(x=>x.f.have||(x.d&&x.d.state=='done')),busy=st.some(x=>x.d&&(x.d.state=='downloading'||x.d.state=='queued'));
+  const elsewhere=!have&&(mediaModels||[]).some(m=>m.name.toLowerCase()==files[0].file.split('/').pop().toLowerCase());
+  const missing=st.filter(x=>!x.f.have&&!(x.d&&x.d.state=='done')).reduce((a,x)=>a+x.f.bytes,0);
+  const vram=sysinfo&&sysinfo.gpu?sysinfo.gpu.vram_mb*1048576:0,big=Math.max(...files.map(f=>f.bytes));
+  const fit=!vram?'<span class="fit slow">No NVIDIA GPU: very slow</span>':big*1.05<vram-1.2e9?'<span class="fit fast">Fits in VRAM</span>':'<span class="fit ok">Streams from RAM (slower)</span>';
+  const btn=have?'<span class="fit fast">Downloaded</span>':elsewhere?'<span class="fit fast">Found on this PC</span>'
+    :busy?`<button class="btn" data-mcancel="${esc(p.id)}">Cancel</button>`:`<button class="btn pri" data-mdl="${esc(p.id)}">Download${missing<total?' rest':''}</button>`;
+  const parts=files.length>1?`<p>${files.map(x=>esc(x.file.split('/').pop())+' · '+GB(x.bytes)+(x.have?' ✓':'')).join('<br>')}</p>`:'';
+  return `<div class="hubrow"><div class="hubmain"><b>${esc(p.name)}</b><span class="hubmeta">${esc(p.arch)} · ${GB(total)}${missing&&missing<total?' ('+GB(missing)+' left to get)':''} ${fit}</span><p>${esc(p.desc)}</p>${parts}</div>${btn}</div>`}
 async function drawHub(){
   const el=$('hubList');if(!el)return;await getSys();
+  if(['image','video','audio'].includes(hubTab)){
+    if(!mediaCat||mediaCat.stale)mediaCat=await api('/api/hub/media');
+    if(!mediaModels)mediaModels=await api('/api/media/models');
+    if(mediaCat.error){el.innerHTML=`<p class="sub">${esc(mediaCat.error)}</p>`;return}
+    const list=mediaCat.packs.filter(p=>p.kind==hubTab);
+    const more={image:'Also works: any single-file SD 1.5, SD 2.x or SDXL checkpoint (Pony, Illustrious and other fine-tunes). Find more under Search Hugging Face → Image checkpoints, or drop .safetensors files into the models folder. Flux and SD3 aren\'t supported yet.',
+      video:'Wan 2.2 TI2V 5B is the video model the engine runs today. Wan 2.1, the 14B models and image-to-video aren\'t supported yet.',
+      audio:'F5-TTS is the speech engine today. Kokoro, Chatterbox, music, sound effects and speech-to-text aren\'t supported yet.'}[hubTab];
+    el.innerHTML=list.map(mediaRow).join('')+`<p class="sub" style="margin-top:12px">${more}</p>`;
+    bindHub();return}
   const local=await api('/api/models');window._localNames=local.map(m=>m.name.toLowerCase());
   if(hubTab=='curated'){
     if(!hubData||!hubData.models)hubData=await api('/api/hub/catalog');
@@ -1057,27 +1087,41 @@ async function drawHub(){
     el.innerHTML=hubData.models.map(hubRow).join('');
   }else if(window._hfFiles){
     const f=window._hfFiles;
-    el.innerHTML=`<button class="btn" id="hfBack">← Results</button><h4 style="margin:12px 0 6px">${esc(f.repo)}</h4>`+(f.files.length?f.files.map(x=>hubRow({name:x.path.split('/').pop(),file:x.path.split('/').pop(),url:x.url,bytes:x.bytes,quant:(x.path.match(/(IQ\d\w*|Q\d(_K)?(_[SML])?|Q\d_\d|F16|BF16|F32)/i)||[''])[0].toUpperCase()})).join(''):'<p class="sub">No .gguf files in this repository.</p>');
+    el.innerHTML=`<button class="btn" id="hfBack">← Results</button><h4 style="margin:12px 0 6px">${esc(f.repo)}</h4>`+(f.files.length?hubModels().map(m=>hubRow(m)).join('')
+      :`<p class="sub">${f.kind=='image'?'No single-file checkpoint in this repository (diffusers folders, LoRAs and VAEs don\'t load on their own).':'No .gguf files in this repository.'}</p>`);
     $('hfBack').onclick=()=>{window._hfFiles=null;drawHub()};
   }else if(window._hfRepos){
     el.innerHTML=window._hfRepos.length?window._hfRepos.map(r=>`<div class="hubrow"><div class="hubmain"><b>${esc(r.id)}</b><span class="hubmeta">${r.downloads.toLocaleString()} downloads · ${r.likes} likes</span></div><button class="btn" data-repo="${esc(r.id)}">Files</button></div>`).join(''):'<p class="sub">Nothing found.</p>';
   }else el.innerHTML='<p class="sub">Search for a model family. Pick a Q4_K_M or Q5_K_M file for a good size/quality balance.</p>';
   bindHub()}
-function hubModels(){return hubTab=='curated'?(hubData&&hubData.models||[]):(window._hfFiles?window._hfFiles.files.map(x=>({file:x.path.split('/').pop(),url:x.url,bytes:x.bytes})):[])}
+function hubModels(){
+  if(hubTab=='curated')return hubData&&hubData.models||[];
+  const f=window._hfFiles;if(!f)return [];
+  return f.files.map(x=>{const nm=x.path.split('/').pop();
+    return f.kind=='image'?{name:nm,file:'checkpoints/'+nm,url:x.url,bytes:x.bytes,quant:'Image checkpoint',desc:'Works if it is an SD 1.5, SD 2.x or SDXL model. Flux and SD3 files won\'t load yet.'}
+      :{name:nm,file:nm,url:x.url,bytes:x.bytes,quant:(x.path.match(/(IQ\d\w*|Q\d(_K)?(_[SML])?|Q\d_\d|F16|BF16|F32)/i)||[''])[0].toUpperCase()}})}
 function bindHub(){
   const el=$('hubList');if(!el)return;
   el.querySelectorAll('[data-dl]').forEach(b=>b.onclick=async()=>{const m=hubModels().find(x=>x.file==b.dataset.dl);if(!m)return;
     const r=await api('/api/hub/download',{file:m.file,url:m.url,bytes:m.bytes});if(r.error)toast(r.error);pollDl()});
   el.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=async()=>{await api('/api/hub/cancel',{file:b.dataset.cancel});pollDl()});
+  const pack=id=>(mediaCat&&mediaCat.packs||[]).find(p=>p.id==id);
+  el.querySelectorAll('[data-mdl]').forEach(b=>b.onclick=async()=>{const p=pack(b.dataset.mdl);if(!p)return;b.disabled=true;
+    for(const f of p.files)if(!f.have){const r=await api('/api/hub/download',{file:f.file,url:f.url,bytes:f.bytes,skip_have:true});if(r.error){toast(r.error);break}}
+    pollDl()});
+  el.querySelectorAll('[data-mcancel]').forEach(b=>b.onclick=async()=>{const p=pack(b.dataset.mcancel);if(!p)return;
+    for(const f of p.files)await api('/api/hub/cancel',{file:f.file});pollDl()});
   el.querySelectorAll('[data-repo]').forEach(b=>b.onclick=async()=>{el.innerHTML='<p class="sub">Listing files…</p>';
-    const r=await api('/api/hub/files?repo='+encodeURIComponent(b.dataset.repo));if(r.error){toast(r.error);drawHub();return}
-    window._hfFiles={repo:b.dataset.repo,files:r.files};drawHub()})}
+    const r=await api('/api/hub/files?repo='+encodeURIComponent(b.dataset.repo)+(hfKind=='image'?'&kind=image':''));if(r.error){toast(r.error);drawHub();return}
+    window._hfFiles={repo:b.dataset.repo,files:r.files,kind:hfKind};drawHub()})}
 async function pollDl(){
   clearTimeout(dlTimer);const box=$('dlBox');if(!box)return;
   const list=await api('/api/hub/downloads');const prev=window._dls||[];window._dls=list;
   box.innerHTML=list.filter(d=>d.state!='cancelled').map(d=>{const p=d.total?d.got/d.total*100:0;
-    return `<div class="dlrow"><div><b>${esc(d.file)}</b><span>${d.state=='done'?'Done. Pick it in Model &amp; hardware.':d.state=='error'?'Failed: '+esc(d.err):`${GB(d.got)} of ${d.total?GB(d.total):'?'} · ${(d.speed/1048576).toFixed(1)} MB/s${d.speed&&d.total?' · '+Math.ceil((d.total-d.got)/d.speed/60)+' min left':''}${d.err?' · '+esc(d.err):''}`}</span></div><div class="dlbar"><i style="width:${d.state=='done'?100:p}%"></i></div></div>`}).join('');
+    const media=d.file.includes('/');
+    return `<div class="dlrow"><div><b>${esc(d.file.split('/').pop())}</b><span>${d.state=='done'?(media?'Done. It shows up in the studios.':'Done. Pick it in Model &amp; hardware.'):d.state=='error'?'Failed: '+esc(d.err):`${GB(d.got)} of ${d.total?GB(d.total):'?'} · ${(d.speed/1048576).toFixed(1)} MB/s${d.speed&&d.total?' · '+Math.ceil((d.total-d.got)/d.speed/60)+' min left':''}${d.err?' · '+esc(d.err):''}`}</span></div><div class="dlbar"><i style="width:${d.state=='done'?100:p}%"></i></div></div>`}).join('');
   const changed=list.some(d=>{const o=prev.find(x=>x.file==d.file);return !o||o.state!=d.state});
+  if(changed&&list.some(d=>d.state=='done'&&d.file.includes('/'))){mediaModels=null;if(mediaCat)mediaCat.stale=true}
   if(changed)drawHub();
   if(list.some(d=>d.state=='downloading'||d.state=='queued'))dlTimer=setTimeout(pollDl,1000)}
 function sysCard(t,rows){return `<div class="syscard"><h4>${t}</h4>${rows.filter(r=>r&&r[1]!==''&&r[1]!=null).map(r=>`<div><span>${r[0]}</span><b>${r[1]}</b></div>`).join('')}</div>`}
@@ -1115,8 +1159,9 @@ function benchSummary(r){
 async function pollBench(){bench=await api('/api/bench');if(bench.state=='done'&&Object.keys(bench.results).length){prefs.bench=bench.results;savePrefs()}else if(bench.state=='idle'&&prefs.bench)bench={state:'done',results:prefs.bench};drawBench();if(bench.state=='running')setTimeout(pollBench,700)}
 async function openHubTab(){
   $('hubSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{hubTab=b.dataset.h;openSettings('hub')});
+  $('hfKind').onchange=e=>{hfKind=e.target.value;window._hfRepos=null;window._hfFiles=null;openSettings('hub')};
   const go=async()=>{const q=$('hfQ').value.trim();if(!q)return;window._hfFiles=null;$('hubList').innerHTML='<p class="sub">Searching…</p>';
-    const r=await api('/api/hub/search?q='+encodeURIComponent(q));if(r.error){toast(r.error);window._hfRepos=[]}else window._hfRepos=r.repos;drawHub()};
+    const r=await api('/api/hub/search?q='+encodeURIComponent(q)+(hfKind=='image'?'&kind=image':''));if(r.error){toast(r.error);window._hfRepos=[]}else window._hfRepos=r.repos;drawHub()};
   $('hfGo').onclick=go;$('hfQ').onkeydown=e=>{if(e.key=='Enter')go()};
   if(!bench.results||!Object.keys(bench.results).length){bench=await api('/api/bench');if(bench.state=='idle'&&prefs.bench)bench={state:'done',results:prefs.bench}}
   await drawHub();pollDl()}
