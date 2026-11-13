@@ -10,6 +10,8 @@ struct VideoJob {
     uint64_t seed = 0;
 };
 
+#include "gguf.h"
+#include <memory>
 class WanEngine {
 public:
     // dit: diffusion model file; te: umT5 text encoder; vae: Wan VAE. Empty te/vae = auto-find next to dit.
@@ -33,6 +35,20 @@ public:
 private:
     SafeTensors dit_, te_, vae_;
     bool loaded_ = false;
+    // GGUF diffusion models (Wan 2.2 14B): quantized matrices stay in their 4/5-bit blocks on the GPU and run on the
+    // chat engine's int8 tensor-core kernels; the rest (F16/F32) is mapped into a SafeTensors view. A14B comes as two
+    // experts: high noise for the first steps, low noise after `boundary_`, swapped in VRAM.
+    struct QW { uint64_t p = 0, qoff = 0; int kind = 0; };
+    struct Gg { std::unique_ptr<GGUF> f; std::unordered_map<std::string, QW> qw; std::wstring path; };
+    Gg gg_[2];
+    SafeTensors dit2_;
+    SafeTensors* D_ = &dit_;
+    Gg* Q_ = nullptr;
+    float boundary_ = 0.f;
+    bool gguf_open(const std::wstring& p, SafeTensors& st, Gg& gg, std::string& err);
+    bool gguf_upload(Gg& gg, std::string& err);
+    void gguf_free(Gg& gg);
+    void lin(const std::string& w, const GT& x, int M, int K, int N, const GT* b, GT& y, float beta = 0.f);
     // sentencepiece
     std::vector<std::string> pieces_;
     std::vector<float> scores_;

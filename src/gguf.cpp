@@ -155,7 +155,7 @@ static bool parse_gguf(const uint8_t* base, size_t size, std::unordered_map<std:
         GTensor& t = out[first + i];
         t.name = r.str();
         t.nd = (int)r.rd<uint32_t>();
-        for (int d = 0; d < t.nd && d < 4; d++) t.ne[d] = (int64_t)r.rd<uint64_t>();
+        for (int d = 0; d < t.nd; d++) { int64_t v = (int64_t)r.rd<uint64_t>(); if (d < 4) t.ne[d] = v; else t.ne4 *= v; }
         t.type = (int)r.rd<uint32_t>();
         offs.push_back(r.rd<uint64_t>());
     }
@@ -167,7 +167,7 @@ static bool parse_gguf(const uint8_t* base, size_t size, std::unordered_map<std:
     for (uint64_t i = 0; i < nt; i++) {
         GTensor& t = out[first + i];
         t.data = base + data0 + offs[i]; t.shard = shard; t.foff = data0 + offs[i];
-        t.nbytes = gtype_row_bytes(t.type, t.ne[0]) * t.ne[1] * t.ne[2] * t.ne[3];
+        t.nbytes = gtype_row_bytes(t.type, t.ne[0]) * t.ne[1] * t.ne[2] * t.ne[3] * t.ne4;
         if (data0 + offs[i] + t.nbytes > size) { err = "tensor " + t.name + " out of file bounds (incomplete download?)"; return false; }
     }
     return true;

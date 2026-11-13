@@ -70,12 +70,27 @@ bool WanEngine::load(const std::wstring& ditp, const std::wstring& tep, const st
     unload();
     if (!gx().init(err)) return false;
     std::string pfx;
-    if (!dit_.add(ditp, err)) return false;
+    std::wstring lo = ditp; for (auto& c : lo) c = towlower(c);
+    if (lo.size() > 5 && lo.compare(lo.size() - 5, 5, L".gguf") == 0) {
+        // A14B pairs: find the other expert next to this file (HighNoise <-> LowNoise)
+        std::wstring hi = ditp, lw;
+        for (auto [a, b] : {std::pair<const wchar_t*, const wchar_t*>{L"HighNoise", L"LowNoise"}, {L"high_noise", L"low_noise"}, {L"LowNoise", L"HighNoise"}, {L"low_noise", L"high_noise"}}) {
+            size_t at = ditp.find(a); if (at == std::wstring::npos) continue;
+            std::wstring other = ditp.substr(0, at) + b + ditp.substr(at + wcslen(a));
+            if (GetFileAttributesW(other.c_str()) == INVALID_FILE_ATTRIBUTES) break;
+            const bool this_high = a[0] == L'H' || a[0] == L'h';
+            hi = this_high ? ditp : other; lw = this_high ? other : ditp;
+            break;
+        }
+        if (!gguf_open(hi, dit_, gg_[0], err)) { unload(); return false; }
+        if (!lw.empty() && !gguf_open(lw, dit2_, gg_[1], err)) { unload(); return false; }
+        boundary_ = lw.empty() ? 0.f : 0.875f;   // Wan 2.2 T2V A14B switches experts at t = 0.875
+    } else if (!dit_.add(ditp, err)) return false;
     if (!dit_.has("blocks.0.self_attn.q.weight")) {
         if (dit_.has("model.diffusion_model.blocks.0.self_attn.q.weight")) { dit_.close(); dit_.add(ditp, err, "model.diffusion_model."); }
         else { err = "not a Wan video model"; dit_.close(); return false; }
     }
-    if (dit_.get("blocks.0.self_attn.q.weight")->dtype == "Q4_K" || !dit_.has("patch_embedding.weight")) { err = "unsupported Wan file"; unload(); return false; }
+    if (!dit_.has("patch_embedding.weight")) { err = "unsupported Wan file"; unload(); return false; }
     const STensor* pe = dit_.get("patch_embedding.weight");
     dim = (int)pe->shape[0]; zc = (int)pe->shape[1];
     heads = dim / 128;
@@ -96,7 +111,60 @@ bool WanEngine::load(const std::wstring& ditp, const std::wstring& tep, const st
     loaded_ = true;
     return true;
 }
-void WanEngine::unload() { dit_.close(); te_.close(); vae_.close(); loaded_ = false; sp_loaded_ = false; pieces_.clear(); piece_id_.clear(); }
+void WanEngine::unload() {
+    for (auto& g : gg_) { gguf_free(g); g.f.reset(); g.path.clear(); }
+    dit_.close(); dit2_.close(); te_.close(); vae_.close(); loaded_ = false; sp_loaded_ = false; pieces_.clear(); piece_id_.clear();
+    D_ = &dit_; Q_ = nullptr; boundary_ = 0;
+}
+bool WanEngine::gguf_open(const std::wstring& p, SafeTensors& st, Gg& gg, std::string& err) {
+    gg.f = std::make_unique<GGUF>(); gg.path = p;
+    if (!gg.f->open(p, err)) return false;
+    for (auto& t : gg.f->tensors) {
+        STensor s;
+        s.dtype = t.type == 0 ? "F32" : t.type == 1 ? "F16" : t.type == 30 ? "BF16" : gtype_name(t.type);
+        if (t.nd == 5) s.shape.push_back(t.ne4);
+        for (int d = std::min(t.nd, 4) - 1; d >= 0; d--) s.shape.push_back(t.ne[d]);
+        s.data = t.data; s.nbytes = t.nbytes;
+        st.put(t.name, s);
+    }
+    return true;
+}
+bool WanEngine::gguf_upload(Gg& gg, std::string& err) {
+    if (!gg.f || !gg.qw.empty()) return true;
+    const double t0 = now_sec();
+    HANDLE fh = CreateFileW(gg.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE) { err = "cannot open the video model"; return false; }
+    for (auto& t : gg.f->tensors) {
+        if (t.type == 0 || t.type == 1 || t.type == 30 || t.nd != 2) continue;
+        if (!CudaTier::can_load(t.type)) { CloseHandle(fh); err = std::string("unsupported weight format ") + gtype_name(t.type); return false; }
+        QW q;
+        q.p = Model::cuda().load_weight(fh, t.foff, t.nbytes, t.type, (int)t.ne[1], (int)t.ne[0], q.kind, q.qoff);
+        if (!q.p) { CloseHandle(fh); gguf_free(gg); err = "not enough VRAM for the video model"; return false; }
+        gg.qw[t.name] = q;
+    }
+    CloseHandle(fh);
+    Model::cuda().sync();
+    fprintf(stderr, "[wan] expert uploaded in %.1f s\n", now_sec() - t0);
+    return true;
+}
+void WanEngine::gguf_free(Gg& gg) {
+    if (!gg.qw.empty()) { Model::cuda().sync(); for (auto& kv : gg.qw) Model::cuda().free(kv.second.p); }
+    gg.qw.clear();
+}
+// y = x W^T + b (+ y when beta = 1): quantized GGUF matrices on the int8 kernels, everything else through Gx.
+void WanEngine::lin(const std::string& w, const GT& x, int M, int K, int N, const GT* b, GT& y, float beta) {
+    Gx& g = gx();
+    auto it = Q_ ? Q_->qw.find(w) : std::unordered_map<std::string, QW>::iterator();
+    if (!Q_ || it == Q_->qw.end()) { g.linear(x, M, K, g.w16(w), N, b, y, beta); return; }
+    const QW& q = it->second;
+    GT t = beta != 0.f ? g.alloc((size_t)M * N) : y;
+    if (!(M >= 16 && g.can_mmq(q.kind) && g.linear_quant(x.p, M, K, q.p, q.p + q.qoff, q.kind, N, t.p))) {
+        static int warned = 0; if (warned++ < 8) fprintf(stderr, "[wan] slow path for %s (kind %d, M %d)\n", w.c_str(), q.kind, M);
+        Model::cuda().matmul_dev(q.p, q.qoff, q.kind, x.p, M, K, N, t.p);
+    }
+    if (b && b->p) { unsigned un = (unsigned)N; uint64_t yp = t.p, bp = b->p; Model::cuda().ew(CudaTier::BIAS, (unsigned)((size_t)M * N), {&yp, &bp, &un}); }
+    if (beta != 0.f) { g.axpy(y, t, (size_t)M * N); g.free(t); }
+}
 
 // =============================================================================================
 // SentencePiece (unigram) tokenizer, model read from the protobuf embedded in the text encoder
@@ -206,9 +274,9 @@ bool WanEngine::encode_text(const std::string& text, std::vector<float>& ctx, st
     for (int l = 0; l < L; l++) {
         std::string p = "encoder.block." + std::to_string(l) + ".layer.";
         g.rmsrow(x, T, Dm, g.wf32(p + "0.layer_norm.weight"), 1e-6f, h);
-        g.linear(h, T, Dm, g.w16(p + "0.SelfAttention.q.weight"), Dm, nullptr, q);
-        g.linear(h, T, Dm, g.w16(p + "0.SelfAttention.k.weight"), Dm, nullptr, k);
-        g.linear(h, T, Dm, g.w16(p + "0.SelfAttention.v.weight"), Dm, nullptr, v);
+        lin(p + "0.SelfAttention.q.weight", h, T, Dm, Dm, nullptr, q);
+        lin(p + "0.SelfAttention.k.weight", h, T, Dm, Dm, nullptr, k);
+        lin(p + "0.SelfAttention.v.weight", h, T, Dm, Dm, nullptr, v);
         g.download(qh.data(), q, qh.size()); g.download(kh.data(), k, kh.size()); g.download(vh.data(), v, vh.size());
         std::vector<float> rel = host_f32(te_.get(p + "0.SelfAttention.relative_attention_bias.weight"));   // [32][H]
         if (rel.empty()) rel = host_f32(te_.get("encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"));
@@ -228,13 +296,13 @@ bool WanEngine::encode_text(const std::string& text, std::vector<float>& ctx, st
                 for (int j = 0; j < T; j++) { float w = sc[j] / sum; const float* vj = &vh[(size_t)j * Dm + hh * dk]; for (int d = 0; d < dk; d++) o[d] += w * vj[d]; }
             }
         g.upload(q, oh.data(), oh.size());
-        g.linear(q, T, Dm, g.w16(p + "0.SelfAttention.o.weight"), Dm, nullptr, x, 1.f);
+        lin(p + "0.SelfAttention.o.weight", q, T, Dm, Dm, nullptr, x, 1.f);
         g.rmsrow(x, T, Dm, g.wf32(p + "1.layer_norm.weight"), 1e-6f, h);
-        g.linear(h, T, Dm, g.w16(p + "1.DenseReluDense.wi_0.weight"), F, nullptr, a);
+        lin(p + "1.DenseReluDense.wi_0.weight", h, T, Dm, F, nullptr, a);
         g.act(a, (size_t)T * F, Gx::GELU_TANH);
-        g.linear(h, T, Dm, g.w16(p + "1.DenseReluDense.wi_1.weight"), F, nullptr, b);
+        lin(p + "1.DenseReluDense.wi_1.weight", h, T, Dm, F, nullptr, b);
         g.mul(a, b, (size_t)T * F);
-        g.linear(a, T, F, g.w16(p + "1.DenseReluDense.wo.weight"), Dm, nullptr, x, 1.f);
+        lin(p + "1.DenseReluDense.wo.weight", a, T, F, Dm, nullptr, x, 1.f);
     }
     g.rmsrow(x, T, Dm, g.wf32("encoder.final_layer_norm.weight"), 1e-6f, h);
     ctx.assign((size_t)512 * D, 0.f);
@@ -251,7 +319,7 @@ bool WanEngine::encode_text(const std::string& text, std::vector<float>& ctx, st
 // =============================================================================================
 int64_t WanEngine::dit_bytes() const {
     int64_t b = 0;
-    for (auto& kv : dit_.all()) b += kv.second.numel() * 2;
+    for (auto& kv : D_->all()) b += kv.second.numel() * 2;
     return b;
 }
 
@@ -260,9 +328,9 @@ GT WanEngine::text_embed(const std::vector<float>& ctx) {
     GT c = g.alloc(ctx.size()), h = g.alloc((size_t)512 * dim), o = g.alloc((size_t)512 * dim);
     g.upload(c, ctx.data(), ctx.size());
     GT b0 = g.wf32("text_embedding.0.bias"), b2 = g.wf32("text_embedding.2.bias");
-    g.linear(c, 512, 4096, g.w16("text_embedding.0.weight"), dim, &b0, h);
+    lin("text_embedding.0.weight", c, 512, 4096, dim, &b0, h);
     g.act(h, (size_t)512 * dim, Gx::GELU_TANH);
-    g.linear(h, 512, dim, g.w16("text_embedding.2.weight"), dim, &b2, o);
+    lin("text_embedding.2.weight", h, 512, dim, dim, &b2, o);
     g.free(c); g.free(h);
     return o;
 }
@@ -283,19 +351,19 @@ void WanEngine::dit(const std::vector<float>& x, int F, int H, int W, float time
             }
     GT xp = g.alloc(pt.size()), X = g.alloc((size_t)L * dim);
     g.upload(xp, pt.data(), pt.size());
-    { GT b = g.wf32("patch_embedding.bias"); g.linear(xp, L, pk, g.w16("patch_embedding.weight"), dim, &b, X); }
+    { GT b = g.wf32("patch_embedding.bias"); lin("patch_embedding.weight", xp, L, pk, dim, &b, X); }
     g.free(xp);
     // time embedding
     std::vector<float> te(256);
     for (int i = 0; i < 128; i++) { double f = std::pow(10000.0, -i / 128.0); te[i] = (float)std::cos(timestep * f); te[128 + i] = (float)std::sin(timestep * f); }
     GT t0 = g.alloc(256), e1 = g.alloc(dim), e = g.alloc(dim), e0 = g.alloc((size_t)6 * dim);
     g.upload(t0, te.data(), 256);
-    { GT b = g.wf32("time_embedding.0.bias"); g.linear(t0, 1, 256, g.w16("time_embedding.0.weight"), dim, &b, e1); }
+    { GT b = g.wf32("time_embedding.0.bias"); lin("time_embedding.0.weight", t0, 1, 256, dim, &b, e1); }
     g.act(e1, dim, Gx::SILU);
-    { GT b = g.wf32("time_embedding.2.bias"); g.linear(e1, 1, dim, g.w16("time_embedding.2.weight"), dim, &b, e); }
+    { GT b = g.wf32("time_embedding.2.bias"); lin("time_embedding.2.weight", e1, 1, dim, dim, &b, e); }
     g.copy(e1, e, dim);
     g.act(e1, dim, Gx::SILU);
-    { GT b = g.wf32("time_projection.1.bias"); g.linear(e1, 1, dim, g.w16("time_projection.1.weight"), 6 * dim, &b, e0); }
+    { GT b = g.wf32("time_projection.1.bias"); lin("time_projection.1.weight", e1, 1, dim, 6 * dim, &b, e0); }
     std::vector<float> eh(dim), e0h((size_t)6 * dim);
     g.download(eh.data(), e, dim); g.download(e0h.data(), e0, e0h.size());
     // 3D rotary table: pairs split [time | height | width] = hd/2 - 2*(hd/6), hd/6, hd/6
@@ -323,7 +391,7 @@ void WanEngine::dit(const std::vector<float>& x, int F, int H, int W, float time
     for (int i = 0; i < 8; i++) { m[i] = mods; m[i].p += (uint64_t)i * dim * 4; m[i].n = dim; }
     for (int bi = 0; bi < layers; bi++) {
         std::string p = "blocks." + std::to_string(bi) + ".";
-        std::vector<float> mod = host_f32(dit_.get(p + "modulation"));
+        std::vector<float> mod = host_f32(D_->get(p + "modulation"));
         // m0 shift1, m1 1+scale1, m2 gate1, m3 shift2, m4 1+scale2, m5 gate2
         for (int c = 0; c < dim; c++) {
             for (int kk = 0; kk < 6; kk++) mh[(size_t)kk * dim + c] = mod[(size_t)kk * dim + c] + e0h[(size_t)kk * dim + c];
@@ -332,39 +400,39 @@ void WanEngine::dit(const std::vector<float>& x, int F, int H, int W, float time
         g.upload(mods, mh.data(), (size_t)6 * dim);
         // self attention
         g.layernorm(X, L, dim, m[1], m[0], 1e-6f, n);
-        { GT b = g.wf32(p + "self_attn.q.bias"); g.linear(n, L, dim, g.w16(p + "self_attn.q.weight"), dim, &b, q); }
-        { GT b = g.wf32(p + "self_attn.k.bias"); g.linear(n, L, dim, g.w16(p + "self_attn.k.weight"), dim, &b, k); }
-        { GT b = g.wf32(p + "self_attn.v.bias"); g.linear(n, L, dim, g.w16(p + "self_attn.v.weight"), dim, &b, v); }
+        { GT b = g.wf32(p + "self_attn.q.bias"); lin(p + "self_attn.q.weight", n, L, dim, dim, &b, q); }
+        { GT b = g.wf32(p + "self_attn.k.bias"); lin(p + "self_attn.k.weight", n, L, dim, dim, &b, k); }
+        { GT b = g.wf32(p + "self_attn.v.bias"); lin(p + "self_attn.v.weight", n, L, dim, dim, &b, v); }
         g.rmsrow(q, L, dim, g.wf32(p + "self_attn.norm_q.weight"), 1e-6f, q);
         g.rmsrow(k, L, dim, g.wf32(p + "self_attn.norm_k.weight"), 1e-6f, k);
         g.rope3(q, csg, L, heads, hd);
         g.rope3(k, csg, L, heads, hd);
         g.attention(q, k, v, L, L, heads, hd, a);
-        { GT b = g.wf32(p + "self_attn.o.bias"); g.linear(a, L, dim, g.w16(p + "self_attn.o.weight"), dim, &b, q); }
+        { GT b = g.wf32(p + "self_attn.o.bias"); lin(p + "self_attn.o.weight", a, L, dim, dim, &b, q); }
         g.gadd(X, q, m[2], dim, (size_t)L * dim);
         // cross attention
         g.layernorm(X, L, dim, g.wf32(p + "norm3.weight"), g.wf32(p + "norm3.bias"), 1e-6f, n);
-        { GT b = g.wf32(p + "cross_attn.q.bias"); g.linear(n, L, dim, g.w16(p + "cross_attn.q.weight"), dim, &b, q); }
-        { GT b = g.wf32(p + "cross_attn.k.bias"); g.linear(ctxe, 512, dim, g.w16(p + "cross_attn.k.weight"), dim, &b, kc); }
-        { GT b = g.wf32(p + "cross_attn.v.bias"); g.linear(ctxe, 512, dim, g.w16(p + "cross_attn.v.weight"), dim, &b, vc); }
+        { GT b = g.wf32(p + "cross_attn.q.bias"); lin(p + "cross_attn.q.weight", n, L, dim, dim, &b, q); }
+        { GT b = g.wf32(p + "cross_attn.k.bias"); lin(p + "cross_attn.k.weight", ctxe, 512, dim, dim, &b, kc); }
+        { GT b = g.wf32(p + "cross_attn.v.bias"); lin(p + "cross_attn.v.weight", ctxe, 512, dim, dim, &b, vc); }
         g.rmsrow(q, L, dim, g.wf32(p + "cross_attn.norm_q.weight"), 1e-6f, q);
         g.rmsrow(kc, 512, dim, g.wf32(p + "cross_attn.norm_k.weight"), 1e-6f, kc);
         g.attention(q, kc, vc, L, 512, heads, hd, a);
-        { GT b = g.wf32(p + "cross_attn.o.bias"); g.linear(a, L, dim, g.w16(p + "cross_attn.o.weight"), dim, &b, X, 1.f); }
+        { GT b = g.wf32(p + "cross_attn.o.bias"); lin(p + "cross_attn.o.weight", a, L, dim, dim, &b, X, 1.f); }
         // feed forward
         g.layernorm(X, L, dim, m[4], m[3], 1e-6f, n);
-        { GT b = g.wf32(p + "ffn.0.bias"); g.linear(n, L, dim, g.w16(p + "ffn.0.weight"), ffn, &b, ff); }
+        { GT b = g.wf32(p + "ffn.0.bias"); lin(p + "ffn.0.weight", n, L, dim, ffn, &b, ff); }
         g.act(ff, (size_t)L * ffn, Gx::GELU_TANH);
-        { GT b = g.wf32(p + "ffn.2.bias"); g.linear(ff, L, ffn, g.w16(p + "ffn.2.weight"), dim, &b, q); }
+        { GT b = g.wf32(p + "ffn.2.bias"); lin(p + "ffn.2.weight", ff, L, ffn, dim, &b, q); }
         g.gadd(X, q, m[5], dim, (size_t)L * dim);
     }
     // head
-    std::vector<float> hm = host_f32(dit_.get("head.modulation"));
+    std::vector<float> hm = host_f32(D_->get("head.modulation"));
     for (int c = 0; c < dim; c++) { mh[c] = hm[c] + eh[c]; mh[(size_t)dim + c] = 1.f + hm[(size_t)dim + c] + eh[c]; }
     g.upload(mods, mh.data(), (size_t)2 * dim);
     g.layernorm(X, L, dim, m[1], m[0], 1e-6f, n);
     GT o = g.alloc((size_t)L * pk);
-    { GT b = g.wf32("head.head.bias"); g.linear(n, L, dim, g.w16("head.head.weight"), pk, &b, o); }
+    { GT b = g.wf32("head.head.bias"); lin("head.head.weight", n, L, dim, pk, &b, o); }
     std::vector<float> oh((size_t)L * pk);
     g.download(oh.data(), o, oh.size());
     out.assign((size_t)zc * F * H * W, 0.f);
@@ -615,7 +683,15 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
     int64_t act = (int64_t)F * (H / 2) * (W / 2) * (int64_t)(dim * 8 + ffn) * 4 + (1536ll << 20);
     int64_t vb = std::max<int64_t>(0, (int64_t)g.vram_free() - act);
     // If the fp16 weights don't fit in VRAM, store them as int8 (half the size) instead of streaming every step.
-    g.weights_begin(&dit_, vb, dit_bytes() > vb || getenv("ITHACA_Q8"));
+    const bool qg = gg_[0].f != nullptr;
+    D_ = &dit_; Q_ = qg ? &gg_[0] : nullptr;
+    if (qg) {
+        progress("Loading the video model", 0, j.steps);
+        g.trim();
+        if (!gguf_upload(gg_[0], err)) return false;
+        vb = 0;   // the few F16 matrices (embeddings) stream: every MB of VRAM goes to activations next to the 4-bit expert
+    }
+    g.weights_begin(D_, vb, !qg && (dit_bytes() > vb || getenv("ITHACA_Q8")));
     g.set_half(true);
     GT ce = text_embed(cc), ue = text_embed(cu);
     std::mt19937_64 rng(j.seed ? j.seed : std::random_device{}());
@@ -627,13 +703,27 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
     for (int i = 0; i < j.steps; i++) {
         if (!progress("Generating", i, j.steps)) { err = "cancelled"; break; }
         float s = sig[i];
+        if (qg && gg_[1].f && Q_ == &gg_[0] && s < boundary_) {   // hand over to the low-noise expert
+            progress("Switching to the detail model", i, j.steps);
+            g.free(ce); g.free(ue); g.weights_end(); gguf_free(gg_[0]);
+            D_ = &dit2_; Q_ = &gg_[1];
+            if (!gguf_upload(gg_[1], err)) { D_ = &dit_; Q_ = nullptr; g.trim(); return false; }
+            g.trim();
+            g.weights_begin(D_, 0);
+            g.set_half(true);
+            ce = text_embed(cc); ue = text_embed(cu);
+        }
+        const double tstep = now_sec();
         dit(x, F, H, W, s * 1000.f, ce, vc);
         if (j.cfg != 1.f) dit(x, F, H, W, s * 1000.f, ue, vu);
         float dt = sig[i + 1] - s;
         for (size_t q = 0; q < n; q++) { float v = j.cfg != 1.f ? vu[q] + j.cfg * (vc[q] - vu[q]) : vc[q]; x[q] += dt * v; }
+        if (getenv("ITHACA_WAN_T")) fprintf(stderr, "[wan] step %d: %.1f s\n", i, now_sec() - tstep);
     }
     g.free(ce); g.free(ue);
     g.weights_end();
+    if (Q_) gguf_free(*Q_);
+    D_ = &dit_; Q_ = nullptr;
     if (!err.empty()) { g.trim(); return false; }
     g.trim();   // sampling buffers out of the way: the VAE works at full resolution (Wan 2.1: 8x the latent)
     progress("Decoding video", j.steps, j.steps);

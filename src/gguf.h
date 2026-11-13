@@ -26,6 +26,7 @@ struct GTensor {
     int type = 0;
     int nd = 0;
     int64_t ne[4] = {1, 1, 1, 1};
+    int64_t ne4 = 1;      // a 5th dimension (diffusion models' 3D conv kernels); not part of ne[]
     const uint8_t* data = nullptr;
     size_t nbytes = 0;
     int shard = 0;        // split GGUF: which file (0 = the one opened)

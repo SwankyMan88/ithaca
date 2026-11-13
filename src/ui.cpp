@@ -1078,7 +1078,7 @@ async function drawHub(){
     if(mediaCat.error){el.innerHTML=`<p class="sub">${esc(mediaCat.error)}</p>`;return}
     const list=mediaCat.packs.filter(p=>p.kind==hubTab);
     const more={image:'Also works: any single-file SD 1.5, SD 2.x or SDXL checkpoint (Pony, Illustrious and other fine-tunes) and all-in-one Flux checkpoints. Find more under Search Hugging Face → Image checkpoints, or drop .safetensors files into the models folder. SD3 isn\'t supported yet.',
-      video:'Wan 2.1 (16-channel, like the 1.3B) and Wan 2.2 TI2V 5B text-to-video run today. The 14B models, GGUF video files and image-to-video aren\'t supported yet.',
+      video:'Text-to-video with Wan 2.1 (like the 1.3B), Wan 2.2 TI2V 5B and Wan 2.2 A14B (GGUF, both experts). Image-to-video isn\'t supported yet.',
       audio:'F5-TTS is the speech engine today. Kokoro, Chatterbox, music, sound effects and speech-to-text aren\'t supported yet.'}[hubTab];
     el.innerHTML=list.map(mediaRow).join('')+`<p class="sub" style="margin-top:12px">${more}</p>`;
     bindHub();return}
@@ -1242,7 +1242,7 @@ async function drawStudio(){
   const banner=kind=='image'
     ?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs single-file <b>SD 1.5, SD 2.x and SDXL</b> checkpoints (including fine-tunes like Pony, Illustrious, Juggernaut) and all-in-one <b>Flux.1</b> checkpoints (schnell and dev). Layout is read from the file, so any checkpoint of these families works. Weights that don't fit in free VRAM are streamed from RAM. You can also just ask for an image in a normal chat. SD3 support is coming.</div>`
     :kind=='audio'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> speech with <b>F5-TTS</b> voice cloning and the Vocos vocoder. Pick a default voice and the chat can talk too ("say this out loud…"). Music, sound effects, Kokoro/Chatterbox voices and speech-to-text are next.</div>`
-    :kind=='video'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs <b>Wan 2.2 TI2V-5B</b> and <b>Wan 2.1</b> (like T2V 1.3B) text-to-video, with the umT5-XXL text encoder and the matching Wan VAE found automatically next to the model. Weights that don't fit in VRAM stream from RAM. You can also ask for a video in a normal chat. Image-to-video and the 14B GGUF models are coming.</div>`
+    :kind=='video'?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs <b>Wan 2.2 TI2V-5B</b> and <b>Wan 2.1</b> (like T2V 1.3B) text-to-video, with the umT5-XXL text encoder and the matching Wan VAE found automatically next to the model. Weights that don't fit in VRAM stream from RAM. You can also ask for a video in a normal chat. The Wan 2.2 A14B GGUF pair works too (pick either file; the other expert is found next to it). Image-to-video is coming.</div>`
     :`<div class="banner"><b>Engine status:</b> Ithaca can already find and select ${kind} models and prepare prompts, and the chat model knows how to request ${kind}s. The ${kind} engine itself is still being built, so Generate reports that for now.</div>`;
   let body='';
   const adv=inner=>`<details class="card adv"><summary>More options</summary><div class="in">${inner}</div></details>`;

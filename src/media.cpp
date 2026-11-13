@@ -179,9 +179,6 @@ std::string media_generate_video(const J& req) {
     json_parse(read_text(g_store_dir + L"\\prefs.json"), prefs);
     std::string model = req["model"].str(prefs["media_video"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No video model is loaded or selected. Pick one in the Video studio (left sidebar).") + "}";
-    std::string lo = model; for (auto& c : lo) c = (char)tolower(c);
-    if (lo.size() > 5 && lo.compare(lo.size() - 5, 5, ".gguf") == 0)
-        return "{\"error\":" + json_esc("GGUF video models (like the Wan 2.2 14B files) aren't supported yet. Choose Wan 2.2 TI2V 5B or Wan 2.1 T2V 1.3B (.safetensors).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
