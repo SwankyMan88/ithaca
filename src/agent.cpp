@@ -160,6 +160,46 @@ std::string res(bool ok, const std::string& output, const std::string& extra = "
 }
 }  // namespace
 
+// run_command: cmd /c in the workspace, no input, a time limit, the whole process tree killed on timeout or stop.
+static std::string run_cmd(const std::wstring& root, const std::string& command, int secs) {
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd, wrp;
+    if (!CreatePipe(&rd, &wrp, &sa, 0)) return "could not start the command";
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{}; si.cb = sizeof si; si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = wrp; si.hStdError = wrp; si.hStdInput = nul;
+    PROCESS_INFORMATION pi{};
+    std::wstring cl = L"cmd.exe /d /s /c \"" + utf8_to_w(command) + L"\"";
+    std::vector<wchar_t> buf(cl.begin(), cl.end()); buf.push_back(0);
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{}; li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, root.c_str(), &si, &pi)) {
+        CloseHandle(rd); CloseHandle(wrp); CloseHandle(nul); CloseHandle(job); return "could not start the command";
+    }
+    AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(wrp); CloseHandle(nul);
+    std::string out; char b[8192]; DWORD n; bool timed = false;
+    const double t0 = now_sec();
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail) { if (!ReadFile(rd, b, std::min<DWORD>(avail, sizeof b), &n, nullptr) || !n) break; out.append(b, n); if (out.size() > (1u << 20)) out.erase(0, out.size() - (512u << 10)); }
+        else if (WaitForSingleObject(pi.hProcess, 25) == WAIT_OBJECT_0) {
+            while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail && ReadFile(rd, b, std::min<DWORD>(avail, sizeof b), &n, nullptr) && n) out.append(b, n);
+            break;
+        }
+        if (now_sec() - t0 > secs) { timed = true; break; }
+    }
+    DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(job);   // kills whatever is still running (the command and anything it started)
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(rd);
+    out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
+    if (out.size() > 24000) out = out.substr(0, 6000) + "\n... (" + std::to_string(out.size() - 18000) + " characters cut) ...\n" + out.substr(out.size() - 12000);
+    return out + (timed ? "\n[stopped after " + std::to_string(secs) + " s]" : "\n[exit code " + std::to_string((int)code) + "]");
+}
+
 // Folder picker for the workspace (the UI runs in a browser, which can't hand us a real path).
 static std::string pick_folder() {
     std::string out;
@@ -330,6 +370,13 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         SHFILEOPSTRUCTW op{}; op.wFunc = FO_DELETE; op.pFrom = from.c_str(); op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
         if (SHFileOperationW(&op) != 0 || exists(p)) return res(false, "could not delete (in use?)");
         return done("moved " + a["path"].str() + " to the Recycle Bin", "", a["path"].str(), "", a["path"].str());
+    }
+    if (name == "run_command") {
+        const std::string c = a["command"].str();
+        if (c.empty()) return res(false, "command is empty");
+        if (dry) return res(true, "");
+        const int secs = std::max(5, std::min(600, (int)a["timeout"].num(120)));
+        return res(true, run_cmd(root, c, secs));
     }
     return res(false, "unknown tool " + name);
 }

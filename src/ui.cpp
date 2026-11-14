@@ -1336,9 +1336,10 @@ const CODE_TOOLS=[
  ['set_cell','Set one cell in an Excel file: a number, text, or a formula starting with =.',{path:['string','.xlsx file'],cell:['string','Cell such as B4'],value:['string','The value'],sheet:['string','Sheet name (optional; default the first sheet)']},['path','cell','value']],
  ['make_dir','Create a folder.',{path:['string','Folder path']},['path']],
  ['rename','Rename or move a file or folder.',{from:['string','Current path'],to:['string','New path']},['from','to']],
- ['delete','Delete a file or folder (it goes to the Recycle Bin).',{path:['string','Path']},['path']]];
+ ['delete','Delete a file or folder (it goes to the Recycle Bin).',{path:['string','Path']},['path']],
+ ['run_command','Run a command in the workspace folder (Windows cmd): tests, builds, linters, git status. No input can be typed, so use non-interactive flags. The user approves every command.',{command:['string','The command line, e.g. python -m pytest -q'],timeout:['integer','Seconds before it is stopped (default 120, max 600)']},['command']]];
 const CW_CHANGE=new Set(['edit_file','write_file','create_file','set_cell','make_dir','rename','delete']);
-const CW_ICON={list_dir:'folder',read_file:'file',search:'search',edit_file:'edit',write_file:'edit',create_file:'plus',set_cell:'edit',make_dir:'folder',rename:'edit',delete:'trash'};
+const CW_ICON={run_command:'play',list_dir:'folder',read_file:'file',search:'search',edit_file:'edit',write_file:'edit',create_file:'plus',set_cell:'edit',make_dir:'folder',rename:'edit',delete:'trash'};
 let cw={root:'',name:''},cs={items:[],msgs:[]},cwBusy=false,cwStopReq=false,cwAuto=false,cwWait={};
 try{const s=JSON.parse(localStorage.getItem('ithaca_code')||'null');if(s){cw=s.cw||cw;cs=s.cs||cs;cwAuto=!!s.auto}}catch(e){}
 function cwSave(){try{localStorage.setItem('ithaca_code',JSON.stringify({cw,cs:{items:cs.items.slice(-300),msgs:cs.msgs.slice(-160)},auto:cwAuto}))}catch(e){}}
@@ -1350,6 +1351,7 @@ How to work:
 - Make focused edits with edit_file (old must match the file exactly, once). Use write_file for new files or to rewrite a small file completely.
 - Keep the project's existing style, and don't touch files the task doesn't need.
 - Word (.docx), PowerPoint (.pptx) and Excel (.xlsx) files are shown as text with [p..] labels or cell addresses. Change them with edit_file or set_cell and their formatting is kept. PDFs are read-only.
+- After changing code, run the project's tests or a quick check with run_command when there is one (for example python -m pytest -q, npm test).
 - Call one tool at a time and wait for its result. If the user rejects a change, adjust it or ask.
 - When the task is done, stop calling tools and reply with a short summary of what you changed. If the request is unclear, ask instead of guessing.
 
@@ -1377,6 +1379,11 @@ function cwParse(t){
       const n=body.slice(e+1).search(/\{\s*"name"\s*:/);k=n<0?-1:e+1+n}
     return null}
   let s=t.slice(i+11).replace(/<\/tool_call>[\s\S]*$/,'').trim().replace(/^```(?:json)?\s*/,'').replace(/```\s*$/,'');
+  // Qwen3-Coder's own form: <function=name><parameter=key>value</parameter>...</function>
+  const fm=s.match(/^<function=([\w.-]+)>([\s\S]*?)(?:<\/function>|$)/);
+  if(fm){const tool=CODE_TOOLS.find(x=>x[0]==fm[1]),args={};let m;const re=/<parameter=([\w.-]+)>\n?([\s\S]*?)\n?<\/parameter>/g;
+    while((m=re.exec(fm[2]))){let v=m[2];const ty=tool&&tool[2][m[1]]&&tool[2][m[1]][0];if(ty=='integer')v=parseInt(v,10);else if(ty=='boolean')v=/^true$/i.test(v.trim());args[m[1]]=v}
+    return{name:fm[1],args}}
   try{const j=JSON.parse(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
 // line diff: common head/tail trimmed, LCS on the middle, 3 lines of context
 function cwDiff(a,b){
@@ -1397,16 +1404,17 @@ function cwDiff(a,b){
 function cwTitle(it){const a=it.args||{},c=x=>`<code>${esc(x||'')}</code>`;
   return{list_dir:`Listed ${c(a.path||'.')}`,read_file:`Read ${c(a.path)}${a.start_line?` lines ${a.start_line}–${a.end_line||'end'}`:''}`,search:`Searched for ${c(a.pattern)}`,
     edit_file:`Edit ${c(a.path)}`,write_file:`Write ${c(a.path)}`,create_file:`Create ${c(a.path)}`,set_cell:`Set ${c((a.sheet?a.sheet+'!':'')+a.cell)} in ${c(a.path)}`,
-    make_dir:`New folder ${c(a.path)}`,rename:`Rename ${c(a.from)} → ${c(a.to)}`,delete:`Delete ${c(a.path)}`}[it.name]||esc(it.name)}
+    make_dir:`New folder ${c(a.path)}`,run_command:`Run ${c(a.command)}`,rename:`Rename ${c(a.from)} → ${c(a.to)}`,delete:`Delete ${c(a.path)}`}[it.name]||esc(it.name)}
 function cwCard(it,k){
   const chg=CW_CHANGE.has(it.name);
   const st=it.state=='run'?'working…':it.state=='pending'?'waiting for you':it.state=='rejected'?'rejected':it.state=='err'?'failed':it.undone?'undone':'';
   let body='',stat='';
   if(chg&&it.before!=null&&(it.name=='edit_file'||it.name=='write_file'||it.name=='create_file')){const d=cwDiff(it.before||'',it.after||'');body=`<div class="diff">${d.h}</div>`;stat=`<span class="plus">+${d.add}</span> <span class="minus">−${d.rem}</span>`}
   else if(chg&&it.name=='set_cell')body=`<pre>${esc(it.after||'')}</pre>`;
+  if(it.name=='run_command'&&it.state=='pending')body=`<pre>&gt; ${esc(it.args.command||'')}</pre>`;
   if(it.state=='err'||it.state=='ok'&&!chg)body+=it.out?`<pre>${esc(it.out.length>20000?it.out.slice(0,20000)+'\n…':it.out)}</pre>`:'';
   const head=`<span class="ti">${ico(CW_ICON[it.name]||'code')}</span><span class="tt">${cwTitle(it)}</span><span class="st">${stat} ${st}</span>`;
-  const act=it.state=='pending'?`<div class="tcact"><span class="note">Review this change.</span><button class="btn" data-rej="${k}">Reject</button><button class="btn pri" data-ok="${k}">Apply</button></div>`
+  const act=it.state=='pending'?`<div class="tcact"><span class="note">${it.name=='run_command'?'Run this command in the workspace?':'Review this change.'}</span><button class="btn" data-rej="${k}">Reject</button><button class="btn pri" data-ok="${k}">Apply</button></div>`
     :it.state=='ok'&&it.undo&&!it.undone?`<div class="tcact"><span class="note">${esc(it.out||'')}</span><button class="btn" data-undo="${k}">${ico('undo')}Undo</button></div>`:'';
   const cls=`tc ${it.state}${chg?' chg':''}`;
   return chg||it.state=='pending'?`<div class="${cls}"><div class="th">${head}</div>${body}${act}</div>`:`<details class="${cls}"><summary>${head}</summary>${body}</details>`}
@@ -1428,7 +1436,11 @@ function cwRender(){
 async function cwTool(name,args,dry){return api('/api/code/tool',{root:cw.root,name,args,dry})}
 async function cwRun(call){
   const it={t:'tool',name:call.name,args:call.args,state:'run'};cs.items.push(it);const k=cs.items.length-1;cwRender();
-  if(CW_CHANGE.has(call.name)&&!cwAuto){
+  if(call.name=='run_command'){   // commands always ask: auto-apply covers file edits, which can be undone
+    it.state='pending';cwRender();const ok=await new Promise(r=>cwWait[k]=r);delete cwWait[k];
+    if(!ok){it.state='rejected';cwRender();return 'The user chose not to run this command. Continue without it, or explain why it is needed.'}
+    it.state='run';cwRender()}
+  else if(CW_CHANGE.has(call.name)&&!cwAuto){
     const pv=await cwTool(call.name,call.args,true);
     if(pv.error||!pv.ok){it.state='err';it.out=pv.error||pv.output;cwRender();return 'Error: '+it.out}
     it.before=pv.before;it.after=pv.after;it.state='pending';cwRender();
