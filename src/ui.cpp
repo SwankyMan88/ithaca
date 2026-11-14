@@ -390,7 +390,9 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .cwcomp .box textarea{flex:1;border:0;overflow:auto;scrollbar-width:none;background:transparent;outline:0;resize:none;padding:7px 0;min-height:24px;max-height:220px;box-shadow:none}
 .cwcomp .send{flex-shrink:0;margin:0}
 .cwhint{display:block;max-width:860px;margin:6px auto 0;color:var(--faint);font-size:12px;text-align:center}
-.cwwork{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:13px;margin:8px 0}
+.cwwork{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:13px;margin:8px 0}.cwwork .hint{margin-left:auto;font-size:12px}
+.cwdone{display:flex;align-items:center;gap:9px;margin:14px 0 4px;padding:9px 12px;border:1px solid var(--line);border-radius:11px;background:var(--panel);font-size:13.5px;color:var(--dim)}
+.cwdone .icon{color:var(--ok)}.cwdone span{flex:1}
 /* orchestration (coming next) */
 .orch{max-width:760px;margin:8vh auto;padding:0 20px;text-align:center}
 .orch .big{width:72px;height:72px;border-radius:20px;background:var(--grad);display:grid;place-items:center;margin:0 auto 20px;color:#fff;box-shadow:0 12px 44px rgba(63,182,255,.3)}
@@ -1387,7 +1389,7 @@ function cwParse(t){
   try{const j=JSON.parse(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
 // line diff: common head/tail trimmed, LCS on the middle, 3 lines of context
 function cwDiff(a,b){
-  const A=a.split('\n'),B=b.split('\n');let s=0;while(s<A.length&&s<B.length&&A[s]==B[s])s++;
+  const A=a?a.split('\n'):[],B=b?b.split('\n'):[];let s=0;   // an empty side has no lines (a new or emptied file)while(s<A.length&&s<B.length&&A[s]==B[s])s++;
   let ea=A.length,eb=B.length;while(ea>s&&eb>s&&A[ea-1]==B[eb-1]){ea--;eb--}
   const x=A.slice(s,ea),y=B.slice(s,eb),rows=[];
   for(let i=0;i<s;i++)rows.push(['c',A[i],i+1]);
@@ -1427,7 +1429,9 @@ function cwRender(){
     if($('cwPick2'))$('cwPick2').onclick=cwPick;return}
   el.innerHTML='<div>'+cs.items.map((it,k)=>it.t=='user'?`<div class="cu">${esc(it.text)}</div>`
     :it.t=='ai'?(()=>{const {think,body}=splitThink(it.text||'');return `<div class="ca">${think?`<details class="think"><summary>${ico('brain')}Thought process</summary><div class="tb">${md(think)}</div></details>`:''}${md(cwShow(body))}${it.err?`<div class="err">${esc(it.err)}</div>`:''}</div>`})()
-    :cwCard(it,k)).join('')+(cwBusy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>Working</div>`:'')+'</div>';
+    :cwCard(it,k)).join('')+(cwBusy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>Working<span class="hint">Esc to stop</span></div>`
+      :(()=>{const ch=cwTaskChanges();return ch.length>1?`<div class="cwdone">${ico('check')}<span>${ch.length} changes in this task</span><button class="btn" id="cwUndoAll">${ico('undo')}Undo all</button></div>`:''})())+'</div>';
+  if($('cwUndoAll'))$('cwUndoAll').onclick=cwUndoAll;
   el.querySelectorAll('[data-ok]').forEach(b=>b.onclick=()=>cwWait[b.dataset.ok]&&cwWait[b.dataset.ok](true));
   el.querySelectorAll('[data-rej]').forEach(b=>b.onclick=()=>cwWait[b.dataset.rej]&&cwWait[b.dataset.rej](false));
   el.querySelectorAll('[data-undo]').forEach(b=>b.onclick=async()=>{const it=cs.items[b.dataset.undo];const r=await api('/api/code/undo',{id:it.undo});if(r.error){toast(r.error);return}
@@ -1498,6 +1502,15 @@ function cwSide(){
   const el=$('cwRecent');if(!el)return;const list=prefs.code_recent||[];
   el.innerHTML=list.length?list.map(p=>`<div class="cwrecent${p==cw.root?' on':''}" data-r="${esc(p)}">${ico('folder')}<span>${esc(p.split('\\').pop())}<small>${esc(p)}</small></span></div>`).join(''):'<div class="sidehint">Folders you work in show up here.</div>';
   el.querySelectorAll('[data-r]').forEach(d=>d.onclick=()=>cwSetRoot(d.dataset.r))}
+function cwStop(){cwStopReq=true;stopGen();api('/api/code/stop',{});Object.values(cwWait).forEach(f=>f(false))}
+document.addEventListener('keydown',e=>{if(e.key=='Escape'&&view=='code'&&cwBusy){e.preventDefault();cwStop()}});
+// the applied changes of the latest task (since the last user message): what "Undo all" reverts, newest first
+function cwTaskChanges(){let s=0;for(let k=cs.items.length-1;k>=0;k--)if(cs.items[k].t=='user'){s=k;break}
+  return cs.items.slice(s).filter(it=>it.t=='tool'&&it.state=='ok'&&it.undo&&!it.undone)}
+async function cwUndoAll(){const list=cwTaskChanges();let fail=0;
+  for(const it of [...list].reverse()){const r=await api('/api/code/undo',{id:it.undo});if(r.error)fail++;else it.undone=true}
+  if(list.length)cs.msgs.push({role:'user',content:`(The user undid all ${list.length} changes from your last task.)`});
+  toast(fail?`Undid ${list.length-fail} of ${list.length} changes (the rest changed since)`:`Undid ${list.length} change${list.length==1?'':'s'}`);cwSave();cwRender();cwTreeLoad()}
 function cwNew(){if(cwBusy)return;cs={items:[],msgs:[]};cwSave();cwRender()}
 function drawCode(){
   const el=$('codev');
@@ -1510,7 +1523,7 @@ function drawCode(){
     $('cwPick').onclick=cwPick;$('cwNew').onclick=cwNew;
     $('cwAuto').onchange=e=>{cwAuto=e.target.checked;cwSave()};
     const q=$('cwq');q.oninput=()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,220)+'px'};
-    const go=()=>{if(cwBusy){cwStopReq=true;stopGen();Object.values(cwWait).forEach(f=>f(false));return}const t=q.value.trim();if(!t)return;q.value='';q.oninput();cwSend(t)};
+    const go=()=>{if(cwBusy){cwStop();return}const t=q.value.trim();if(!t)return;q.value='';q.oninput();cwSend(t)};
     $('cwSend').onclick=go;q.onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();go()}}}
   $('cwName').textContent=cw.root?cw.name:'Choose a folder';$('cwPath').textContent=cw.root||'The agent can only touch files inside it';
   $('cwAuto').checked=cwAuto;cwSetBusy();cwRender();cwTreeLoad();cwSide()}

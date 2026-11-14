@@ -7,6 +7,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <thread>
+#include <atomic>
 #include <algorithm>
 #include <map>
 
@@ -160,6 +161,7 @@ std::string res(bool ok, const std::string& output, const std::string& extra = "
 }
 }  // namespace
 
+static std::atomic<bool> g_cmd_stop{false};   // the Stop button: ends a running command
 // run_command: cmd /c in the workspace, no input, a time limit, the whole process tree killed on timeout or stop.
 static std::string run_cmd(const std::wstring& root, const std::string& command, int secs) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -191,12 +193,14 @@ static std::string run_cmd(const std::wstring& root, const std::string& command,
             break;
         }
         if (now_sec() - t0 > secs) { timed = true; break; }
+        if (g_cmd_stop) { out += "\n[stopped by the user]"; break; }
     }
     DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(job);   // kills whatever is still running (the command and anything it started)
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(rd);
     out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
     if (out.size() > 24000) out = out.substr(0, 6000) + "\n... (" + std::to_string(out.size() - 18000) + " characters cut) ...\n" + out.substr(out.size() - 12000);
+    if (!timed && code == STILL_ACTIVE) return out;   // stopped by the user: already noted
     return out + (timed ? "\n[stopped after " + std::to_string(secs) + " s]" : "\n[exit code " + std::to_string((int)code) + "]");
 }
 
@@ -376,6 +380,7 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         if (c.empty()) return res(false, "command is empty");
         if (dry) return res(true, "");
         const int secs = std::max(5, std::min(600, (int)a["timeout"].num(120)));
+        g_cmd_stop = false;
         return res(true, run_cmd(root, c, secs));
     }
     return res(false, "unknown tool " + name);
@@ -401,6 +406,7 @@ bool handle_agent(const std::string& method, const std::string& path, const std:
     J j; json_parse(body, j);
     if (path == "/api/code/pick" && method == "POST") { std::string p = pick_folder(); out = "{\"path\":" + json_esc(p) + "}"; return true; }
     if (path == "/api/code/undo" && method == "POST") { out = undo(j["id"].str()); return true; }
+    if (path == "/api/code/stop" && method == "POST") { g_cmd_stop = true; out = "{}"; return true; }
     // the workspace: an existing folder, never a drive root or the Windows / Ithaca folders
     std::wstring root = utf8_to_w(j["root"].str()), full(32768, 0);
     DWORD n = root.empty() ? 0 : GetFullPathNameW(root.c_str(), (DWORD)full.size(), &full[0], nullptr);
