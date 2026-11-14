@@ -11,3 +11,4 @@ ithaca.json
 *.safetensors
 port.txt
 code_undo/
+eval/results/
