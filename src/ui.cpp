@@ -318,6 +318,88 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .ring:focus .ringtip{display:block}
 }
 @media(max-width:600px){.ctxwrap{display:none}}
+
+/* sidebar: sections */
+.mainnav{display:flex;flex-direction:column;gap:1px;padding:2px 10px 10px}
+.mainnav button{display:flex;align-items:center;gap:11px;padding:8px 11px;border-radius:10px;color:var(--dim);font-size:14px;position:relative;text-align:left;transition:background .15s,color .15s}
+.mainnav button .icon{width:18px;height:18px;flex-shrink:0}
+.mainnav button:hover{background:var(--raise);color:var(--text)}
+.mainnav button.on{background:var(--raise);color:var(--text);font-weight:600}
+.mainnav button.on::before{content:'';position:absolute;left:-10px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--grad)}
+.mainnav button.on .icon{color:var(--a1)}
+.navlabel{font-size:10.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);font-weight:650;padding:12px 11px 4px}
+.soon{margin-left:auto;font-size:10px;font-weight:600;letter-spacing:.3px;padding:2px 7px;border-radius:20px;background:linear-gradient(135deg,rgba(139,108,255,.18),rgba(63,182,255,.18));color:var(--a2)}
+.sidesec{display:flex;flex-direction:column;min-height:0;flex:1;border-top:1px solid var(--line);padding-top:10px}
+.sidesec[hidden]{display:none}
+.cwrecent{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;color:var(--dim);font-size:13.5px;cursor:pointer;margin:0 8px}
+.cwrecent span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cwrecent small{display:block;color:var(--faint);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cwrecent:hover,.cwrecent.on{background:var(--raise);color:var(--text)}
+.sidehint{color:var(--faint);font-size:12.5px;padding:6px 18px;line-height:1.5}
+/* coding view */
+#codev{flex:1;display:none;flex-direction:column;min-height:0}
+.cwbar{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line)}
+.cwpick{display:flex;align-items:center;gap:11px;padding:7px 12px 7px 9px;border-radius:12px;border:1px solid var(--line);background:var(--panel);min-width:0;max-width:520px;text-align:left}
+.cwpick:hover{background:var(--raise)}
+.cwpick .fic{width:34px;height:34px;border-radius:9px;background:var(--grad);display:grid;place-items:center;flex-shrink:0;color:#fff}
+.cwpick .fic .icon{width:18px;height:18px}
+.cwpick b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cwpick small{display:block;font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cwpick>span{min-width:0}
+.cwright{margin-left:auto;display:flex;align-items:center;gap:10px}
+.switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);cursor:pointer;user-select:none}
+.switch input{display:none}.switch i{width:34px;height:20px;border-radius:20px;background:var(--line);position:relative;transition:background .2s}
+.switch i::after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .2s}
+.switch input:checked+i{background:var(--a1)}.switch input:checked+i::after{transform:translateX(14px)}
+.cwmain{flex:1;display:flex;min-height:0}
+.cwlog{flex:1;overflow:auto;padding:18px 20px 30px;min-width:0}
+.cwlog>div{max-width:860px;margin:0 auto}
+.cwtree{width:250px;border-left:1px solid var(--line);overflow:auto;padding:12px 8px;font-size:13px;flex-shrink:0;background:var(--side)}
+.cwtree h4{font-size:11px;letter-spacing:.7px;text-transform:uppercase;color:var(--faint);margin:2px 8px 8px;display:flex;align-items:center}
+.cwtree h4 button{margin-left:auto;color:var(--faint);padding:2px;border-radius:6px}.cwtree h4 button:hover{color:var(--text);background:var(--raise)}
+.tn{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:6px;color:var(--dim);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tn .icon{width:14px;height:14px;flex-shrink:0;opacity:.75}.tn.d{color:var(--text)}.tn.d .icon{color:var(--a2);opacity:1}
+.tn:hover{background:var(--raise);color:var(--text)}
+.cwempty{text-align:center;margin:9vh auto 0;max-width:520px;color:var(--dim)}
+.cwempty .big{width:64px;height:64px;border-radius:18px;background:var(--grad);display:grid;place-items:center;margin:0 auto 18px;box-shadow:0 10px 40px rgba(139,108,255,.35);color:#fff}
+.cwempty .big .icon{width:30px;height:30px}
+.cwempty h2{color:var(--text);margin:0 0 8px;font-size:22px}
+.cwempty p{line-height:1.55;margin:0 0 18px}
+.cwsugg{display:grid;grid-template-columns:1fr 1fr;gap:8px;text-align:left}
+.cwsugg button{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:10px 12px;font-size:13px;color:var(--dim);line-height:1.4}
+.cwsugg button:hover{background:var(--raise);color:var(--text)}
+.cu{background:var(--user);padding:10px 14px;border-radius:14px;margin:14px 0 14px auto;max-width:80%;width:fit-content;white-space:pre-wrap}
+.ca{margin:10px 0;line-height:1.6}
+.tc{border:1px solid var(--line);border-radius:11px;margin:8px 0;background:var(--panel);overflow:hidden}
+.tc>summary,.tc>.th{display:flex;align-items:center;gap:9px;padding:8px 12px;font-size:13.5px;color:var(--dim);cursor:pointer;list-style:none}
+.tc>summary::-webkit-details-marker{display:none}
+.tc .ti{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;background:var(--raise);flex-shrink:0}.tc .ti .icon{width:14px;height:14px}
+.tc .tt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tc .tt code{font-size:12.5px;color:var(--text)}
+.tc .st{font-size:12px;color:var(--faint);flex-shrink:0}.tc.err .st{color:var(--bad)}.tc.ok.chg .ti{background:rgba(63,185,80,.15);color:var(--ok)}
+.tc.pending{border-color:var(--a1);box-shadow:0 0 0 3px rgba(139,108,255,.12)}
+.tc pre{margin:0;padding:10px 12px;max-height:340px;overflow:auto;font-size:12.5px;border-top:1px solid var(--line);background:var(--code);white-space:pre-wrap;word-break:break-word}
+.diff{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;border-top:1px solid var(--line);max-height:420px;overflow:auto;background:var(--code)}
+.diff div{display:flex;white-space:pre-wrap;word-break:break-word;padding:0 10px 0 0}
+.diff div i{width:40px;flex-shrink:0;text-align:right;padding-right:10px;color:var(--faint);font-style:normal;user-select:none}
+.diff .a{background:rgba(63,185,80,.13)}.diff .a::before{content:'+';color:var(--ok);width:14px;flex-shrink:0}
+.diff .r{background:rgba(240,96,90,.13)}.diff .r::before{content:'-';color:var(--bad);width:14px;flex-shrink:0}
+.diff .c::before{content:' ';width:14px;flex-shrink:0}.diff .gap{color:var(--faint);padding:2px 12px;background:var(--panel)}
+.tcact{display:flex;gap:8px;padding:9px 12px;border-top:1px solid var(--line);align-items:center}
+.tcact .note{font-size:12.5px;color:var(--faint);margin-right:auto}
+.plus{color:var(--ok)}.minus{color:var(--bad)}
+.cwcomp{padding:0 20px 16px}
+.cwcomp .box{max-width:860px;margin:0 auto;display:flex;align-items:flex-end;gap:10px;padding:10px 10px 10px 16px}
+.cwcomp .box textarea{flex:1;border:0;overflow:auto;scrollbar-width:none;background:transparent;outline:0;resize:none;padding:7px 0;min-height:24px;max-height:220px;box-shadow:none}
+.cwcomp .send{flex-shrink:0;margin:0}
+.cwhint{display:block;max-width:860px;margin:6px auto 0;color:var(--faint);font-size:12px;text-align:center}
+.cwwork{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:13px;margin:8px 0}
+/* orchestration (coming next) */
+.orch{max-width:760px;margin:8vh auto;padding:0 20px;text-align:center}
+.orch .big{width:72px;height:72px;border-radius:20px;background:var(--grad);display:grid;place-items:center;margin:0 auto 20px;color:#fff;box-shadow:0 12px 44px rgba(63,182,255,.3)}
+.orch .big .icon{width:34px;height:34px}
+.orch h1{margin:0 0 10px;font-size:26px}.orch>p{color:var(--dim);line-height:1.6;margin:0 auto 26px;max-width:560px}
+.orchg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;text-align:left}
+.orchg div{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel)}
+.orchg b{display:flex;align-items:center;gap:8px;margin-bottom:6px}.orchg p{margin:0;color:var(--dim);font-size:13.5px;line-height:1.5}
+@media(max-width:820px){.cwtree{display:none}.cwsugg,.orchg{grid-template-columns:1fr}.cwbar{flex-wrap:wrap}}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -354,14 +436,35 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
 <symbol id="i-wand" viewBox="0 0 24 24"><path d="m15 4 5 5L8 21H3v-5zM13 6l5 5M19 2v3M22 4h-3"/></symbol>
 <symbol id="spark" viewBox="0 0 24 24"><path d="M12 1.5l2.3 6.6 6.7 2.4-6.7 2.4L12 19.5l-2.3-6.6L3 10.5l6.7-2.4z"/><path d="M19 15l1 2.6 2.5 1-2.5 1L19 22l-1-2.4-2.5-1 2.5-1z"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8zM14 3v5h5"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+<symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></symbol>
+<symbol id="i-orch" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.8 7.2 6.3 15.8M13.2 7.2l4.5 8.6M7.5 18h9"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16m0 4v-4h-4"/></symbol>
 </defs></svg>
 
 <aside id="side">
   <div class="brand"><div class="logo"><svg><use href="#spark"/></svg></div>Ithaca</div>
-  <div class="nav" id="nav"><button data-view="chat" class="on"><svg class="icon"><use href="#i-chat"/></svg>Chat</button><button data-view="image"><svg class="icon"><use href="#i-image"/></svg>Image</button><button data-view="video"><svg class="icon"><use href="#i-video"/></svg>Video</button><button data-view="audio"><svg class="icon"><use href="#i-audio"/></svg>Audio</button></div>
-  <button class="newchat" id="newchat"><svg class="icon"><use href="#i-plus"/></svg>New chat</button>
-  <input class="search" id="search" placeholder="Search chats">
-  <div id="history"></div>
+  <nav class="mainnav" id="nav">
+    <button data-view="chat" class="on"><svg class="icon"><use href="#i-chat"/></svg>Chat</button>
+    <button data-view="code"><svg class="icon"><use href="#i-code"/></svg>Coding</button>
+    <button data-view="orch"><svg class="icon"><use href="#i-orch"/></svg>Orchestration<span class="soon">Soon</span></button>
+    <div class="navlabel">Create</div>
+    <button data-view="image"><svg class="icon"><use href="#i-image"/></svg>Image</button>
+    <button data-view="video"><svg class="icon"><use href="#i-video"/></svg>Video</button>
+    <button data-view="audio"><svg class="icon"><use href="#i-audio"/></svg>Audio</button>
+  </nav>
+  <div class="sidesec" id="sideChat">
+    <button class="newchat" id="newchat"><svg class="icon"><use href="#i-plus"/></svg>New chat</button>
+    <input class="search" id="search" placeholder="Search chats">
+    <div id="history"></div>
+  </div>
+  <div class="sidesec" id="sideCode" hidden>
+    <button class="newchat" id="cwNewSide"><svg class="icon"><use href="#i-plus"/></svg>New task</button>
+    <div class="group" style="padding-left:20px">Folders</div>
+    <div id="cwRecent" style="overflow:auto"></div>
+  </div>
   <div class="sidefoot"><button id="openHub"><svg class="icon"><use href="#i-dl"/></svg>Models</button><button id="openSettings"><svg class="icon"><use href="#i-gear"/></svg>Settings</button><button id="quitApp" title="Stop Ithaca and free all its memory"><svg class="icon"><use href="#i-power"/></svg>Quit</button></div>
 </aside>
 
@@ -377,6 +480,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
   </div>
   <div id="log"></div>
   <div id="studio"></div>
+  <div id="codev"></div>
   <div class="composer">
     <div class="kb" id="kb"></div>
     <div class="box" id="box">
@@ -1218,11 +1322,197 @@ $('settings').onclick=e=>{if(e.target.id=='settings'){$('settings').classList.re
 /* ---------- studio: image / video / audio ---------- */
 let view='chat',mediaModels=null;
 let vsel={amode:'Speech'};
+
+/* ---------- coding agent ---------- */
+// The model works through tools (Qwen-style <tool_call> JSON); this page runs the loop: stream until "</tool_call>",
+// run the call against /api/code/tool (changes are previewed and approved first unless auto-approve is on), feed
+// the result back as <tool_response>, repeat until the model answers without a tool call.
+const CODE_TOOLS=[
+ ['list_dir','List the files and folders as a tree. Start here to see the project.',{path:['string','Folder relative to the workspace (default: the workspace)'],depth:['integer','Levels to show (default 2)']},[]],
+ ['read_file','Read a file with line numbers. Word/PowerPoint/Excel files come back as labelled text; PDFs as plain text (read-only).',{path:['string','File path'],start_line:['integer','First line (optional)'],end_line:['integer','Last line (optional)']},['path']],
+ ['search','Find text in files, case-insensitive. Returns path:line: text.',{pattern:['string','Text to look for'],path:['string','Folder to search in (optional)']},['pattern']],
+ ['edit_file','Replace text in a file. old must match exactly once: copy it from read_file without the line numbers, keeping indentation. For Word/PowerPoint, old is text from one paragraph.',{path:['string','File path'],old:['string','Exact text to replace'],new:['string','Replacement text'],replace_all:['boolean','Replace every occurrence (optional)']},['path','old','new']],
+ ['write_file','Create a text file, or replace a whole text file.',{path:['string','File path'],content:['string','The complete file content']},['path','content']],
+ ['set_cell','Set one cell in an Excel file: a number, text, or a formula starting with =.',{path:['string','.xlsx file'],cell:['string','Cell such as B4'],value:['string','The value'],sheet:['string','Sheet name (optional; default the first sheet)']},['path','cell','value']],
+ ['make_dir','Create a folder.',{path:['string','Folder path']},['path']],
+ ['rename','Rename or move a file or folder.',{from:['string','Current path'],to:['string','New path']},['from','to']],
+ ['delete','Delete a file or folder (it goes to the Recycle Bin).',{path:['string','Path']},['path']]];
+const CW_CHANGE=new Set(['edit_file','write_file','create_file','set_cell','make_dir','rename','delete']);
+const CW_ICON={list_dir:'folder',read_file:'file',search:'search',edit_file:'edit',write_file:'edit',create_file:'plus',set_cell:'edit',make_dir:'folder',rename:'edit',delete:'trash'};
+let cw={root:'',name:''},cs={items:[],msgs:[]},cwBusy=false,cwStopReq=false,cwAuto=false,cwWait={};
+try{const s=JSON.parse(localStorage.getItem('ithaca_code')||'null');if(s){cw=s.cw||cw;cs=s.cs||cs;cwAuto=!!s.auto}}catch(e){}
+function cwSave(){try{localStorage.setItem('ithaca_code',JSON.stringify({cw,cs:{items:cs.items.slice(-300),msgs:cs.msgs.slice(-160)},auto:cwAuto}))}catch(e){}}
+function cwSystem(){
+  const tools=CODE_TOOLS.map(([n,d,p,r])=>JSON.stringify({type:'function',function:{name:n,description:d,parameters:{type:'object',properties:Object.fromEntries(Object.entries(p).map(([k,[t,dd]])=>[k,{type:t,description:dd}])),required:r}}})).join('\n');
+  return `You are Ithaca's coding agent. You work in the folder "${cw.name}" on the user's Windows PC, where you can read, search, create, edit, rename and delete files with the tools below. Paths are relative to that folder.
+How to work:
+- Look before you change anything: list_dir, search and read_file.
+- Make focused edits with edit_file (old must match the file exactly, once). Use write_file for new files or to rewrite a small file completely.
+- Keep the project's existing style, and don't touch files the task doesn't need.
+- Word (.docx), PowerPoint (.pptx) and Excel (.xlsx) files are shown as text with [p..] labels or cell addresses. Change them with edit_file or set_cell and their formatting is kept. PDFs are read-only.
+- Call one tool at a time and wait for its result. If the user rejects a change, adjust it or ask.
+- When the task is done, stop calling tools and reply with a short summary of what you changed. If the request is unclear, ask instead of guessing.
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+${tools}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>`}
+// what the transcript shows of a reply: not the tool-call JSON (the card below it shows the call), nor what follows it
+function cwShow(b){return b.replace(/<tool_call>[\s\S]*$/,'').replace(/```(?:json)?\s*\{\s*"name"\s*:[\s\S]*$/,'').replace(/\{\s*"name"\s*:\s*"(list_dir|read_file|search|edit_file|write_file|set_cell|make_dir|rename|delete)"[\s\S]*$/,'').trim()}
+function cwParse(t){
+  const i=t.lastIndexOf('<tool_call>');
+  if(i<0){   // some models skip the tags and write the JSON bare or in a code block: accept it when it names one of our tools
+    const body=splitThink(t).body;let k=body.search(/\{\s*"name"\s*:/);
+    while(k>=0){let d=0,q=false,e=-1;for(let j=k;j<body.length;j++){const c=body[j];if(q){if(c=='\\')j++;else if(c=='"')q=false;continue}if(c=='"')q=true;else if(c=='{')d++;else if(c=='}'&&--d==0){e=j;break}}
+      if(e<0)break;try{const o=JSON.parse(body.slice(k,e+1));if(CODE_TOOLS.some(x=>x[0]==o.name))return{name:o.name,args:o.arguments||o.parameters||{}}}catch(x){}
+      const n=body.slice(e+1).search(/\{\s*"name"\s*:/);k=n<0?-1:e+1+n}
+    return null}
+  let s=t.slice(i+11).replace(/<\/tool_call>[\s\S]*$/,'').trim().replace(/^```(?:json)?\s*/,'').replace(/```\s*$/,'');
+  try{const j=JSON.parse(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
+// line diff: common head/tail trimmed, LCS on the middle, 3 lines of context
+function cwDiff(a,b){
+  const A=a.split('\n'),B=b.split('\n');let s=0;while(s<A.length&&s<B.length&&A[s]==B[s])s++;
+  let ea=A.length,eb=B.length;while(ea>s&&eb>s&&A[ea-1]==B[eb-1]){ea--;eb--}
+  const x=A.slice(s,ea),y=B.slice(s,eb),rows=[];
+  for(let i=0;i<s;i++)rows.push(['c',A[i],i+1]);
+  if(x.length*y.length<=400000){
+    const n=x.length,m=y.length,L=Array.from({length:n+1},()=>new Uint32Array(m+1));
+    for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)L[i][j]=x[i]==y[j]?L[i+1][j+1]+1:Math.max(L[i+1][j],L[i][j+1]);
+    let i=0,j=0;while(i<n||j<m){if(i<n&&j<m&&x[i]==y[j]){rows.push(['c',x[i],s+j+1]);i++;j++}else if(j<m&&(i>=n||L[i][j+1]>=L[i+1][j])){rows.push(['a',y[j],s+j+1]);j++}else{rows.push(['r',x[i],'']);i++}}
+  }else{x.forEach(l=>rows.push(['r',l,'']));y.forEach((l,k)=>rows.push(['a',l,s+k+1]))}
+  for(let i=ea;i<A.length;i++)rows.push(['c',A[i],eb+(i-ea)+1]);
+  const keep=rows.map(()=>false);rows.forEach((r,k)=>{if(r[0]!='c')for(let q=Math.max(0,k-3);q<=Math.min(rows.length-1,k+3);q++)keep[q]=true});
+  let h='',gap=false,add=0,rem=0;
+  rows.forEach((r,k)=>{if(r[0]=='a')add++;if(r[0]=='r')rem++;if(!keep[k]){gap=true;return}if(gap){h+='<div class="gap">⋯</div>';gap=false}h+=`<div class="${r[0]}"><i>${r[2]}</i>${esc(r[1])||' '}</div>`});
+  return{h,add,rem}}
+function cwTitle(it){const a=it.args||{},c=x=>`<code>${esc(x||'')}</code>`;
+  return{list_dir:`Listed ${c(a.path||'.')}`,read_file:`Read ${c(a.path)}${a.start_line?` lines ${a.start_line}–${a.end_line||'end'}`:''}`,search:`Searched for ${c(a.pattern)}`,
+    edit_file:`Edit ${c(a.path)}`,write_file:`Write ${c(a.path)}`,create_file:`Create ${c(a.path)}`,set_cell:`Set ${c((a.sheet?a.sheet+'!':'')+a.cell)} in ${c(a.path)}`,
+    make_dir:`New folder ${c(a.path)}`,rename:`Rename ${c(a.from)} → ${c(a.to)}`,delete:`Delete ${c(a.path)}`}[it.name]||esc(it.name)}
+function cwCard(it,k){
+  const chg=CW_CHANGE.has(it.name);
+  const st=it.state=='run'?'working…':it.state=='pending'?'waiting for you':it.state=='rejected'?'rejected':it.state=='err'?'failed':it.undone?'undone':'';
+  let body='',stat='';
+  if(chg&&it.before!=null&&(it.name=='edit_file'||it.name=='write_file'||it.name=='create_file')){const d=cwDiff(it.before||'',it.after||'');body=`<div class="diff">${d.h}</div>`;stat=`<span class="plus">+${d.add}</span> <span class="minus">−${d.rem}</span>`}
+  else if(chg&&it.name=='set_cell')body=`<pre>${esc(it.after||'')}</pre>`;
+  if(it.state=='err'||it.state=='ok'&&!chg)body+=it.out?`<pre>${esc(it.out.length>20000?it.out.slice(0,20000)+'\n…':it.out)}</pre>`:'';
+  const head=`<span class="ti">${ico(CW_ICON[it.name]||'code')}</span><span class="tt">${cwTitle(it)}</span><span class="st">${stat} ${st}</span>`;
+  const act=it.state=='pending'?`<div class="tcact"><span class="note">Review this change.</span><button class="btn" data-rej="${k}">Reject</button><button class="btn pri" data-ok="${k}">Apply</button></div>`
+    :it.state=='ok'&&it.undo&&!it.undone?`<div class="tcact"><span class="note">${esc(it.out||'')}</span><button class="btn" data-undo="${k}">${ico('undo')}Undo</button></div>`:'';
+  const cls=`tc ${it.state}${chg?' chg':''}`;
+  return chg||it.state=='pending'?`<div class="${cls}"><div class="th">${head}</div>${body}${act}</div>`:`<details class="${cls}"><summary>${head}</summary>${body}</details>`}
+function cwRender(){
+  const el=$('cwlog');if(!el)return;const stick=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+  if(!cs.items.length){el.innerHTML=`<div><div class="cwempty"><div class="big">${ico('code')}</div><h2>${cw.root?'What should we work on?':'Pick a folder to work in'}</h2>
+    <p>${cw.root?`Ithaca can read, search, create, edit, rename and delete files in <b>${esc(cw.name)}</b>. Code and text files are edited directly; Word, PowerPoint and Excel files keep their formatting.`:'The coding agent only touches files inside the folder you choose. Every change can be reviewed before it happens and undone after.'}</p>
+    ${cw.root?`<div class="cwsugg">${['Explain how this project is organized','Find bugs in the main file and fix them','Add comments to the code that needs them','Write a README for this folder'].map(s=>`<button>${s}</button>`).join('')}</div>`:`<button class="btn pri" id="cwPick2">${ico('folder')}Choose a folder</button>`}</div></div>`;
+    el.querySelectorAll('.cwsugg button').forEach(b=>b.onclick=()=>{$('cwq').value=b.textContent;$('cwq').focus()});
+    if($('cwPick2'))$('cwPick2').onclick=cwPick;return}
+  el.innerHTML='<div>'+cs.items.map((it,k)=>it.t=='user'?`<div class="cu">${esc(it.text)}</div>`
+    :it.t=='ai'?(()=>{const {think,body}=splitThink(it.text||'');return `<div class="ca">${think?`<details class="think"><summary>${ico('brain')}Thought process</summary><div class="tb">${md(think)}</div></details>`:''}${md(cwShow(body))}${it.err?`<div class="err">${esc(it.err)}</div>`:''}</div>`})()
+    :cwCard(it,k)).join('')+(cwBusy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>Working</div>`:'')+'</div>';
+  el.querySelectorAll('[data-ok]').forEach(b=>b.onclick=()=>cwWait[b.dataset.ok]&&cwWait[b.dataset.ok](true));
+  el.querySelectorAll('[data-rej]').forEach(b=>b.onclick=()=>cwWait[b.dataset.rej]&&cwWait[b.dataset.rej](false));
+  el.querySelectorAll('[data-undo]').forEach(b=>b.onclick=async()=>{const it=cs.items[b.dataset.undo];const r=await api('/api/code/undo',{id:it.undo});if(r.error){toast(r.error);return}
+    it.undone=true;cs.msgs.push({role:'user',content:`(The user undid your change: ${it.name} ${JSON.stringify(it.args).slice(0,200)})`});cwSave();cwRender();cwTreeLoad()});
+  if(stick)el.scrollTop=el.scrollHeight}
+async function cwTool(name,args,dry){return api('/api/code/tool',{root:cw.root,name,args,dry})}
+async function cwRun(call){
+  const it={t:'tool',name:call.name,args:call.args,state:'run'};cs.items.push(it);const k=cs.items.length-1;cwRender();
+  if(CW_CHANGE.has(call.name)&&!cwAuto){
+    const pv=await cwTool(call.name,call.args,true);
+    if(pv.error||!pv.ok){it.state='err';it.out=pv.error||pv.output;cwRender();return 'Error: '+it.out}
+    it.before=pv.before;it.after=pv.after;it.state='pending';cwRender();
+    const ok=await new Promise(r=>cwWait[k]=r);delete cwWait[k];
+    if(!ok){it.state='rejected';cwRender();return 'The user rejected this change. Do not repeat it; adjust your approach or ask what they want.'}
+    it.state='run';cwRender()}
+  const r=await cwTool(call.name,call.args,false);
+  if(r.error||!r.ok){it.state='err';it.out=r.error||r.output}else{it.state='ok';it.out=r.output;if(r.undo)it.undo=r.undo;if(r.before!=null){it.before=r.before;it.after=r.after}}
+  cwRender();if(CW_CHANGE.has(call.name))cwTreeLoad();
+  let out=r.error||r.output||'';if(out.length>14000)out=out.slice(0,14000)+'\n... (cut: read a smaller part)';
+  return (it.state=='err'?'Error: ':'')+(out||'done')}
+async function cwSend(text){
+  if(!cw.root){toast('Choose a folder first');return}
+  if(!status.loaded){toast('Load a model first (a coder model such as Qwen3-Coder works best)');return}
+  if((status.ctx||0)&&status.ctx<8192&&!cwSend.warned){cwSend.warned=1;toast(`This model is loaded with a ${status.ctx}-token context; 16K or more works better for coding (Settings → Model)`)}
+  cs.items.push({t:'user',text});cs.msgs.push({role:'user',content:text});cwBusy=true;cwStopReq=false;cwSetBusy();cwRender();
+  for(let step=0;step<50&&!cwStopReq;step++){
+    // keep the newest tool outputs; older ones shrink to a note so long tasks fit the context window
+    let seen=0;for(let i=cs.msgs.length-1;i>=0;i--){const m=cs.msgs[i];if(m.role=='user'&&m.content.startsWith('<tool_response>')&&++seen>6&&m.content.length>400)m.content='<tool_response>\n(older output removed to save space; read the file again if needed)\n</tool_response>'}
+    const ai={t:'ai',text:''};cs.items.push(ai);
+    const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
+    ai.text=r.text;if(r.error)ai.err=r.error;
+    const call=cwParse(r.text);
+    if(!cwShow(splitThink(r.text).body)&&!splitThink(r.text).think&&!ai.err)cs.items.splice(cs.items.indexOf(ai),1);
+    cs.msgs.push({role:'assistant',content:r.text+(call?'\n</tool_call>':'')});
+    // a reply that announces the next step but makes no call ("I will now add..."): nudge it on, at most twice per task
+    if(!call&&!r.error&&!cwStopReq&&step>0&&(cwSend.nudges=(step==1?0:cwSend.nudges||0))<2&&/\b(I will|I'll|I am going to|Let me|Let's|Now,? I|Next,? I)\b/i.test(cwShow(splitThink(r.text).body).slice(-400))){
+      cwSend.nudges++;cs.msgs.push({role:'user',content:'Go ahead and do that now with a tool call. If everything is already done, give the summary instead.'});continue}
+    if(r.error||cwStopReq||!call)break;
+    const out=call.bad!=null?`Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}.`:await cwRun(call);
+    cs.msgs.push({role:'user',content:`<tool_response>\n${out}\n</tool_response>`});cwSave();
+  }
+  cwBusy=false;cwSetBusy();cwSave();cwRender()}
+function cwSetBusy(){const b=$('cwSend');if(b){b.innerHTML=ico(cwBusy?'stop':'up');b.title=cwBusy?'Stop':'Send'}}
+async function cwPick(){const r=await api('/api/code/pick',{});if(!r.path)return;cwSetRoot(r.path)}
+async function cwSetRoot(p){
+  const r=await api('/api/code/check',{root:p});if(r.error){toast(r.error);return}
+  if(cw.root!=r.root){cw={root:r.root,name:r.root.split('\\').pop()};cs={items:[],msgs:[]}}
+  prefs.code_recent=[r.root,...(prefs.code_recent||[]).filter(x=>x!=r.root)].slice(0,8);savePrefs();cwSave();drawCode()}
+async function cwTreeLoad(){
+  const el=$('cwtree');if(!el)return;
+  const head=`<h4>Files<button id="cwRefresh" title="Refresh">${ico('refresh')}</button></h4>`;
+  if(!cw.root){el.innerHTML=head+'<div class="sidehint">No folder yet.</div>';return}
+  const r=await cwTool('list_dir',{depth:4});
+  if(!r.ok){el.innerHTML=head+`<div class="sidehint">${esc(r.output||r.error||'')}</div>`;return}
+  const stack=[];let h='';
+  r.output.split('\n').slice(1).forEach(line=>{if(!line.trim()||line.trim().startsWith('...'))return;
+    const d=(line.match(/^ */)[0].length/2)-1,nm=line.trim().replace(/\s+\(.*\)$/,''),dir=nm.endsWith('/');stack.length=d;const name=dir?nm.slice(0,-1):nm;
+    const path=[...stack,name].join('/');if(dir)stack.push(name);
+    h+=`<div class="tn${dir?' d':''}" style="padding-left:${8+d*14}px" data-p="${esc(path)}" title="${esc(path)}">${ico(dir?'folder':'file')}${esc(name)}</div>`});
+  el.innerHTML=head+h;
+  $('cwRefresh').onclick=cwTreeLoad;
+  el.querySelectorAll('.tn').forEach(n=>n.onclick=()=>{const q=$('cwq');q.value+=(q.value&&!q.value.endsWith(' ')?' ':'')+n.dataset.p+' ';q.focus()})}
+function cwSide(){
+  const el=$('cwRecent');if(!el)return;const list=prefs.code_recent||[];
+  el.innerHTML=list.length?list.map(p=>`<div class="cwrecent${p==cw.root?' on':''}" data-r="${esc(p)}">${ico('folder')}<span>${esc(p.split('\\').pop())}<small>${esc(p)}</small></span></div>`).join(''):'<div class="sidehint">Folders you work in show up here.</div>';
+  el.querySelectorAll('[data-r]').forEach(d=>d.onclick=()=>cwSetRoot(d.dataset.r))}
+function cwNew(){if(cwBusy)return;cs={items:[],msgs:[]};cwSave();cwRender()}
+function drawCode(){
+  const el=$('codev');
+  if(!el.dataset.built){el.dataset.built=1;
+    el.innerHTML=`<div class="cwbar"><button class="cwpick" id="cwPick"><span class="fic">${ico('folder')}</span><span><b id="cwName"></b><small id="cwPath"></small></span>${ico('down')}</button>
+      <div class="cwright"><label class="switch" title="Apply changes without asking (they can still be undone)"><input type="checkbox" id="cwAuto"><i></i>Auto-apply</label><button class="btn" id="cwNew">${ico('plus')}New task</button></div></div>
+      <div class="cwmain"><div class="cwlog" id="cwlog"></div><div class="cwtree" id="cwtree"></div></div>
+      <div class="cwcomp"><div class="box"><textarea id="cwq" rows="1" placeholder="Describe what to change, e.g. add input checks to the signup form"></textarea><button class="send" id="cwSend" title="Send">${ico('up')}</button></div>
+      <small class="cwhint">Changes are shown for approval first. Deletes go to the Recycle Bin, and every edit can be undone.</small></div>`;
+    $('cwPick').onclick=cwPick;$('cwNew').onclick=cwNew;
+    $('cwAuto').onchange=e=>{cwAuto=e.target.checked;cwSave()};
+    const q=$('cwq');q.oninput=()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,220)+'px'};
+    const go=()=>{if(cwBusy){cwStopReq=true;stopGen();Object.values(cwWait).forEach(f=>f(false));return}const t=q.value.trim();if(!t)return;q.value='';q.oninput();cwSend(t)};
+    $('cwSend').onclick=go;q.onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();go()}}}
+  $('cwName').textContent=cw.root?cw.name:'Choose a folder';$('cwPath').textContent=cw.root||'The agent can only touch files inside it';
+  $('cwAuto').checked=cwAuto;cwSetBusy();cwRender();cwTreeLoad();cwSide()}
+function drawOrch(){
+  $('studio').innerHTML=`<div class="orch"><div class="big">${ico('orch')}</div><h1>Model orchestration</h1>
+   <p>Several models working on one question: each with its own role and opinion, answering side by side, debating in rounds, and a judge model pulling it together. They run at the same time when your VRAM allows, one after another when it doesn't.</p>
+   <div class="orchg"><div><b>${ico('chat')}Panel</b><p>Every model answers on its own. Compare them side by side.</p></div><div><b>${ico('orch')}Debate</b><p>Models see each other's answers, push back and revise over a few rounds.</p></div><div><b>${ico('check')}Judge</b><p>One model reads it all and writes the final answer, with where they agreed and disagreed.</p></div></div>
+   <p style="margin-top:26px"><span class="soon" style="font-size:12px;padding:4px 12px">Coming next</span></p></div>`}
 function setView(v){const prev=view;view=v;
-  if(prev!=v)setTimeout(()=>{const t=v=='chat'?$('log'):$('studio');if(t){t.classList.remove('viewin');void t.offsetWidth;t.classList.add('viewin')}});$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
-  const chatv=v=='chat';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
-  document.querySelector('.ctxwrap').style.visibility=chatv?'':'hidden';$('studio').style.display=chatv?'none':'block';
-  if(!chatv)drawStudio()}
+  if(prev!=v)setTimeout(()=>{const t=v=='chat'?$('log'):v=='code'?$('codev'):$('studio');if(t){t.classList.remove('viewin');void t.offsetWidth;t.classList.add('viewin')}});$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
+  const chatv=v=='chat',codev=v=='code';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
+  document.querySelector('.ctxwrap').style.visibility=chatv?'':'hidden';$('studio').style.display=chatv||codev?'none':'block';$('codev').style.display=codev?'flex':'none';
+  $('sideChat').hidden=codev;$('sideCode').hidden=!codev;
+  if(codev)drawCode();else if(v=='orch')drawOrch();else if(!chatv)drawStudio()}
 function modelSelect(kind){const list=(mediaModels||[]).filter(m=>m.kind==kind),cur=prefs['media_'+kind]||'';
   return `<select id="mediaSel">${'<option value="">None selected</option>'+list.map(m=>`<option value="${esc(m.path)}" ${m.path==cur?'selected':''}>${esc(m.name)} (${(m.mb/1024).toFixed(1)} GB)</option>`).join('')}</select>
    <small>${list.length?`${list.length} ${kind} model(s) found on this PC.`:`No ${kind} models found yet. Put them in the <b>models</b> folder next to Ithaca.exe, or add their folder below.`}</small>
@@ -1390,6 +1680,7 @@ function watchProgress(el){let on=true,seen=-1;
     await new Promise(r=>setTimeout(r,400))}})();
   return()=>{on=false}}
 $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+$('cwNewSide').onclick=()=>{setView('code');cwNew()};
 
 /* ---------- composer ---------- */
 function autosize(){const q=$('q');q.style.height='auto';q.style.height=Math.min(240,q.scrollHeight)+'px';if(!busy)$('send').disabled=!canSend()}
@@ -1408,7 +1699,7 @@ $('newchat').onclick=newChat;$('search').oninput=drawHistory;
 $('toggleSide').onclick=()=>$('side').classList.toggle('hidden');
 // Narrow screens: the sidebar floats over the page, so it starts closed and closes after a choice or a tap outside.
 {const narrow=()=>matchMedia('(max-width:820px)').matches,hide=()=>{if(narrow())$('side').classList.add('hidden')};hide();
-$('side').addEventListener('click',e=>{if(e.target.closest('.hitem,.nav button,.newchat,.sidefoot button')&&!e.target.closest('.x'))hide()},true);
+$('side').addEventListener('click',e=>{if(e.target.closest('.hitem,.mainnav button,.newchat,.sidefoot button,.cwrecent')&&!e.target.closest('.x'))hide()},true);
 document.querySelector('main').addEventListener('click',e=>{if(!e.target.closest('#toggleSide'))hide()})}
 document.addEventListener('keydown',e=>{if(e.key=='Escape'){if($('settings').classList.contains('open')){$('settings').classList.remove('open');render()}else if(busy)stopGen()}});
 

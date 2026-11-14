@@ -13,6 +13,7 @@ extern const char* kIndexHtml;
 extern std::wstring g_store_dir;
 bool handle_store(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out);
 bool handle_hub(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out);
+bool handle_agent(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out);
 
 static Model g_model, g_draft;   // g_draft: small model for speculative decoding
 static Vision g_vision;
@@ -805,11 +806,23 @@ static void handle(SOCKET s) {
         send_all(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
         std::lock_guard<std::mutex> l(g_gen);
         if (!g_model.loaded()) { send_all(s, "data: {\"error\":\"no model loaded\"}\n\n"); closesocket(s); return; }
+        // stop strings (the coding agent pauses at "</tool_call>"): text that could still become one is held back
+        std::vector<std::string> stops; size_t hold = 0;
+        for (auto& x : j["stop"].a) if (x.t == J::STR && !x.s.empty()) { stops.push_back(x.s); hold = std::max(hold, x.s.size() - 1); }
+        std::string pend; bool hit = false;
         g_stop = false; g_busy = true;
         GenStats st = g_chat.generate(msgs, o, [&](const std::string& t) {
             if (g_stop) return false;
-            return send_all(s, "data: {\"t\":" + json_esc(t) + "}\n\n");
+            if (stops.empty()) return send_all(s, "data: {\"t\":" + json_esc(t) + "}\n\n");
+            pend += t;
+            size_t cut = std::string::npos;
+            for (auto& x : stops) { size_t p = pend.find(x); if (p < cut) cut = p; }
+            if (cut != std::string::npos) { hit = true; if (cut) send_all(s, "data: {\"t\":" + json_esc(pend.substr(0, cut)) + "}\n\n"); pend.clear(); return false; }
+            if (pend.size() <= hold) return true;
+            std::string out = pend.substr(0, pend.size() - hold); pend.erase(0, out.size());
+            return send_all(s, "data: {\"t\":" + json_esc(out) + "}\n\n");
         });
+        if (!hit && !pend.empty()) send_all(s, "data: {\"t\":" + json_esc(pend) + "}\n\n");
         g_busy = false;
         char sb[512];
         snprintf(sb, sizeof sb, "{\"prompt\":%d,\"reused\":%d,\"gen\":%d,\"prefill_tps\":%.1f,\"tps\":%.2f}",
@@ -820,7 +833,12 @@ static void handle(SOCKET s) {
     }
     else {
         int code; std::string type, out;
-        if (handle_store(method, path, body, code, type, out) || handle_hub(method, path, body, code, type, out)) respond(s, code, type, out);
+        // the coding agent's file tools: only for this PC (never through --host or a tunnel)
+        sockaddr_storage pa{}; int pl = sizeof pa;
+        const bool local = getpeername(s, (sockaddr*)&pa, &pl) == 0 && ((pa.ss_family == AF_INET && ((sockaddr_in*)&pa)->sin_addr.s_addr == htonl(INADDR_LOOPBACK)) ||
+                           (pa.ss_family == AF_INET6 && IN6_IS_ADDR_LOOPBACK(&((sockaddr_in6*)&pa)->sin6_addr)));
+        if (path.rfind("/api/code/", 0) == 0 && !local) respond(s, 403, "application/json", "{\"error\":\"The coding agent only works on this PC.\"}");
+        else if (handle_store(method, path, body, code, type, out) || handle_hub(method, path, body, code, type, out) || handle_agent(method, path, body, code, type, out)) respond(s, code, type, out);
         else respond(s, 404, "text/plain", "not found");
     }
     shutdown(s, SD_SEND);

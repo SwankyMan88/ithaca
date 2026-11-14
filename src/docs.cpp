@@ -724,3 +724,306 @@ std::string doc_extract_json(const std::string& name, const std::string& bytes) 
     return "{\"name\":" + json_esc(name) + ",\"kind\":\"" + kind + "\",\"text\":" + json_esc(t) + ",\"pages\":" + std::to_string(pages) +
            ",\"chars\":" + std::to_string(t.size()) + "}";
 }
+
+// =============================================================================================
+// Office files for the coding agent: a text view with addresses ([p12], [slide 3 p2], Sheet1!B4) and edits written
+// back into the original file. Only the changed text runs / cells are touched; everything else in the archive
+// (styles, images, formulas elsewhere) is copied as it was. Archives are rewritten with stored (uncompressed) entries.
+// =============================================================================================
+namespace {
+uint32_t crc32z(const std::string& s) {
+    static uint32_t T[256]; static bool init = false;
+    if (!init) { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; T[i] = c; } init = true; }
+    uint32_t c = 0xFFFFFFFFu;
+    for (unsigned char b : s) c = T[(c ^ b) & 255] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+// Entries in their original archive order.
+std::vector<std::pair<std::string, std::string>> unzip_all(const std::string& z) {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto u16 = [&](size_t o) { return o + 2 <= z.size() ? (unsigned)(uint8_t)z[o] | (unsigned)(uint8_t)z[o + 1] << 8 : 0u; };
+    auto u32 = [&](size_t o) { return o + 4 <= z.size() ? u16(o) | u16(o + 2) << 16 : 0u; };
+    size_t eocd = std::string::npos;
+    for (size_t i = z.size() >= 22 ? z.size() - 22 : 0;; i--) { if (u32(i) == 0x06054b50) { eocd = i; break; } if (!i || i + 65557 < z.size()) break; }
+    if (eocd == std::string::npos) return out;
+    size_t n = u16(eocd + 10), cd = u32(eocd + 16);
+    for (size_t k = 0; k < n && cd + 46 <= z.size() && u32(cd) == 0x02014b50; k++) {
+        unsigned method = u16(cd + 10), csize = u32(cd + 20), nlen = u16(cd + 28), elen = u16(cd + 30), clen = u16(cd + 32);
+        size_t loc = u32(cd + 42);
+        std::string name = z.substr(cd + 46, nlen);
+        cd += 46 + nlen + elen + clen;
+        if (loc + 30 > z.size() || u32(loc) != 0x04034b50) return {};
+        size_t data = loc + 30 + u16(loc + 26) + u16(loc + 28);
+        if (data + csize > z.size()) return {};
+        std::string d;
+        if (method == 0) d = z.substr(data, csize);
+        else if (method != 8 || !inflate_raw((const uint8_t*)z.data() + data, csize, d)) return {};
+        out.push_back({name, std::move(d)});
+    }
+    return out;
+}
+std::string zip_store(const std::vector<std::pair<std::string, std::string>>& f) {
+    std::string z, cd;
+    auto p16 = [](std::string& s, unsigned v) { s += (char)(v & 255); s += (char)(v >> 8 & 255); };
+    auto p32 = [&](std::string& s, uint32_t v) { p16(s, v & 0xFFFF); p16(s, v >> 16); };
+    for (auto& e : f) {
+        const uint32_t crc = crc32z(e.second), off = (uint32_t)z.size(), sz = (uint32_t)e.second.size();
+        p32(z, 0x04034b50); p16(z, 20); p16(z, 0); p16(z, 0); p16(z, 0); p16(z, 0x21); p32(z, crc); p32(z, sz); p32(z, sz); p16(z, (unsigned)e.first.size()); p16(z, 0);
+        z += e.first; z += e.second;
+        p32(cd, 0x02014b50); p16(cd, 20); p16(cd, 20); p16(cd, 0); p16(cd, 0); p16(cd, 0); p16(cd, 0x21); p32(cd, crc); p32(cd, sz); p32(cd, sz);
+        p16(cd, (unsigned)e.first.size()); p16(cd, 0); p16(cd, 0); p16(cd, 0); p16(cd, 0); p32(cd, 0); p32(cd, off); cd += e.first;
+    }
+    const uint32_t cdo = (uint32_t)z.size();
+    z += cd;
+    p32(z, 0x06054b50); p16(z, 0); p16(z, 0); p16(z, (unsigned)f.size()); p16(z, (unsigned)f.size()); p32(z, (uint32_t)cd.size()); p32(z, cdo); p16(z, 0);
+    return z;
+}
+std::string xdec(std::string t) {
+    for (auto [e, r] : std::initializer_list<std::pair<const char*, const char*>>{{"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}}) {
+        size_t p = 0; while ((p = t.find(e, p)) != std::string::npos) { t.replace(p, strlen(e), r); p += strlen(r); }
+    }
+    return t;
+}
+std::string xenc(const std::string& t) {
+    std::string o;
+    for (char c : t) { if (c == '&') o += "&amp;"; else if (c == '<') o += "&lt;"; else if (c == '>') o += "&gt;"; else if (c == '"') o += "&quot;"; else o += c; }
+    return o;
+}
+// The text runs of one paragraph: positions of each run's text in the XML.
+struct Run { size_t open, ts, te; std::string text; };   // open: '<' of the run tag; [ts, te): its text
+struct Para { size_t s, e; std::vector<Run> runs; std::string text; };
+std::vector<Para> paragraphs(const std::string& x, const std::string& pt, const std::string& rt) {
+    std::vector<Para> ps;
+    const std::string po = "<" + pt, pc = "</" + pt + ">", ro = "<" + rt;
+    size_t i = 0;
+    while ((i = x.find(po, i)) != std::string::npos) {
+        const char c = x[i + po.size()];
+        if (c != '>' && c != ' ') { i++; continue; }
+        size_t e = x.find(pc, i);
+        if (e == std::string::npos) break;
+        Para p; p.s = i; p.e = e;
+        size_t r = i;
+        while ((r = x.find(ro, r)) != std::string::npos && r < e) {
+            const char d = x[r + ro.size()];
+            size_t gt = x.find('>', r);
+            if ((d != '>' && d != ' ') || gt == std::string::npos || x[gt - 1] == '/') { r++; continue; }
+            size_t te = x.find('<', gt);
+            Run rn; rn.open = r; rn.ts = gt + 1; rn.te = te; rn.text = xdec(x.substr(gt + 1, te - gt - 1));
+            p.text += rn.text; p.runs.push_back(rn);
+            r = te;
+        }
+        ps.push_back(p);
+        i = e;
+    }
+    return ps;
+}
+// Replace `old` (exactly once in the part) with `nw`, rewriting only the runs it covers.
+int replace_in_part(std::string& x, const std::string& pt, const std::string& rt, const std::string& old, const std::string& nw, bool apply) {
+    auto ps = paragraphs(x, pt, rt);
+    int hits = 0; const Para* hp = nullptr; size_t hs = 0;
+    for (auto& p : ps) for (size_t at = p.text.find(old); at != std::string::npos; at = p.text.find(old, at + 1)) { hits++; hp = &p; hs = at; }
+    if (hits != 1 || !apply) return hits;
+    // map [hs, hs + len) onto runs
+    size_t pos = 0, he = hs + old.size(); int r0 = -1, r1 = -1; size_t o0 = 0, o1 = 0;
+    for (int k = 0; k < (int)hp->runs.size(); k++) {
+        size_t a = pos, b = pos + hp->runs[k].text.size();
+        if (r0 < 0 && hs >= a && hs < b) { r0 = k; o0 = hs - a; }
+        if (he > a && he <= b) { r1 = k; o1 = he - a; }
+        pos = b;
+    }
+    if (old.empty() || r0 < 0) return 0;
+    if (r1 < 0) r1 = r0;
+    std::vector<std::string> nt(hp->runs.size());
+    for (size_t k = 0; k < nt.size(); k++) nt[k] = hp->runs[k].text;
+    nt[r0] = hp->runs[r0].text.substr(0, o0) + nw + hp->runs[r1].text.substr(o1);
+    for (int k = r0 + 1; k <= r1; k++) nt[k].clear();
+    for (int k = r1; k >= r0; k--) {   // back to front so earlier offsets stay valid
+        const Run& rn = hp->runs[k];
+        x.replace(rn.ts, rn.te - rn.ts, xenc(nt[k]));
+        if (rt == "w:t" && x.compare(rn.open, 5, "<w:t>") == 0) x.replace(rn.open, 5, "<w:t xml:space=\"preserve\">");
+    }
+    return 1;
+}
+bool office_parts(const std::string& ext, const std::string& name) {
+    if (ext == "docx") return name == "word/document.xml" || name.rfind("word/header", 0) == 0 || name.rfind("word/footer", 0) == 0;
+    if (ext == "pptx") return name.rfind("ppt/slides/slide", 0) == 0 && name.find("_rels") == std::string::npos;
+    return false;
+}
+int col_index(const std::string& ref) { int c = 0; for (char ch : ref) { if (ch < 'A' || ch > 'Z') break; c = c * 26 + (ch - 'A' + 1); } return c; }
+std::string sheet_part(const std::vector<std::pair<std::string, std::string>>& f, const std::string& sheet, std::string& title) {
+    // workbook.xml: <sheet name="X" ... r:id="rIdN"/>; rels: Id -> Target
+    auto get = [&](const std::string& n) -> const std::string* { for (auto& e : f) if (e.first == n) return &e.second; return nullptr; };
+    const std::string* wb = get("xl/workbook.xml"); const std::string* rels = get("xl/_rels/workbook.xml.rels");
+    if (!wb || !rels) return "";
+    std::string rid; size_t i = 0;
+    while ((i = wb->find("<sheet ", i)) != std::string::npos) {
+        size_t e = wb->find('>', i); std::string tag = wb->substr(i, e - i);
+        auto attr = [&](const std::string& a) { size_t p = tag.find(" " + a + "=\""); if (p == std::string::npos) return std::string(); p += a.size() + 3; return xdec(tag.substr(p, tag.find('"', p) - p)); };
+        if (sheet.empty() || attr("name") == sheet) { rid = attr("r:id"); title = attr("name"); break; }
+        i = e;
+    }
+    if (rid.empty()) return "";
+    size_t r = rels->find("Id=\"" + rid + "\"");
+    if (r == std::string::npos) return "";
+    size_t rs = rels->rfind('<', r), re = rels->find('>', r);
+    std::string tag = rels->substr(rs, re - rs);
+    size_t t = tag.find("Target=\""); if (t == std::string::npos) return "";
+    std::string target = tag.substr(t + 8, tag.find('"', t + 8) - t - 8);
+    if (target.rfind("/xl/", 0) == 0) return target.substr(1);
+    return "xl/" + target;
+}
+}  // namespace
+
+// Text view with addresses the agent can cite back. ok = false for files we can't read this way.
+bool office_view(const std::string& ext, const std::string& z, std::string& out) {
+    auto f = unzip_all(z);
+    if (f.empty()) return false;
+    out.clear();
+    if (ext == "docx" || ext == "pptx") {
+        std::vector<std::pair<std::string, const std::string*>> parts;
+        for (auto& e : f) if (office_parts(ext, e.first)) parts.push_back({e.first, &e.second});
+        if (ext == "pptx") std::sort(parts.begin(), parts.end(), [](auto& a, auto& b) { return atoi(a.first.c_str() + 16) < atoi(b.first.c_str() + 16); });
+        else std::stable_sort(parts.begin(), parts.end(), [](auto& a, auto& b) { return (a.first == "word/document.xml") > (b.first == "word/document.xml"); });
+        for (auto& p : parts) {
+            const bool doc = ext == "docx";
+            std::string label = doc ? (p.first == "word/document.xml" ? "" : p.first.substr(5, p.first.size() - 9) + " ") : "slide " + std::to_string(atoi(p.first.c_str() + 16)) + " ";
+            if (!doc) out += "=== Slide " + std::to_string(atoi(p.first.c_str() + 16)) + " ===\n";
+            int k = 0;
+            for (auto& para : paragraphs(*p.second, doc ? "w:p" : "a:p", doc ? "w:t" : "a:t")) {
+                k++;
+                if (!para.text.empty()) out += "[" + label + "p" + std::to_string(k) + "] " + para.text + "\n";
+            }
+        }
+        return true;
+    }
+    if (ext == "xlsx") {
+        std::vector<std::string> shared;
+        for (auto& e : f) if (e.first == "xl/sharedStrings.xml") {
+            size_t i = 0; const std::string& x = e.second;
+            while ((i = x.find("<si>", i)) != std::string::npos) { size_t q = x.find("</si>", i); std::string t; for (auto& r : paragraphs("<p>" + x.substr(i, q - i) + "</p>", "p", "t")) t += r.text; shared.push_back(t); i = q; }
+        }
+        for (int s = 0;; s++) {
+            std::string title, part;
+            {   // nth sheet in workbook order
+                for (auto& e : f) if (e.first == "xl/workbook.xml") {
+                    size_t i = 0; int k = 0; const std::string& wb = e.second;
+                    while ((i = wb.find("<sheet ", i)) != std::string::npos) { if (k++ == s) { size_t p = wb.find("name=\"", i) + 6; title = xdec(wb.substr(p, wb.find('"', p) - p)); break; } i++; }
+                }
+                if (title.empty()) break;
+                std::string t2; part = sheet_part(f, title, t2);
+            }
+            out += "=== Sheet " + title + " ===\n";
+            for (auto& e : f) if (e.first == part) {   // the next empty row, so "add a row" needs no guessing
+                int last = 0;
+                for (size_t r = 0; (r = e.second.find("<row ", r)) != std::string::npos; r++) { size_t q = e.second.find("r=\"", r); if (q != std::string::npos && q < e.second.find('>', r)) last = std::max(last, atoi(e.second.c_str() + q + 3)); }
+                out += "(rows 1-" + std::to_string(last) + " are used; the next empty row is " + std::to_string(last + 1) + ")\n";
+            }
+            for (auto& e : f) if (e.first == part) {
+                const std::string& x = e.second; size_t c = 0;
+                while ((c = x.find("<c ", c)) != std::string::npos) {
+                    size_t gt = x.find('>', c);
+                    std::string tag = x.substr(c, gt - c);
+                    size_t rp = tag.find("r=\""); std::string ref = rp == std::string::npos ? "?" : tag.substr(rp + 3, tag.find('"', rp + 3) - rp - 3);
+                    if (x[gt - 1] == '/') { c = gt; continue; }
+                    size_t ce = x.find("</c>", gt); std::string cell = x.substr(gt + 1, ce - gt - 1);
+                    std::string val, fml;
+                    size_t fp = cell.find("<f"); if (fp != std::string::npos) { size_t a = cell.find('>', fp); if (cell[a - 1] != '/') fml = xdec(cell.substr(a + 1, cell.find("</f>", a) - a - 1)); }
+                    size_t v = cell.find("<v>"); if (v != std::string::npos) val = xdec(cell.substr(v + 3, cell.find("</v>", v) - v - 3));
+                    if (tag.find("t=\"s\"") != std::string::npos) { int k = atoi(val.c_str()); val = k >= 0 && k < (int)shared.size() ? shared[k] : ""; }
+                    else if (tag.find("t=\"inlineStr\"") != std::string::npos) { val.clear(); for (auto& r : paragraphs("<p>" + cell + "</p>", "p", "t")) val += r.text; }
+                    if (!val.empty() || !fml.empty()) out += title + "!" + ref + ": " + (fml.empty() ? val : "=" + fml + "  (" + val + ")") + "\n";
+                    c = ce;
+                }
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// docx / pptx: replace text (must occur exactly once across the document's text). Returns an error or "".
+std::string office_replace(const std::string& ext, std::string& z, const std::string& old, const std::string& nw) {
+    auto f = unzip_all(z);
+    if (f.empty()) return "could not open the file (damaged or encrypted?)";
+    const bool doc = ext == "docx";
+    int hits = 0;
+    for (auto& e : f) if (office_parts(ext, e.first)) hits += replace_in_part(e.second, doc ? "w:p" : "a:p", doc ? "w:t" : "a:t", old, nw, false);
+    if (hits == 0) return "text not found (it must sit inside one paragraph; copy it exactly from read_file without the [p..] label)";
+    if (hits > 1) return "text found " + std::to_string(hits) + " times; include more words so it matches once";
+    for (auto& e : f) if (office_parts(ext, e.first) && replace_in_part(e.second, doc ? "w:p" : "a:p", doc ? "w:t" : "a:t", old, nw, false) == 1) {
+        replace_in_part(e.second, doc ? "w:p" : "a:p", doc ? "w:t" : "a:t", old, nw, true);
+        break;
+    }
+    z = zip_store(f);
+    return "";
+}
+
+// xlsx: set one cell (number, text, or a formula starting with "="). sheet "" = the first sheet.
+std::string xlsx_set_cell(std::string& z, const std::string& sheet, std::string ref, const std::string& value) {
+    for (auto& c : ref) c = (char)toupper((unsigned char)c);
+    size_t d = 0; while (d < ref.size() && isalpha((unsigned char)ref[d])) d++;
+    if (!d || d == ref.size() || atoi(ref.c_str() + d) <= 0) return "bad cell reference (use like B4)";
+    const int row = atoi(ref.c_str() + d), col = col_index(ref);
+    auto f = unzip_all(z);
+    if (f.empty()) return "could not open the workbook";
+    std::string title, part = sheet_part(f, sheet, title);
+    if (part.empty()) return sheet.empty() ? "workbook has no sheets" : "no sheet named \"" + sheet + "\"";
+    std::string* x = nullptr;
+    for (auto& e : f) if (e.first == part) x = &e.second;
+    if (!x) return "sheet data missing";
+    // new cell body
+    std::string body, type;
+    char* endp = nullptr; strtod(value.c_str(), &endp);
+    if (!value.empty() && value[0] == '=') {
+        body = "<f>" + xenc(value.substr(1)) + "</f>";
+        for (auto& e : f) if (e.first == "xl/workbook.xml" && e.second.find("fullCalcOnLoad") == std::string::npos) {   // no cached value: Excel recalculates on open
+            size_t c = e.second.find("<calcPr");
+            if (c != std::string::npos) e.second.insert(c + 7, " fullCalcOnLoad=\"1\"");
+            else { size_t w = e.second.find("</workbook>"); if (w != std::string::npos) e.second.insert(w, "<calcPr fullCalcOnLoad=\"1\"/>"); }
+        }
+    }
+    else if (!value.empty() && endp && *endp == 0) body = "<v>" + value + "</v>";
+    else { type = " t=\"inlineStr\""; body = "<is><t xml:space=\"preserve\">" + xenc(value) + "</t></is>"; }
+    auto strip_t = [](std::string tag) { size_t p = tag.find(" t=\""); if (p != std::string::npos) tag.erase(p, tag.find('"', p + 4) - p + 1); return tag; };
+    // existing cell?
+    const std::string key = "r=\"" + ref + "\"";
+    size_t c = 0;
+    while ((c = x->find("<c ", c)) != std::string::npos) {
+        size_t gt = x->find('>', c); std::string tag = x->substr(c, gt - c);
+        if (tag.find(key) != std::string::npos) {
+            const bool self = (*x)[gt - 1] == '/';
+            size_t end = self ? gt + 1 : x->find("</c>", gt) + 4;
+            std::string open = strip_t(self ? tag.substr(0, tag.size() - 1) : tag);
+            while (!open.empty() && open.back() == ' ') open.pop_back();
+            x->replace(c, end - c, open + type + ">" + body + "</c>");
+            z = zip_store(f);
+            return "";
+        }
+        c = gt;
+    }
+    // new cell: into its row (in column order), creating the row (in row order) if needed
+    const std::string cell = "<c r=\"" + ref + "\"" + type + ">" + body + "</c>";
+    size_t sd = x->find("<sheetData"); if (sd == std::string::npos) return "sheet has no data section";
+    size_t sdg = x->find('>', sd);
+    if ((*x)[sdg - 1] == '/') { x->replace(sd, sdg - sd + 1, "<sheetData><row r=\"" + std::to_string(row) + "\">" + cell + "</row></sheetData>"); z = zip_store(f); return ""; }
+    size_t r = sdg, sde = x->find("</sheetData>", sdg);
+    while ((r = x->find("<row ", r)) != std::string::npos && r < sde) {
+        size_t gt = x->find('>', r); std::string tag = x->substr(r, gt - r);
+        size_t rp = tag.find("r=\""); const int rn = rp == std::string::npos ? 0 : atoi(tag.c_str() + rp + 3);
+        if (rn == row) {
+            if ((*x)[gt - 1] == '/') { x->replace(r, gt - r + 1, tag.substr(0, tag.size() - 1) + ">" + cell + "</row>"); z = zip_store(f); return ""; }
+            size_t re = x->find("</row>", gt), q = gt + 1, at = re;
+            while ((q = x->find("<c ", q)) != std::string::npos && q < re) {
+                size_t g2 = x->find('>', q); std::string t2 = x->substr(q, g2 - q); size_t p2 = t2.find("r=\"");
+                if (p2 != std::string::npos && col_index(t2.substr(p2 + 3)) > col) { at = q; break; }
+                q = g2;
+            }
+            x->insert(at, cell); z = zip_store(f); return "";
+        }
+        if (rn > row) { x->insert(r, "<row r=\"" + std::to_string(row) + "\">" + cell + "</row>"); z = zip_store(f); return ""; }
+        r = gt;
+    }
+    x->insert(sde, "<row r=\"" + std::to_string(row) + "\">" + cell + "</row>");
+    z = zip_store(f);
+    return "";
+}
