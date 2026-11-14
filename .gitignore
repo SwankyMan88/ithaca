@@ -10,3 +10,4 @@ ithaca.json
 *.gguf
 *.safetensors
 port.txt
+code_undo/
