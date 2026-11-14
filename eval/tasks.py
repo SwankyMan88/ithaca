@@ -99,6 +99,13 @@ def cart_project(root):
     w(root, 'README.md', '# Shop\n\nA tiny shopping cart. Run the tests with `python tests/test_cart.py`.\n')
 
 
+def fixed_cart_project(root):
+    """The cart without its bugs: for tasks that build on it."""
+    cart_project(root)
+    w(root, 'shop/cart.py', CART.replace('self.items[name]["qty"] = qty', 'self.items[name]["qty"] += qty').replace('i["price"] for i', 'i["price"] * i["qty"] for i'))
+    w(root, 'tests/test_cart.py', CART_TEST)
+
+
 def chk_fix_bugs(root, reply):
     if r(root, 'tests/test_cart.py') != CART_TEST:
         return False, 'changed the test instead of the code'
@@ -207,12 +214,12 @@ def snapshot(root):
 
 TASKS = [
     dict(id='fix_bugs', setup=cart_project, prompt='The test in tests/test_cart.py fails. Find the bugs in the cart and fix them.', check=chk_fix_bugs),
-    dict(id='feature', setup=cart_project, prompt='Add an apply_discount(percent) method to Cart: it applies a percentage discount to total(). 0 means no discount, and anything outside 0-100 must raise ValueError.', check=chk_discount),
+    dict(id='feature', setup=fixed_cart_project, prompt='Add an apply_discount(percent) method to Cart: it applies a percentage discount to total(). 0 means no discount, and anything outside 0-100 must raise ValueError.', check=chk_discount),
     dict(id='rename', setup=tax_project, prompt='Rename the function calc_tax to compute_tax everywhere in the project.', check=chk_rename),
     dict(id='docx', setup=docs_project, prompt='In report.docx, change the title to "2026 Annual Report".', check=chk_docx),
     dict(id='xlsx', setup=budget_project, prompt='In budget.xlsx, add a row for Utilities costing 180.', check=chk_xlsx),
     dict(id='config', setup=config_project, prompt='Change the server port in config.json to 9090.', check=chk_config),
     dict(id='readme', setup=tax_project, prompt='Write a README.md for this project: a short description and a Usage section that shows how to run report.py and how to call calc_tax from Python.', check=chk_readme),
-    dict(id='question', setup=cart_project, prompt='How does Cart.total() work? Just explain, do not change any files.', check=None),   # check: chk_question (no file may change)
+    dict(id='question', setup=fixed_cart_project, prompt='How does Cart.total() work? Just explain, do not change any files.', check=None),   # check: chk_question (no file may change)
 ]
 
