@@ -12,3 +12,4 @@ ithaca.json
 port.txt
 code_undo/
 eval/results/
+eval/__pycache__/
