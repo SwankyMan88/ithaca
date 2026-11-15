@@ -1402,7 +1402,7 @@ function cwParse(t){
   if(fm){const tool=CODE_TOOLS.find(x=>x[0]==fm[1]),args={};let m;const re=/<parameter=([\w.-]+)>\n?([\s\S]*?)\n?<\/parameter>/g;
     while((m=re.exec(fm[2]))){let v=m[2];const ty=tool&&tool[2][m[1]]&&tool[2][m[1]][0];if(ty=='integer')v=parseInt(v,10);else if(ty=='boolean')v=/^true$/i.test(v.trim());args[m[1]]=v}
     return{name:fm[1],args}}
-  try{const j=cwJson(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
+  try{const j=cwJson(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return cwParse(s)||{bad:s.slice(0,300)}}}   // several calls in one block: the first valid one
 // line diff: common head/tail trimmed, LCS on the middle, 3 lines of context
 function cwDiff(a,b){
   const A=a?a.split('\n'):[],B=b?b.split('\n'):[];let s=0;   // an empty side has no lines (a new or emptied file)

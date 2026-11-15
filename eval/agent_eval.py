@@ -114,7 +114,7 @@ def parse_call(text, tool_names):
             j = loads_loose(s)
             return {'name': j.get('name'), 'args': j.get('arguments') or j.get('parameters') or {}}
         except Exception:
-            return {'bad': s[:300]}
+            return parse_call(s, tool_names) or {'bad': s[:300]}   # several calls in one block: the first valid one
     body = think_split(text)[1]
     for m in re.finditer(r'\{\s*"name"\s*:', body):   # bare / fenced JSON naming one of the tools
         depth, q, esc, k = 0, False, False, m.start()

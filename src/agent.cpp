@@ -300,7 +300,27 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         const std::string e = ext_of(p), old = a["old"].str(), nw = a["new"].str();
         if (old.empty()) return res(false, "old is empty; to add text, include a nearby line in old and repeat it in new");
         if (e == "docx" || e == "pptx") {
-            std::string z = s, err = office_replace(e, z, old, nw);
+            // Models often copy the [p1] / [slide 2 p3] labels, or several paragraphs at once: drop the labels and
+            // apply the paragraphs that changed one by one.
+            auto lines = [](const std::string& t) {
+                std::vector<std::string> v; size_t b = 0;
+                for (;;) {
+                    size_t n = t.find('\n', b); std::string l = t.substr(b, n == std::string::npos ? std::string::npos : n - b);
+                    if (!l.empty() && l.back() == '\r') l.pop_back();
+                    if (l.size() > 2 && l[0] == '[') { size_t r = l.find("] "); if (r != std::string::npos && r < 24) l = l.substr(r + 2); }
+                    v.push_back(l);
+                    if (n == std::string::npos) break; b = n + 1;
+                }
+                return v;
+            };
+            std::vector<std::string> ol = lines(old), nl = lines(nw);
+            std::string z = s, err;
+            if (ol.size() == nl.size()) {
+                int changed = 0;
+                for (size_t k = 0; k < ol.size() && err.empty(); k++)
+                    if (ol[k] != nl[k]) { if (ol[k].empty()) err = "old has an empty paragraph"; else err = office_replace(e, z, ol[k], nl[k]); changed++; }
+                if (!changed) err = "old and new are the same";
+            } else err = office_replace(e, z, old, nw);
             if (!err.empty()) return res(false, err);
             if (dry) return done("", "", old, nw, a["path"].str());
             std::string u = new_undo(p, true, s);
