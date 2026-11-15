@@ -214,7 +214,7 @@ def snapshot(root):
 
 TASKS = [
     dict(id='fix_bugs', setup=cart_project, prompt='The test in tests/test_cart.py fails. Find the bugs in the cart and fix them.', check=chk_fix_bugs),
-    dict(id='feature', setup=fixed_cart_project, prompt='Add an apply_discount(percent) method to Cart: it applies a percentage discount to total(). 0 means no discount, and anything outside 0-100 must raise ValueError.', check=chk_discount),
+    dict(id='feature', setup=fixed_cart_project, prompt='Add an apply_discount(percent) method to Cart: it sets a percentage discount that total() then applies (calling it again replaces the discount). 0 means no discount, and anything outside 0-100 must raise ValueError.', check=chk_discount),
     dict(id='rename', setup=tax_project, prompt='Rename the function calc_tax to compute_tax everywhere in the project.', check=chk_rename),
     dict(id='docx', setup=docs_project, prompt='In report.docx, change the title to "2026 Annual Report".', check=chk_docx),
     dict(id='xlsx', setup=budget_project, prompt='In budget.xlsx, add a row for Utilities costing 180.', check=chk_xlsx),

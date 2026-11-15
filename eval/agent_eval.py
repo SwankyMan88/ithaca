@@ -74,7 +74,24 @@ def think_split(t):
 
 def loads_loose(s):
     """JSON as models write it: raw newlines/tabs inside strings are allowed (same as cwJson in ui.cpp)."""
-    return json.loads(s, strict=False)
+    try:
+        return json.loads(s, strict=False)
+    except ValueError:
+        pass
+    o, q, j = [], False, 0   # a stray \" outside a string ("new": \"x\") is a quote
+    while j < len(s):
+        c = s[j]
+        if q:
+            if c == '\\' and s[j + 1:j + 2] == '"' and re.match(r'\s*[,}\]:]', s[j + 2:j + 12]):
+                o.append('"'); q = False; j += 2; continue   # a stray \" closing the string
+            if c == '\\':
+                o.append(s[j:j + 2]); j += 2; continue
+            if c == '"': q = False
+        elif c == '\\' and s[j + 1:j + 2] == '"':
+            j += 1; continue
+        elif c == '"': q = True
+        o.append(c); j += 1
+    return json.loads(''.join(o), strict=False)
 
 
 def parse_call(text, tool_names):

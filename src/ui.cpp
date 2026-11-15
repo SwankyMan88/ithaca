@@ -1357,6 +1357,17 @@ How to work:
 - Call one tool at a time and wait for its result. If the user rejects a change, adjust it or ask.
 - When the task is done, stop calling tools and reply with a short summary of what you changed. If the request is unclear, ask instead of guessing.
 
+Example of a good session (a different project):
+User: The greeting is printed twice; fix it.
+You: Let me look at the code. <tool_call>{"name": "search", "arguments": {"pattern": "print("}}</tool_call>
+Tool: app.py:3:     print(greet())
+      app.py:4:     print(greet())
+You: Line 4 repeats line 3. <tool_call>{"name": "edit_file", "arguments": {"path": "app.py", "old": "    print(greet())\\n    print(greet())", "new": "    print(greet())"}}</tool_call>
+Tool: edited app.py
+You: <tool_call>{"name": "run_command", "arguments": {"command": "python app.py"}}</tool_call>
+Tool: Hello  [exit code 0]
+You: Fixed: app.py printed the greeting twice (line 4 duplicated line 3); I removed the extra line and checked that it now prints once.
+
 # Tools
 
 You may call one or more functions to assist with the user query.
@@ -1374,7 +1385,7 @@ For each function call, return a json object with function name and arguments wi
 function cwShow(b){return b.replace(/<tool_call>[\s\S]*$/,'').replace(/```(?:json)?\s*\{\s*"name"\s*:[\s\S]*$/,'').replace(/\{\s*"name"\s*:\s*"(list_dir|read_file|search|edit_file|write_file|set_cell|make_dir|rename|delete)"[\s\S]*$/,'').trim()}
 // JSON as models write it: raw newlines/tabs inside strings are escaped before parsing
 function cwJson(s){try{return JSON.parse(s)}catch(e){}let o='',q=false;
-  for(let j=0;j<s.length;j++){const c=s[j];if(q){if(c=='\\'){o+=c+(s[j+1]||'');j++;continue}if(c=='"')q=false;else if(c=='\n'){o+='\\n';continue}else if(c=='\r'){o+='\\r';continue}else if(c=='\t'){o+='\\t';continue}}else if(c=='"')q=true;o+=c}
+  for(let j=0;j<s.length;j++){const c=s[j];if(q){if(c=='\\'&&s[j+1]=='"'&&/^\s*[,}\]:]/.test(s.slice(j+2,j+12))){o+='"';q=false;j++;continue}if(c=='\\'){o+=c+(s[j+1]||'');j++;continue}if(c=='"')q=false;else if(c=='\n'){o+='\\n';continue}else if(c=='\r'){o+='\\r';continue}else if(c=='\t'){o+='\\t';continue}}else if(c=='\\'&&s[j+1]=='"')continue;else if(c=='"')q=true;o+=c}
   return JSON.parse(o)}
 function cwParse(t){
   t=t.replace(/<(\/?)tools>/g,'<$1tool_call>');   // a near-miss tag some models write
