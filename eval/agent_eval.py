@@ -20,12 +20,12 @@ ROOT = os.path.dirname(HERE)
 def post(port, path, body, timeout=900):
     req = urllib.request.Request(f'http://127.0.0.1:{port}{path}', data=json.dumps(body).encode(), method='POST', headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        return json.loads(r.read().decode('utf8', 'replace'))
 
 
 def get(port, path):
     with urllib.request.urlopen(f'http://127.0.0.1:{port}{path}', timeout=60) as r:
-        return json.loads(r.read())
+        return json.loads(r.read().decode('utf8', 'replace'))
 
 
 def chat(port, messages, temperature, max_tokens):
@@ -72,7 +72,13 @@ def think_split(t):
     return (m.group(1), t[:m.start()] + t[m.end():]) if m else ('', t)
 
 
+def loads_loose(s):
+    """JSON as models write it: raw newlines/tabs inside strings are allowed (same as cwJson in ui.cpp)."""
+    return json.loads(s, strict=False)
+
+
 def parse_call(text, tool_names):
+    text = re.sub(r'<(/?)tools>', r'<\1tool_call>', text)
     i = text.rfind('<tool_call>')
     if i >= 0:
         s = re.sub(r'</tool_call>[\s\S]*$', '', text[i + 11:]).strip()
@@ -88,7 +94,7 @@ def parse_call(text, tool_names):
                 args['replace_all'] = args['replace_all'].strip().lower() == 'true'
             return {'name': fm.group(1), 'args': args}
         try:
-            j = json.loads(s)
+            j = loads_loose(s)
             return {'name': j.get('name'), 'args': j.get('arguments') or j.get('parameters') or {}}
         except Exception:
             return {'bad': s[:300]}
@@ -108,7 +114,7 @@ def parse_call(text, tool_names):
                 depth -= 1
                 if depth == 0:
                     try:
-                        o = json.loads(body[k:j + 1])
+                        o = loads_loose(body[k:j + 1])
                         if o.get('name') in tool_names:
                             return {'name': o['name'], 'args': o.get('arguments') or o.get('parameters') or {}}
                     except Exception:

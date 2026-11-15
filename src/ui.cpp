@@ -1372,12 +1372,17 @@ For each function call, return a json object with function name and arguments wi
 </tool_call>`}
 // what the transcript shows of a reply: not the tool-call JSON (the card below it shows the call), nor what follows it
 function cwShow(b){return b.replace(/<tool_call>[\s\S]*$/,'').replace(/```(?:json)?\s*\{\s*"name"\s*:[\s\S]*$/,'').replace(/\{\s*"name"\s*:\s*"(list_dir|read_file|search|edit_file|write_file|set_cell|make_dir|rename|delete)"[\s\S]*$/,'').trim()}
+// JSON as models write it: raw newlines/tabs inside strings are escaped before parsing
+function cwJson(s){try{return JSON.parse(s)}catch(e){}let o='',q=false;
+  for(let j=0;j<s.length;j++){const c=s[j];if(q){if(c=='\\'){o+=c+(s[j+1]||'');j++;continue}if(c=='"')q=false;else if(c=='\n'){o+='\\n';continue}else if(c=='\r'){o+='\\r';continue}else if(c=='\t'){o+='\\t';continue}}else if(c=='"')q=true;o+=c}
+  return JSON.parse(o)}
 function cwParse(t){
+  t=t.replace(/<(\/?)tools>/g,'<$1tool_call>');   // a near-miss tag some models write
   const i=t.lastIndexOf('<tool_call>');
   if(i<0){   // some models skip the tags and write the JSON bare or in a code block: accept it when it names one of our tools
     const body=splitThink(t).body;let k=body.search(/\{\s*"name"\s*:/);
     while(k>=0){let d=0,q=false,e=-1;for(let j=k;j<body.length;j++){const c=body[j];if(q){if(c=='\\')j++;else if(c=='"')q=false;continue}if(c=='"')q=true;else if(c=='{')d++;else if(c=='}'&&--d==0){e=j;break}}
-      if(e<0)break;try{const o=JSON.parse(body.slice(k,e+1));if(CODE_TOOLS.some(x=>x[0]==o.name))return{name:o.name,args:o.arguments||o.parameters||{}}}catch(x){}
+      if(e<0)break;try{const o=cwJson(body.slice(k,e+1));if(CODE_TOOLS.some(x=>x[0]==o.name))return{name:o.name,args:o.arguments||o.parameters||{}}}catch(x){}
       const n=body.slice(e+1).search(/\{\s*"name"\s*:/);k=n<0?-1:e+1+n}
     return null}
   let s=t.slice(i+11).replace(/<\/tool_call>[\s\S]*$/,'').trim().replace(/^```(?:json)?\s*/,'').replace(/```\s*$/,'');
@@ -1386,10 +1391,11 @@ function cwParse(t){
   if(fm){const tool=CODE_TOOLS.find(x=>x[0]==fm[1]),args={};let m;const re=/<parameter=([\w.-]+)>\n?([\s\S]*?)\n?<\/parameter>/g;
     while((m=re.exec(fm[2]))){let v=m[2];const ty=tool&&tool[2][m[1]]&&tool[2][m[1]][0];if(ty=='integer')v=parseInt(v,10);else if(ty=='boolean')v=/^true$/i.test(v.trim());args[m[1]]=v}
     return{name:fm[1],args}}
-  try{const j=JSON.parse(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
+  try{const j=cwJson(s);return{name:j.name,args:j.arguments||j.parameters||{}}}catch(e){return{bad:s.slice(0,300)}}}
 // line diff: common head/tail trimmed, LCS on the middle, 3 lines of context
 function cwDiff(a,b){
-  const A=a?a.split('\n'):[],B=b?b.split('\n'):[];let s=0;   // an empty side has no lines (a new or emptied file)while(s<A.length&&s<B.length&&A[s]==B[s])s++;
+  const A=a?a.split('\n'):[],B=b?b.split('\n'):[];let s=0;   // an empty side has no lines (a new or emptied file)
+  while(s<A.length&&s<B.length&&A[s]==B[s])s++;
   let ea=A.length,eb=B.length;while(ea>s&&eb>s&&A[ea-1]==B[eb-1]){ea--;eb--}
   const x=A.slice(s,ea),y=B.slice(s,eb),rows=[];
   for(let i=0;i<s;i++)rows.push(['c',A[i],i+1]);

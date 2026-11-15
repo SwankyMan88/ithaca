@@ -156,8 +156,20 @@ std::string match_eol(const std::string& old, std::string s) {
     return o;
 }
 std::string lf(std::string s) { s.erase(std::remove(s.begin(), s.end(), '\r'), s.end()); return s; }
+// Tool output may hold raw bytes (a binary file, a command's codepage text): keep it valid UTF-8 for the JSON.
+std::string utf8_clean(const std::string& s) {
+    std::string o; o.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = (unsigned char)s[i]; int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        bool ok = n > 0 && i + n <= s.size() && !(n == 2 && c < 0xC2);
+        for (int k = 1; ok && k < n; k++) ok = ((unsigned char)s[i + k] >> 6) == 2;
+        if (ok && n == 1 && c < 0x20 && c != '\n' && c != '\r' && c != '\t') ok = false;
+        if (ok) { o.append(s, i, n); i += n; } else { o += "\xEF\xBF\xBD"; i++; }
+    }
+    return o;
+}
 std::string res(bool ok, const std::string& output, const std::string& extra = "") {
-    return "{\"ok\":" + std::string(ok ? "true" : "false") + ",\"output\":" + json_esc(output) + extra + "}";
+    return "{\"ok\":" + std::string(ok ? "true" : "false") + ",\"output\":" + json_esc(utf8_clean(output)) + extra + "}";
 }
 }  // namespace
 
@@ -340,9 +352,13 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         std::wstring p = P("path"); std::string s;
         if (p.empty() || ext_of(p) != "xlsx") return res(false, "set_cell works on .xlsx files in the workspace");
         if (!rd(p, s)) return res(false, "cannot read " + a["path"].str());
-        std::string z = s, err = xlsx_set_cell(z, a["sheet"].str(), a["cell"].str(), a["value"].str());
+        // the value may come as a JSON number or boolean, not only a string
+        const J& jv = a["value"]; std::string val = jv.str();
+        if (jv.t == J::NUM) { char b[40]; snprintf(b, sizeof b, "%.15g", jv.n); val = b; }
+        else if (jv.t == J::BOOL) val = jv.b ? "TRUE" : "FALSE";
+        std::string z = s, err = xlsx_set_cell(z, a["sheet"].str(), a["cell"].str(), val);
         if (!err.empty()) return res(false, err);
-        const std::string what = (a["sheet"].str().empty() ? "" : a["sheet"].str() + "!") + a["cell"].str() + " = " + a["value"].str();
+        const std::string what = (a["sheet"].str().empty() ? "" : a["sheet"].str() + "!") + a["cell"].str() + " = " + val;
         if (dry) return done("", "", "", what, a["path"].str());
         std::string u = new_undo(p, true, s);
         if (!wr(p, z)) return res(false, "could not write the file (is it open in Excel?)");
