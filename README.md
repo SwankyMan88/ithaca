@@ -54,6 +54,25 @@ Settings, chats and memories are kept next to the exe, so the folder is portable
 
 <img src="docs/demo-models.webp" alt="Browsing downloadable models and the system page">
 
+## Coding
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/coding-dark.svg">
+  <img src="docs/coding-light.svg" alt="The coding agent looks, changes, checks and reports; on Ithaca's test bench it passes 75% of tasks with Qwen3-Coder 30B">
+</picture>
+
+Open **Coding** in the sidebar, pick a folder, and ask for a change. The model works through a small set of tools, and you see each step as it happens.
+
+- **Real files.** It lists, searches, reads, creates, edits, renames and deletes files in the folder you picked, and nowhere else.
+- **Office files too.** Word, PowerPoint and Excel files are shown to the model as text with paragraph labels or cell addresses. Edits keep the formatting, and spreadsheet formulas recalculate when the file is opened.
+- **You stay in charge.** Every change is shown as a diff to approve, or applied straight away if you turn on auto-apply. Commands (tests, builds) always ask first, have a time limit, and stop with **Stop** or Esc.
+- **Undo.** Each change can be undone, or **Undo all** rolls back a whole task. Deleted files go to the Recycle Bin.
+- **Only this PC.** The file tools answer requests from this computer only, never through `--host` or from another website.
+
+Models trained for tool calls work best. Qwen3-Coder 30B-A3B runs at about 15–18 tokens a second on a 12 GB card, with the rest of the model in RAM.
+
+**The test bench.** `eval/agent_eval.py` gives the agent 8 small tasks (fix a bug, add a feature, rename a function, edit a Word file and a spreadsheet, change a config, write a README, answer a question). Each task has a hidden check, so pass rates are measured, not guessed. You can also compare system prompts. `eval/chat_eval.py` does the same for the Chat page with 12 auto-checked questions. Running these benches is what pushed the agent from 38% to 75%: most of the gains came from fixing how Ithaca reads tool calls, not from changing the prompt.
+
 ## Speed, compared with llama.cpp
 
 <picture>
