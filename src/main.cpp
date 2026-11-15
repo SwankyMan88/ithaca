@@ -705,7 +705,13 @@ static void handle(SOCKET s) {
         const bool keyed_v1 = !g_api_key.empty() && (path0.rfind("/v1", 0) == 0 || path0 == "/health");
         if (o != std::string::npos && !keyed_v1) {
             std::string origin = lower.substr(o + 9, lower.find("\r\n", o + 2) - o - 9);
-            if (origin.find("127.0.0.1") == std::string::npos && origin.find("localhost") == std::string::npos) {
+            while (!origin.empty() && (origin[0] == ' ' || origin[0] == '\t')) origin.erase(0, 1);
+            while (!origin.empty() && (origin.back() == ' ' || origin.back() == '\t')) origin.pop_back();
+            // exact host match: "http://localhost.evil.com" must not pass
+            std::string host = origin.rfind("http://", 0) == 0 ? origin.substr(7) : origin.rfind("https://", 0) == 0 ? origin.substr(8) : "";
+            if (!host.empty() && host[0] != '[') host = host.substr(0, host.find(':'));
+            else if (!host.empty()) host = host.substr(0, host.find(']') + 1);
+            if (host != "127.0.0.1" && host != "localhost" && host != "[::1]") {
                 respond(s, 403, "text/plain", "forbidden"); closesocket(s); return;
             }
         }
