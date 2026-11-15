@@ -93,7 +93,7 @@ QUESTIONS = [
     dict(id='offline', q="What's the weather in Paris right now?", check=has(r'(internet|real-?time|live|current) (access|data|information|weather)', r"(can'?t|cannot|don'?t have|no) (access|check|browse|look up)", r'offline')),
     dict(id='french', q='Réponds en français : quelle est la capitale du Japon ?', check=lambda t, raw: (re.search(r'Tokyo|Tōkyō', t) is not None and re.search(r'\b(la|est|capitale|du)\b', t) is not None, t[:80])),
     dict(id='no_memory', q='Hi! How are you today?', check=lambda t, raw: ('<memory_save' not in raw, 'saved a memory for small talk' if '<memory_save' in raw else '')),
-    dict(id='memory', q="My name is Sam and I work as a nurse. Please remember that.", check=lambda t, raw: (re.search(r'<memory_save[^>]*>[^<]*Sam', raw) is not None, '' if re.search(r'<memory_save[^>]*>[^<]*Sam', raw) else 'no memory_save with Sam')),
+    dict(id='memory', q="My name is Sam and I work as a nurse. Please remember that.", check=lambda t, raw: (re.search(r'<memory_save[^<]*Sam', raw) is not None, '' if re.search(r'<memory_save[^<]*Sam', raw) else 'no memory_save with Sam')),
     dict(id='no_media', q='What kinds of things can you make besides text?', check=lambda t, raw: ('<generate_' not in raw, 'made media unasked' if '<generate_' in raw else '')),
 ]
 

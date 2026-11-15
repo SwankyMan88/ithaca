@@ -578,7 +578,7 @@ function splitThink(t){const m=t.match(/^\s*(?:<think>)?([\s\S]*?)<\/think>([\s\
   if(m)return{think:m[1].trim(),body:m[2]};if(/^\s*<think>/.test(t))return{think:t.replace(/^\s*<think>/,'').trim(),body:'',open:true};return{think:'',body:t}}
 // Tools are only read from the final answer, never from the model's private reasoning.
 function parseTools(text){const body=splitThink(text).body,out=[];let m;TAG_RE.lastIndex=0;
-  while((m=TAG_RE.exec(body))){const a=attrs(m[2]);let val=(m[3]||'').replace(/<\/?[a-z_]+[^>]*>/g,'').trim();if(!val)val=(a.prompt||a.text||a.description||'').trim();out.push({tag:m[1],a,val})}
+  while((m=TAG_RE.exec(body))){const a=attrs(m[2]);let val=(m[3]||'').replace(/<\/?[a-z_]+[^>]*>/g,'').trim();if(!val)val=(a.prompt||a.text||a.content||a.description||'').trim();out.push({tag:m[1],a,val})}
   const alt=/\[\s*(generate_(?:image|video|audio))\s*[:=]\s*([^\]]+)\]/g;while((m=alt.exec(body)))out.push({tag:m[1],a:{},val:m[2].trim()});
   return out}
 function stripTags(t){return t.replace(TAG_RE,'').replace(/<\/?(memory_|generate_)[^>]*>/g,'').replace(/<(memory_|generate_)[\s\S]*$/,'')}
@@ -589,7 +589,7 @@ function applyMemoryOps(tools){const ops=[];
     if(t.tag=='memory_save'&&t.val&&t.val.length<600){
       if(memories.some(m=>m.text.toLowerCase()==t.val.toLowerCase()))continue;
       // only facts about the user ("User prefers ..."), never notes about the assistant itself
-      if(!/\buser\b/i.test(t.val)&&!(prefs.name&&t.val.toLowerCase().includes(prefs.name.toLowerCase())))continue;
+      if(!/\buser\b/i.test(t.val)&&!(prefs.name&&t.val.toLowerCase().includes(prefs.name.toLowerCase()))&&!/\bremember\b/i.test(lastRequest))continue;
       // not a description of the conversation itself ("User is asking how I am"), and only when the user said something
       // about themselves (or asked to be remembered) in the message being answered
       if(/\buser\s+(is\s+|was\s+|just\s+)?(ask|asked|asking|wants to know|wanted to know|greet|greeted|greeting|says|said|saying|is curious|wonder|inquir|request|thank|chatting|talking)/i.test(t.val))continue;
@@ -633,6 +633,7 @@ function systemPrompt(extra,lastUser){
 
 # Tools
 Call a tool by writing its tag in your final answer. Tags are invisible to the user; results come back to you automatically and you then continue the reply.
+Only make media when the user asks you to make something. If they ask what you can do, describe it in words and make nothing.
 - <generate_image width="W" height="H">detailed visual description</generate_image>: make ONE image when the user asks for one. Set width and height to the shape they need (phone wallpaper width="1170" height="2532", desktop wallpaper width="1920" height="1080", portrait width="832" height="1216", otherwise width="1024" height="1024"). Ithaca renders the closest size the image model handles well. Write the tag once, with plain text inside and nothing else. Order: one or two sentences saying what you are making, then the tag, then one short line after it (the picture appears between them). To change the picture you made before instead of making a new one, add edit="true".
 - <generate_video seconds="5">detailed description of subject, action, camera and style</generate_video>: make a short video.
 - <generate_audio kind="speech">exact text to speak</generate_audio>: say something out loud in the user's chosen voice (when they ask you to speak, read aloud or make a voice clip).
