@@ -192,9 +192,18 @@ def run_agent(port, ws, variant, prompt, tool_names, max_steps, log):
                 out = out[:14000] + '\n... (cut: read a smaller part)'
             out = ('' if ok else 'Error: ') + (out or 'done')
             log.append({'role': 'tool', 'name': call['name'], 'args': call['args'], 'ok': ok, 'output': out[:4000]})
+        # loop guard, as on the page: the same call with the same result is flagged, the third repeat stops the task
+        sig = json.dumps([call.get('name'), call.get('args', call.get('bad')), out])
+        if sig in m.setdefault('_seen', set()):
+            m['loops'] = m.get('loops', 0) + 1
+            if m['loops'] >= 3:
+                m['stopped_loop'] = True; m.pop('_seen'); break
+            out += '\n\n(Note from Ithaca: you already made this exact call and got this exact result. Do not repeat it. Try a different fix, or stop and explain what is blocking you.)'
+        m['_seen'].add(sig)
         msgs.append({'role': 'user', 'content': f'<tool_response>\n{out}\n</tool_response>'})
     else:
         m['hit_step_limit'] = True
+    m.pop('_seen', None)
     return final, m
 
 
