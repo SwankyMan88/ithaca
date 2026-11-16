@@ -1500,7 +1500,15 @@ function cwSetBusy(){const b=$('cwSend');if(b){b.innerHTML=ico(cwBusy?'stop':'up
 async function cwPick(){const r=await api('/api/code/pick',{});if(!r.path)return;cwSetRoot(r.path)}
 async function cwSetRoot(p){
   const r=await api('/api/code/check',{root:p});if(r.error){toast(r.error);return}
-  if(cw.root!=r.root){cw={root:r.root,name:r.root.split('\\').pop()};cs={items:[],msgs:[]}}
+  if(cw.root!=r.root){
+    if(cwBusy){toast('Stop the current task before switching folders');return}
+    // each folder keeps its own chat: park this one, bring back the new folder's last one
+    let all={};try{all=JSON.parse(localStorage.getItem('ithaca_code_by_root')||'{}')}catch(e){}
+    if(cw.root&&cs.items.length)all[cw.root]={items:cs.items.slice(-300),msgs:cs.msgs.slice(-160),t:Date.now()};
+    const back=all[r.root];delete all[r.root];
+    Object.keys(all).sort((a,b)=>all[b].t-all[a].t).slice(10).forEach(k=>delete all[k]);
+    try{localStorage.setItem('ithaca_code_by_root',JSON.stringify(all))}catch(e){}
+    cw={root:r.root,name:r.root.split('\\').pop()};cs=back?{items:back.items,msgs:back.msgs}:{items:[],msgs:[]}}
   prefs.code_recent=[r.root,...(prefs.code_recent||[]).filter(x=>x!=r.root)].slice(0,8);savePrefs();cwSave();drawCode()}
 async function cwTreeLoad(){
   const el=$('cwtree');if(!el)return;
