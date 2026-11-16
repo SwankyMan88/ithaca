@@ -168,6 +168,23 @@ std::string utf8_clean(const std::string& s) {
     }
     return o;
 }
+// Small models sometimes escape twice: the file text arrives as one line with literal \n in it. When text has no
+// real line break but does have \n sequences, undo that one level of escaping.
+std::string flat_fix(const std::string& t) {
+    size_t k = t.find("\\n");
+    if (t.find('\n') != std::string::npos || k == std::string::npos || t.find("\\n", k + 2) == std::string::npos) return t;
+    std::string o; o.reserve(t.size());
+    for (size_t i = 0; i < t.size(); i++) {
+        if (t[i] == '\\' && i + 1 < t.size()) {
+            char c = t[i + 1];
+            if (c == 'n') { o += '\n'; i++; continue; }
+            if (c == 't') { o += '\t'; i++; continue; }
+            if (c == '"' || c == '\\' || c == '\'') { o += c; i++; continue; }
+        }
+        o += t[i];
+    }
+    return o;
+}
 std::string res(bool ok, const std::string& output, const std::string& extra = "") {
     return "{\"ok\":" + std::string(ok ? "true" : "false") + ",\"output\":" + json_esc(utf8_clean(output)) + extra + "}";
 }
@@ -286,7 +303,7 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         std::string old; const bool had = rd(p, old);
         if (had && binary(old)) return res(false, "won't overwrite a binary file");
         if (name == "create_file" && had) return res(false, "file already exists; use edit_file or write_file");
-        std::string nw = had ? match_eol(old, a["content"].str()) : a["content"].str();
+        std::string nw = had ? match_eol(old, flat_fix(a["content"].str())) : flat_fix(a["content"].str());
         if (dry) return done("", "", lf(old), lf(nw), a["path"].str());
         // parent folders
         for (size_t i = root.size() + 1; (i = p.find(L'\\', i)) != std::wstring::npos; i++) CreateDirectoryW(p.substr(0, i).c_str(), 0);
@@ -298,7 +315,9 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         std::wstring p = P("path"); std::string s;
         if (p.empty()) return res(false, "path is outside the workspace");
         if (!rd(p, s)) return res(false, "cannot read " + a["path"].str());
-        const std::string e = ext_of(p), old = a["old"].str(), nw = a["new"].str();
+        std::string old = a["old"].str(), nw = a["new"].str();
+        if (s.find(old) == std::string::npos && flat_fix(old) != old && s.find(flat_fix(old)) != std::string::npos) { old = flat_fix(old); nw = flat_fix(nw); }
+        const std::string e = ext_of(p);
         if (old.empty()) return res(false, "old is empty; to add text, include a nearby line in old and repeat it in new");
         if (e == "docx" || e == "pptx") {
             // Models often copy the [p1] / [slide 2 p3] labels, or several paragraphs at once: drop the labels and

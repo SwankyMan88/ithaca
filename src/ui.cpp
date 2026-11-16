@@ -1496,10 +1496,12 @@ async function cwSend(text){
     if(r.error||cwStopReq||!call)break;
     let out=call.bad!=null?`Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}. File content goes in one ordinary JSON string: write new lines as \\n and escape double quotes as \\", and never use triple quotes (""").`:await cwRun(call);
     // loop guard: small models repeat the same call and get the same result over and over
-    if(step==0)cwSend.seen={},cwSend.loops=0;
+    // (only back-to-back repeats count: reading a file again after a failed fix is normal)
+    if(step==0)cwSend.seen={},cwSend.loops=0,cwSend.last='';
     const sig=(call.name||'')+'\u0001'+JSON.stringify(call.args||call.bad)+'\u0001'+out;
-    if(cwSend.seen[sig]){
-      if(++cwSend.loops>=3){cs.items.push({t:'ai',text:'',err:'Stopped: the model kept repeating the same step with the same result. A coder model such as Qwen3-Coder handles this better.'});cs.msgs.push({role:'user',content:`<tool_response>\n${out}\n</tool_response>`});break}
+    const again=sig==cwSend.last;cwSend.last=sig;if(!again)cwSend.loops=0;
+    if(again||(cwSend.seen[sig]&&!/^(read_file|list_dir|search)$/.test(call.name||''))){
+      if(again&&++cwSend.loops>=2){cs.items.push({t:'ai',text:'',err:'Stopped: the model kept repeating the same step with the same result. A coder model such as Qwen3-Coder handles this better.'});cs.msgs.push({role:'user',content:`<tool_response>\n${out}\n</tool_response>`});break}
       out+='\n\n(Note from Ithaca: you already made this exact call and got this exact result. Do not repeat it. Try a different fix, or stop and explain what is blocking you.)'}
     cwSend.seen[sig]=1;
     cs.msgs.push({role:'user',content:`<tool_response>\n${out}\n</tool_response>`});cwSave();

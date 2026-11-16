@@ -199,16 +199,19 @@ def run_agent(port, ws, variant, prompt, tool_names, max_steps, log):
             log.append({'role': 'tool', 'name': call['name'], 'args': call['args'], 'ok': ok, 'output': out[:4000]})
         # loop guard, as on the page: the same call with the same result is flagged, the third repeat stops the task
         sig = json.dumps([call.get('name'), call.get('args', call.get('bad')), out])
-        if sig in m.setdefault('_seen', set()):
+        again = sig == m.get('_last'); m['_last'] = sig
+        if not again: m['_run'] = 0
+        if again or (sig in m.setdefault('_seen', set()) and call.get('name') not in ('read_file', 'list_dir', 'search')):
             m['loops'] = m.get('loops', 0) + 1
-            if m['loops'] >= 3:
+            if again: m['_run'] = m.get('_run', 0) + 1
+            if m.get('_run', 0) >= 2:
                 m['stopped_loop'] = True; m.pop('_seen'); break
             out += '\n\n(Note from Ithaca: you already made this exact call and got this exact result. Do not repeat it. Try a different fix, or stop and explain what is blocking you.)'
         m['_seen'].add(sig)
         msgs.append({'role': 'user', 'content': f'<tool_response>\n{out}\n</tool_response>'})
     else:
         m['hit_step_limit'] = True
-    m.pop('_seen', None)
+    for k in ('_seen', '_last', '_run'): m.pop(k, None)
     return final, m
 
 
