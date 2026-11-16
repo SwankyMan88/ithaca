@@ -78,6 +78,11 @@ def loads_loose(s):
         return json.loads(s, strict=False)
     except ValueError:
         pass
+    s = re.sub(r'"""([\s\S]*?)"""', lambda m: json.dumps(m.group(1)), s)   # Python triple quotes
+    try:
+        return json.loads(s, strict=False)
+    except ValueError:
+        pass
     o, q, j = [], False, 0   # a stray \" outside a string ("new": \"x\") is a quote
     while j < len(s):
         c = s[j]
@@ -179,7 +184,7 @@ def run_agent(port, ws, variant, prompt, tool_names, max_steps, log):
             final = visible(body); break
         if 'bad' in call:
             m['bad_calls'] += 1
-            out = 'Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}.'
+            out = 'Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}. File content goes in one ordinary JSON string: write new lines as \\n and escape double quotes as \\", and never use triple quotes (""").'
         else:
             m['calls'] += 1
             m['changes'] += call['name'] in CHANGES; m['commands'] += call['name'] == 'run_command'

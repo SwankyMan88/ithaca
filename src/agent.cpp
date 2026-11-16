@@ -245,6 +245,7 @@ static std::string run_tool(const std::wstring& root, const std::string& name, c
         if (d.empty() || !is_dir(d)) return res(false, "not a folder inside the workspace: " + a["path"].str());
         std::string out = rel_of(root, d) + "/\n"; int n = 0;
         list_rec(root, d, 1, std::max(1, std::min(6, (int)a["depth"].num(2))) + 1, out, n);
+        if (!n) out += "(empty: there are no files or folders here yet)\n";
         return res(true, out);
     }
     if (name == "read_file") {

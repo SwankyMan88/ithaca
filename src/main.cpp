@@ -825,7 +825,10 @@ static void handle(SOCKET s) {
             for (auto& x : stops) { size_t p = pend.find(x); if (p < cut) cut = p; }
             if (cut != std::string::npos) { hit = true; if (cut) send_all(s, "data: {\"t\":" + json_esc(pend.substr(0, cut)) + "}\n\n"); pend.clear(); return false; }
             if (pend.size() <= hold) return true;
-            std::string out = pend.substr(0, pend.size() - hold); pend.erase(0, out.size());
+            size_t n = pend.size() - hold;
+            while (n > 0 && ((unsigned char)pend[n] & 0xC0) == 0x80) n--;   // never split a UTF-8 character
+            if (!n) return true;
+            std::string out = pend.substr(0, n); pend.erase(0, n);
             return send_all(s, "data: {\"t\":" + json_esc(out) + "}\n\n");
         });
         if (!hit && !pend.empty()) send_all(s, "data: {\"t\":" + json_esc(pend) + "}\n\n");

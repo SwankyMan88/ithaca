@@ -1358,7 +1358,7 @@ How to work:
 - Call one tool at a time and wait for its result. If the user rejects a change, adjust it or ask.
 - When the task is done, stop calling tools and reply with a short summary of what you changed. If the request is unclear, ask instead of guessing.
 
-Example of a good session (a different project):
+Example of a good session (a different project; these files are not in your folder):
 User: The greeting is printed twice; fix it.
 You: Let me look at the code. <tool_call>{"name": "search", "arguments": {"pattern": "print("}}</tool_call>
 Tool: app.py:3:     print(greet())
@@ -1385,7 +1385,9 @@ For each function call, return a json object with function name and arguments wi
 // what the transcript shows of a reply: not the tool-call JSON (the card below it shows the call), nor what follows it
 function cwShow(b){return b.replace(/<tool_call>[\s\S]*$/,'').replace(/```(?:json)?\s*\{\s*"name"\s*:[\s\S]*$/,'').replace(/\{\s*"name"\s*:\s*"(list_dir|read_file|search|edit_file|write_file|set_cell|make_dir|rename|delete)"[\s\S]*$/,'').trim()}
 // JSON as models write it: raw newlines/tabs inside strings are escaped before parsing
-function cwJson(s){try{return JSON.parse(s)}catch(e){}let o='',q=false;
+function cwJson(s){try{return JSON.parse(s)}catch(e){}
+  s=s.replace(/"""([\s\S]*?)"""/g,(_,c)=>JSON.stringify(c));   // Python triple quotes, as small models write file content
+  let o='',q=false;
   for(let j=0;j<s.length;j++){const c=s[j];if(q){if(c=='\\'&&s[j+1]=='"'&&/^\s*[,}\]:]/.test(s.slice(j+2,j+12))){o+='"';q=false;j++;continue}if(c=='\\'){o+=c+(s[j+1]||'');j++;continue}if(c=='"')q=false;else if(c=='\n'){o+='\\n';continue}else if(c=='\r'){o+='\\r';continue}else if(c=='\t'){o+='\\t';continue}}else if(c=='\\'&&s[j+1]=='"')continue;else if(c=='"')q=true;o+=c}
   return JSON.parse(o)}
 function cwParse(t){
@@ -1492,7 +1494,7 @@ async function cwSend(text){
     if(!call&&!r.error&&!cwStopReq&&step>0&&(cwSend.nudges=(step==1?0:cwSend.nudges||0))<2&&/\b(I will|I'll|I am going to|Let me|Let's|Now,? I|Next,? I)\b/i.test(cwShow(splitThink(r.text).body).slice(-400))){
       cwSend.nudges++;cs.msgs.push({role:'user',content:'Go ahead and do that now with a tool call. If everything is already done, give the summary instead.'});continue}
     if(r.error||cwStopReq||!call)break;
-    let out=call.bad!=null?`Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}.`:await cwRun(call);
+    let out=call.bad!=null?`Error: the tool call was not valid JSON. Write it as {"name": ..., "arguments": {...}}. File content goes in one ordinary JSON string: write new lines as \\n and escape double quotes as \\", and never use triple quotes (""").`:await cwRun(call);
     // loop guard: small models repeat the same call and get the same result over and over
     if(step==0)cwSend.seen={},cwSend.loops=0;
     const sig=(call.name||'')+'\u0001'+JSON.stringify(call.args||call.bad)+'\u0001'+out;
