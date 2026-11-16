@@ -3,6 +3,7 @@ models/
 outputs/
 voices/
 chats/
+code_chats/
 memories.json
 prefs.json
 ithaca.json

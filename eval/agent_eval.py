@@ -59,7 +59,7 @@ def page_source():
 
 def baseline(name):
     tools_js, sys_js = page_source()
-    js = tools_js + '\nlet cw={name:' + json.dumps(name) + '};\n' + sys_js + '\nprocess.stdout.write(JSON.stringify({prompt:cwSystem(),tools:CODE_TOOLS}));'
+    js = tools_js + '\nlet cw={name:' + json.dumps(name) + '},cs={items:[],msgs:[]};\n' + sys_js + '\nprocess.stdout.write(JSON.stringify({prompt:cwSystem(),tools:CODE_TOOLS}));'
     p = subprocess.run(['node', '-e', js], capture_output=True, text=True, encoding='utf8')
     if p.returncode:
         raise SystemExit('could not read the Coding page prompt with node:\n' + p.stderr[-800:])

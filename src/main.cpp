@@ -846,7 +846,7 @@ static void handle(SOCKET s) {
         sockaddr_storage pa{}; int pl = sizeof pa;
         const bool local = getpeername(s, (sockaddr*)&pa, &pl) == 0 && ((pa.ss_family == AF_INET && ((sockaddr_in*)&pa)->sin_addr.s_addr == htonl(INADDR_LOOPBACK)) ||
                            (pa.ss_family == AF_INET6 && IN6_IS_ADDR_LOOPBACK(&((sockaddr_in6*)&pa)->sin6_addr)));
-        if (path.rfind("/api/code/", 0) == 0 && !local) respond(s, 403, "application/json", "{\"error\":\"The coding agent only works on this PC.\"}");
+        if ((path.rfind("/api/code/", 0) == 0 || path.rfind("/api/codechats/", 0) == 0) && !local) respond(s, 403, "application/json", "{\"error\":\"The coding agent only works on this PC.\"}");
         else if (handle_store(method, path, body, code, type, out) || handle_hub(method, path, body, code, type, out) || handle_agent(method, path, body, code, type, out)) respond(s, code, type, out);
         else respond(s, 404, "text/plain", "not found");
     }

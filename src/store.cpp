@@ -175,6 +175,26 @@ bool handle_store(const std::string& method, const std::string& path, const std:
     };
     if (path == "/api/memories") { simple(L"memories.json", "[]"); return true; }
     if (path == "/api/prefs") { simple(L"prefs.json", "{}"); return true; }
+    // Coding chats, one file per folder: <store>\code_chats\<id>.json (the page derives the id from the folder path).
+    // Kept on disk in full, so they survive a browser change and can be read outside Ithaca.
+    if (path.rfind("/api/codechats/", 0) == 0) {
+        std::wstring dir = g_store_dir + L"\\code_chats"; CreateDirectoryW(dir.c_str(), nullptr);
+        std::string id = path.substr(15);
+        bool del = false;
+        if (id.size() > 7 && id.compare(id.size() - 7, 7, "/delete") == 0) { del = true; id.resize(id.size() - 7); }
+        if (!valid_id(id)) { code = 400; out = "{\"error\":\"bad id\"}"; return true; }
+        std::wstring p = dir + L"\\" + utf8_to_w(id) + L".json";
+        if (del) { DeleteFileW(p.c_str()); out = "{}"; }
+        else if (method == "POST") {
+            J j;
+            if (!json_parse(body, j)) { code = 400; out = "{\"error\":\"bad json\"}"; }
+            else out = write_file(p, body) ? "{}" : "{\"error\":\"write failed\"}";
+        } else {
+            bool ok; out = read_file(p, ok);
+            if (!ok) { code = 404; out = "{\"error\":\"not found\"}"; }
+        }
+        return true;
+    }
     if (path == "/api/chats" && method == "GET") {
         std::vector<std::pair<double, std::string>> rows;
         WIN32_FIND_DATAW fd;

@@ -307,7 +307,7 @@ body{touch-action:manipulation;height:100dvh}
 .galimg{position:relative}.galimg img{cursor:zoom-in;display:block}.galimg:hover .gbtns,.galimg:focus-within .gbtns{opacity:1}
 .galaudio .gbtns{position:static;opacity:1;margin-top:6px}
 @media(hover:none),(pointer:coarse){
-.gbtns,.hitem .x,.actions{opacity:1}
+.gbtns,.hitem .x,.cwrecent .x,.actions{opacity:1}
 .gbtns button,.gbtns a{width:42px;height:42px}
 .gallery{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
 .tbtn,.actions button,.hitem .x{min-width:40px;min-height:40px;display:inline-grid;place-items:center}
@@ -332,6 +332,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .sidesec{display:flex;flex-direction:column;min-height:0;flex:1;border-top:1px solid var(--line);padding-top:10px}
 .sidesec[hidden]{display:none}
 .cwrecent{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;color:var(--dim);font-size:13.5px;cursor:pointer;margin:0 8px}
+.cwrecent .x{opacity:0;padding:2px;border-radius:5px;flex:none}.cwrecent:hover .x{opacity:.7}.cwrecent .x:hover{opacity:1;background:var(--line)}
 .cwrecent span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cwrecent small{display:block;color:var(--faint);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cwrecent:hover,.cwrecent.on{background:var(--raise);color:var(--text)}
 .sidehint{color:var(--faint);font-size:12.5px;padding:6px 18px;line-height:1.5}
@@ -526,7 +527,7 @@ const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',body:JSON.stringify(b)});return r.json()}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
 
-let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',spec_decode:true};
+let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',spec_decode:true,compact_chat:true,compact_code:true};
 let memories=[],chats=[],chat=null,busy=false,hard=false,status={},abortCtl=null;
 
 /* ---------- markdown ---------- */
@@ -918,6 +919,9 @@ function pickSize(a,req){let w=+a.width||0,h=+a.height||0;
   return{width:Math.round(w*1000),height:Math.round(h*1000)}}
 async function generate(){
   if(!status.loaded&&!status.paused){toast('Load a model first (Settings → Model)');openSettings('model');return}
+  // automatic compaction: the chat is about to fill the context window
+  if(prefs.compact_chat&&chat.messages.length>=6){try{const c=await api('/api/count',{messages:apiMessages(chat.messages)});
+    if(c.ctx&&c.tokens+Math.min(prefs.max_tokens||2048,c.ctx/4)>c.ctx*0.85)await compactChat(true)}catch(e){}}
   setBusy(true);stopped=false;
   const ai={role:'assistant',content:''};chat.messages.push(ai);render();if(flyFrom)flyLogo();
   const el=$('log').querySelector('.col').lastChild.querySelector('.content');
@@ -1031,15 +1035,16 @@ window.editMsg=i=>{if(busy)return;const m=chat.messages[i];const d=$('log').quer
   $('ecancel').onclick=render;$('esave').onclick=async()=>{const v=ta.value.trim();if(!v)return;chat.messages=chat.messages.slice(0,i);chat.messages.push(Object.assign({},m,{content:v}));render();await generate()}};
 
 /* ---------- compact ---------- */
-$('compact').onclick=async()=>{
+$('compact').onclick=()=>compactChat();
+async function compactChat(auto){
   if(busy||!chat||chat.messages.length<4)return;
   const keep=2,old=chat.messages.slice(0,-keep);setBusy(true);toast('Compacting conversation…');
   const transcript=old.map(m=>`${m.role=='user'?'User':'Assistant'}: ${m.role=='assistant'?stripTags(splitThink(m.content).body):m.content}`).join('\n\n');
   const r=await stream([{role:'system',content:'You compress conversations so they can continue in a smaller context window. Write a dense summary in short bullet points, grouped under: Goal, Facts and decisions, Code and files (keep exact names, signatures and key snippets), Open questions / next steps. Preserve every name, number, requirement and preference. Do not add commentary or anything that was not in the conversation.'},
     {role:'user',content:(chat.summary?'Existing summary:\n'+chat.summary+'\n\n':'')+'Conversation to compress:\n\n'+transcript}],{max_tokens:1200,temperature:0.2});
   const s=stripTags(splitThink(r.text).body).trim();
-  if(s&&!r.error){chat.summary=s;chat.messages=chat.messages.slice(-keep);await saveChat();toast('Compacted: older messages replaced by a summary')}else toast('Compact failed');
-  setBusy(false);render()};
+  if(s&&!r.error){chat.summary=s;chat.messages=chat.messages.slice(-keep);await saveChat();toast(auto?'This chat was getting long: older messages were compacted into a summary':'Compacted: older messages replaced by a summary')}else toast('Compact failed');
+  setBusy(false);render()}
 
 /* ---------- status / tier ring ---------- */
 function drawSpec(){const e=$('specState');if(!e)return;const d=status.draft||'off';
@@ -1078,6 +1083,8 @@ general:()=>`<h2>General</h2><p class="sub">How Ithaca talks to you.</p>
  <div class="field"><label>Custom instructions</label><textarea data-pref="instructions" rows="3" placeholder="Anything Ithaca should always keep in mind">${esc(prefs.instructions)}</textarea></div>
  <div class="grid2"><div class="field"><label>Creativity (temperature)</label><input data-pref="temperature" type="number" step="0.1" min="0" max="2" value="${prefs.temperature}"><small>0 = precise, 1+ = creative</small></div>
  <div class="field"><label>Max reply length (tokens)</label><input data-pref="max_tokens" type="number" step="256" value="${prefs.max_tokens}"></div></div>
+ <div style="margin-top:18px">${sw('compact_chat','Compact long chats','When a chat fills most of the context window, the older messages are summarized so the conversation can keep going. The summary is shown at the top of the chat, and the newest messages stay word for word.')}
+ ${sw('compact_code','Compact long Coding tasks','The same for the Coding agent: older steps become a summary of what was done and what is left, and the latest steps stay in full.')}</div>
  `,
 model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Ithaca spreads it across VRAM, RAM and SSD.</p>
  <div class="field"><label>Model</label><select id="mSel"><option>loading…</option></select><small id="mWhy"></small></div>
@@ -1345,7 +1352,17 @@ const CW_CHANGE=new Set(['edit_file','write_file','create_file','set_cell','make
 const CW_ICON={run_command:'play',list_dir:'folder',read_file:'file',search:'search',edit_file:'edit',write_file:'edit',create_file:'plus',set_cell:'edit',make_dir:'folder',rename:'edit',delete:'trash'};
 let cw={root:'',name:''},cs={items:[],msgs:[]},cwBusy=false,cwStopReq=false,cwAuto=false,cwWait={};
 try{const s=JSON.parse(localStorage.getItem('ithaca_code')||'null');if(s){cw=s.cw||cw;cs=s.cs||cs;cwAuto=!!s.auto}}catch(e){}
-function cwSave(){try{localStorage.setItem('ithaca_code',JSON.stringify({cw,cs:{items:cs.items.slice(-300),msgs:cs.msgs.slice(-160)},auto:cwAuto}))}catch(e){}}
+// a Coding chat's file id, from its folder path (store\code_chats\<id>.json)
+function cwId(root){let h=2166136261;for(const c of String(root).toLowerCase())h=Math.imul(h^c.charCodeAt(0),16777619)>>>0;
+  return 'c'+h.toString(16).padStart(8,'0')+'_'+String(root).split('\\').pop().replace(/[^A-Za-z0-9_-]+/g,'_').slice(0,40)}
+let cwSaveT=0;
+function cwSave(){try{localStorage.setItem('ithaca_code',JSON.stringify({cw,cs:{items:cs.items.slice(-300),msgs:cs.msgs.slice(-160),summary:cs.summary},auto:cwAuto}))}catch(e){}
+  // the whole chat goes to disk too (a moment later, so a burst of saves is one write)
+  clearTimeout(cwSaveT);if(cw.root&&cs.items.length){const root=cw.root,name=cw.name,c=cs;cwSaveT=setTimeout(()=>cwDisk(root,name,c),400)}}
+// chats that were only in this browser go to disk once
+setTimeout(()=>{if(cw.root&&cs.items.length)cwDisk(cw.root,cw.name,cs);
+  try{const all=JSON.parse(localStorage.getItem('ithaca_code_by_root')||'{}');for(const k in all)if(all[k].items&&all[k].items.length)cwDisk(k,k.split('\\').pop(),all[k])}catch(e){}},1500);
+function cwDisk(root,name,c){return api('/api/codechats/'+cwId(root),{root,name,updated:Date.now(),summary:c.summary||'',items:c.items,msgs:c.msgs})}
 function cwSystem(){
   const tools=CODE_TOOLS.map(([n,d,p,r])=>JSON.stringify({type:'function',function:{name:n,description:d,parameters:{type:'object',properties:Object.fromEntries(Object.entries(p).map(([k,[t,dd]])=>[k,{type:t,description:dd}])),required:r}}})).join('\n');
   return `You are Ithaca's coding agent. You work in the folder "${cw.name}" on the user's Windows PC, where you can read, search, create, edit, rename and delete files with the tools below. Paths are relative to that folder.
@@ -1381,7 +1398,10 @@ ${tools}
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
 {"name": <function-name>, "arguments": <args-json-object>}
-</tool_call>`}
+</tool_call>`+(cs.summary?`
+
+# Summary of the earlier steps of this task (older messages were compacted)
+${cs.summary}`:'')}
 // what the transcript shows of a reply: not the tool-call JSON (the card below it shows the call), nor what follows it
 function cwShow(b){return b.replace(/<tool_call>[\s\S]*$/,'').replace(/```(?:json)?\s*\{\s*"name"\s*:[\s\S]*$/,'').replace(/\{\s*"name"\s*:\s*"(list_dir|read_file|search|edit_file|write_file|set_cell|make_dir|rename|delete)"[\s\S]*$/,'').trim()}
 // JSON as models write it: raw newlines/tabs inside strings are escaped before parsing
@@ -1449,6 +1469,7 @@ function cwRender(){
     if($('cwPick2'))$('cwPick2').onclick=cwPick;return}
   el.innerHTML='<div>'+cs.items.map((it,k)=>it.t=='user'?`<div class="cu">${esc(it.text)}</div>`
     :it.t=='ai'?(()=>{const {think,body}=splitThink(it.text||'');return `<div class="ca">${think?`<details class="think"><summary>${ico('brain')}Thought process</summary><div class="tb">${md(think)}</div></details>`:''}${md(cwShow(body))}${it.err?`<div class="err">${esc(it.err)}</div>`:''}</div>`})()
+    :it.t=='compact'?`<details class="think"><summary>${ico('compact')}Earlier steps were compacted into a summary</summary><div class="tb">${md(it.text||'')}</div></details>`
     :cwCard(it,k)).join('')+(cwBusy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>Working<span class="hint">Esc to stop</span></div>`
       :(()=>{const ch=cwTaskChanges();return ch.length>1?`<div class="cwdone">${ico('check')}<span>${ch.length} changes in this task</span><button class="btn" id="cwUndoAll">${ico('undo')}Undo all</button></div>`:''})())+'</div>';
   if($('cwUndoAll'))$('cwUndoAll').onclick=cwUndoAll;
@@ -1484,6 +1505,9 @@ async function cwSend(text){
   for(let step=0;step<50&&!cwStopReq;step++){
     // keep the newest tool outputs; older ones shrink to a note so long tasks fit the context window
     let seen=0;for(let i=cs.msgs.length-1;i>=0;i--){const m=cs.msgs[i];if(m.role=='user'&&m.content.startsWith('<tool_response>')&&++seen>6&&m.content.length>400)m.content='<tool_response>\n(older output removed to save space; read the file again if needed)\n</tool_response>'}
+    // automatic compaction: the task is about to fill the context window
+    if(prefs.compact_code&&cs.msgs.length>=8){try{const c=await api('/api/count',{messages:[{role:'system',content:cwSystem()},...cs.msgs]});
+      if(c.ctx&&c.tokens+Math.min(2048,c.ctx/4)>c.ctx*0.85)await cwCompact()}catch(e){}}
     const ai={t:'ai',text:''};cs.items.push(ai);
     const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
     ai.text=r.text;if(r.error)ai.err=r.error;
@@ -1507,19 +1531,30 @@ async function cwSend(text){
     cs.msgs.push({role:'user',content:`<tool_response>\n${out}\n</tool_response>`});cwSave();
   }
   cwBusy=false;cwSetBusy();cwSave();cwRender()}
+// Coding compaction: older steps become a summary (in the system prompt); the newest steps stay word for word
+async function cwCompact(){
+  let k=Math.max(1,cs.msgs.length-6);while(k<cs.msgs.length-1&&cs.msgs[k].role!='user')k++;
+  if(k<2)return;
+  const clip=t=>t.length>3000?t.slice(0,1500)+'\n…\n'+t.slice(-1000):t;
+  const log=cs.msgs.slice(0,k).map(m=>(m.role=='assistant'?'Agent':m.content.startsWith('<tool_response>')?'Tool result':'User')+': '+clip(m.content)).join('\n\n');
+  const r=await stream([{role:'system',content:'You compress a coding agent\'s work log so it can continue in a smaller context window. Write short bullet points under these headings: Task (the user\'s requests, word for word when short), Done so far (files read, created and changed, with exact paths and what changed), Findings (errors, test results, important code facts), Still to do. Keep exact file names, function names, commands and error messages. No commentary.'},
+    {role:'user',content:(cs.summary?'Existing summary:\n'+cs.summary+'\n\n':'')+'Work log to compress:\n\n'+log}],{max_tokens:1000,temperature:0.2});
+  const s=stripTags(splitThink(r.text||'').body).trim();
+  if(!s||r.error)return;
+  cs.summary=s;cs.msgs=cs.msgs.slice(k);cs.items.push({t:'compact',text:s});cwSave();cwRender()}
 function cwSetBusy(){const b=$('cwSend');if(b){b.innerHTML=ico(cwBusy?'stop':'up');b.title=cwBusy?'Stop':'Send'}}
 async function cwPick(){const r=await api('/api/code/pick',{});if(!r.path)return;cwSetRoot(r.path)}
 async function cwSetRoot(p){
   const r=await api('/api/code/check',{root:p});if(r.error){toast(r.error);return}
   if(cw.root!=r.root){
     if(cwBusy){toast('Stop the current task before switching folders');return}
-    // each folder keeps its own chat: park this one, bring back the new folder's last one
-    let all={};try{all=JSON.parse(localStorage.getItem('ithaca_code_by_root')||'{}')}catch(e){}
-    if(cw.root&&cs.items.length)all[cw.root]={items:cs.items.slice(-300),msgs:cs.msgs.slice(-160),t:Date.now()};
-    const back=all[r.root];delete all[r.root];
-    Object.keys(all).sort((a,b)=>all[b].t-all[a].t).slice(10).forEach(k=>delete all[k]);
-    try{localStorage.setItem('ithaca_code_by_root',JSON.stringify(all))}catch(e){}
-    cw={root:r.root,name:r.root.split('\\').pop()};cs=back?{items:back.items,msgs:back.msgs}:{items:[],msgs:[]}}
+    // each folder keeps its own chat on disk: save this one, bring back the new folder's last one
+    clearTimeout(cwSaveT);if(cw.root&&cs.items.length)await cwDisk(cw.root,cw.name,cs);
+    let back=await api('/api/codechats/'+cwId(r.root));
+    if(!back||back.error){   // chats from before they were kept on disk
+      let all={};try{all=JSON.parse(localStorage.getItem('ithaca_code_by_root')||'{}')}catch(e){}
+      back=all[r.root]||null;delete all[r.root];try{localStorage.setItem('ithaca_code_by_root',JSON.stringify(all))}catch(e){}}
+    cw={root:r.root,name:r.root.split('\\').pop()};cs=back&&back.items?{items:back.items,msgs:back.msgs||[],summary:back.summary||''}:{items:[],msgs:[]}}
   prefs.code_recent=[r.root,...(prefs.code_recent||[]).filter(x=>x!=r.root)].slice(0,8);savePrefs();cwSave();drawCode()}
 async function cwTreeLoad(){
   const el=$('cwtree');if(!el)return;
@@ -1537,8 +1572,18 @@ async function cwTreeLoad(){
   el.querySelectorAll('.tn').forEach(n=>n.onclick=()=>{const q=$('cwq');q.value+=(q.value&&!q.value.endsWith(' ')?' ':'')+n.dataset.p+' ';q.focus()})}
 function cwSide(){
   const el=$('cwRecent');if(!el)return;const list=prefs.code_recent||[];
-  el.innerHTML=list.length?list.map(p=>`<div class="cwrecent${p==cw.root?' on':''}" data-r="${esc(p)}">${ico('folder')}<span>${esc(p.split('\\').pop())}<small>${esc(p)}</small></span></div>`).join(''):'<div class="sidehint">Folders you work in show up here.</div>';
-  el.querySelectorAll('[data-r]').forEach(d=>d.onclick=()=>cwSetRoot(d.dataset.r))}
+  el.innerHTML=list.length?list.map(p=>`<div class="cwrecent${p==cw.root?' on':''}" data-r="${esc(p)}">${ico('folder')}<span>${esc(p.split('\\').pop())}<small>${esc(p)}</small></span><button class="x" data-cwdel="${esc(p)}" title="Delete this chat">${ico('trash')}</button></div>`).join(''):'<div class="sidehint">Folders you work in show up here.</div>';
+  el.querySelectorAll('[data-r]').forEach(d=>d.onclick=ev=>{if(ev.target.closest('[data-cwdel]'))return;cwSetRoot(d.dataset.r)});
+  el.querySelectorAll('[data-cwdel]').forEach(b=>b.onclick=()=>cwDelete(b.dataset.cwdel))}
+// delete a folder's Coding chat (the folder and its files are not touched)
+async function cwDelete(root){
+  if(cwBusy&&root==cw.root){toast('Stop the current task first');return}
+  if(!confirm(`Delete the Coding chat for "${root.split('\\').pop()}"? The folder and its files are not touched.`))return;
+  if(root==cw.root)clearTimeout(cwSaveT);
+  await api('/api/codechats/'+cwId(root)+'/delete',{});
+  try{const all=JSON.parse(localStorage.getItem('ithaca_code_by_root')||'{}');delete all[root];localStorage.setItem('ithaca_code_by_root',JSON.stringify(all))}catch(e){}
+  prefs.code_recent=(prefs.code_recent||[]).filter(x=>x!=root);savePrefs();
+  if(root==cw.root){cw={root:'',name:''};cs={items:[],msgs:[]};cwSave();drawCode()}else cwSide()}
 function cwStop(){cwStopReq=true;stopGen();api('/api/code/stop',{});Object.values(cwWait).forEach(f=>f(false))}
 document.addEventListener('keydown',e=>{if(e.key=='Escape'&&view=='code'&&cwBusy){e.preventDefault();cwStop()}});
 // the applied changes of the latest task (since the last user message): what "Undo all" reverts, newest first
