@@ -10,6 +10,18 @@ struct Msg { std::string role, content; std::vector<std::string> images; };   //
 struct GenOpts {
     float temp = 0.7f, top_p = 0.9f, rep_pen = 1.1f;
     int top_k = 40, max_tokens = 1024;
+    // After the model writes this text (e.g. "<tool_call>"), only tokens that keep a valid JSON value are allowed,
+    // until that value is complete. Small models then can't break their tool calls.
+    std::string json_after;
+};
+
+// Incremental JSON checker: feed() returns false as soon as the text can no longer become valid JSON.
+struct JsonCheck {
+    std::string stack;   // open containers: '{' or '['
+    int mode = 0;        // see feed()
+    bool key = false; int hex = 0, wsrun = 0; std::string lit;   // wsrun: whitespace in a row outside strings
+    bool done() const { return mode == 13; }
+    bool feed(char c);
 };
 
 struct GenStats { int prompt_tokens = 0, reused = 0, gen_tokens = 0, drafted = 0, accepted = 0; double prefill_tps = 0, gen_tps = 0; std::string error; };
@@ -31,6 +43,8 @@ public:
     int draft_k = 5;
 private:
     int sample(const float* logits, const GenOpts& o, const std::vector<int>& recent);
+    // sample() limited to tokens whose text keeps jc valid (-1: none of the likely tokens does)
+    int sample_json(const float* logits, const GenOpts& o, const std::vector<int>& recent, const JsonCheck& jc);
     // Text of a generated token; true = stop. gpt-oss (harmony format): the analysis channel becomes a <think> block,
     // the final channel the answer; the channel headers themselves are not shown.
     bool token_text(int id, std::string& out);

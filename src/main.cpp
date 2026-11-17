@@ -809,6 +809,7 @@ static void handle(SOCKET s) {
         o.top_k = (int)j["top_k"].num(o.top_k);
         o.rep_pen = (float)j["repeat_penalty"].num(o.rep_pen);
         o.max_tokens = (int)j["max_tokens"].num(o.max_tokens);
+        o.json_after = j["json_after"].str();
         send_all(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
         std::lock_guard<std::mutex> l(g_gen);
         if (!g_model.loaded()) { send_all(s, "data: {\"error\":\"no model loaded\"}\n\n"); closesocket(s); return; }

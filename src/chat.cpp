@@ -144,6 +144,102 @@ int Chat::sample(const float* logits, const GenOpts& o, const std::vector<int>& 
     return c.back().second;
 }
 
+// modes: 0 value expected, 1 after '{' (key or '}'), 2 key expected, 3 ':' expected, 4 ',' or close expected,
+// 5 in string, 6 after '\' in string, 7 \u hex digits, 11 number, 12 true/false/null, 13 complete, 14 after '[' (value or ']')
+bool JsonCheck::feed(char c) {
+    const bool ws = c == ' ' || c == '\n' || c == '\r' || c == '\t';
+    if (mode != 5 && mode != 6 && mode != 7 && mode != 13) {   // indentation is fine; pages of padding are not
+        if (ws) { if (++wsrun > 24) return false; } else wsrun = 0;
+    }
+    auto after_value = [&] { mode = stack.empty() ? 13 : 4; };
+    switch (mode) {
+    case 13: return true;
+    case 0: case 14:
+        if (ws) return true;
+        if (mode == 14 && c == ']') { stack.pop_back(); after_value(); return true; }
+        if (c == '{') { stack += '{'; mode = 1; return true; }
+        if (c == '[') { stack += '['; mode = 14; return true; }
+        if (c == '"') { key = false; mode = 5; return true; }
+        if (c == '-' || (c >= '0' && c <= '9')) { mode = 11; return true; }
+        if (c == 't' || c == 'f' || c == 'n') { lit = c; mode = 12; return true; }
+        return false;
+    case 1:
+        if (ws) return true;
+        if (c == '}') { stack.pop_back(); after_value(); return true; }
+        if (c == '"') { key = true; mode = 5; return true; }
+        return false;
+    case 2:
+        if (ws) return true;
+        if (c == '"') { key = true; mode = 5; return true; }
+        return false;
+    case 3:
+        if (ws) return true;
+        if (c == ':') { mode = 0; return true; }
+        return false;
+    case 4:
+        if (ws) return true;
+        if (c == ',') { mode = stack.back() == '{' ? 2 : 0; return true; }
+        if ((c == '}' && stack.back() == '{') || (c == ']' && stack.back() == '[')) { stack.pop_back(); after_value(); return true; }
+        return false;
+    case 5:
+        if (c == '"') { if (key) mode = 3; else after_value(); return true; }
+        if (c == '\\') { mode = 6; return true; }
+        return (unsigned char)c >= 0x20;   // raw line breaks and tabs are not allowed inside a JSON string
+    case 6:
+        if (strchr("\"\\/bfnrt", c) && c) { mode = 5; return true; }
+        if (c == 'u') { hex = 4; mode = 7; return true; }
+        return false;
+    case 7:
+        if (!isxdigit((unsigned char)c)) return false;
+        if (--hex == 0) mode = 5;
+        return true;
+    case 11:
+        if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') return true;
+        after_value(); return feed(c);
+    case 12: {
+        lit += c;
+        for (const char* w : {"true", "false", "null"}) {
+            if (lit == w) { after_value(); return true; }
+            if (strncmp(w, lit.c_str(), lit.size()) == 0) return true;
+        }
+        return false;
+    }
+    }
+    return false;
+}
+
+int Chat::sample_json(const float* logits, const GenOpts& o, const std::vector<int>& recent, const JsonCheck& jc) {
+    const int n = m_.hp.n_vocab;
+    std::vector<std::pair<float, int>> c(n);
+    for (int i = 0; i < n; i++) c[i] = {logits[i], i};
+    if (o.rep_pen != 1.f)
+        for (int id : recent) if (id >= 0 && id < n) { float& v = c[id].first; v = v > 0 ? v / o.rep_pen : v * o.rep_pen; }
+    // look at the most likely tokens first; keep the ones whose text keeps the JSON valid
+    const int scan = std::min(n, 4096);
+    std::partial_sort(c.begin(), c.begin() + scan, c.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    std::vector<std::pair<float, int>> ok;
+    const int want = o.temp <= 0.f ? 1 : std::max(1, o.top_k);
+    for (int i = 0; i < scan && (int)ok.size() < want; i++) {
+        const int id = c[i].second;
+        if (m_.tok.is_stop(id)) continue;
+        const std::string p = m_.tok.piece(id);
+        if (p.empty()) continue;
+        JsonCheck t = jc; bool good = true;
+        for (char ch : p) if (!t.feed(ch)) { good = false; break; }
+        if (good) ok.push_back(c[i]);
+    }
+    if (ok.empty()) return -1;
+    if (o.temp <= 0.f) return ok[0].second;
+    float mx = ok[0].first, sum = 0;
+    for (auto& p : ok) { p.first = std::exp((p.first - mx) / o.temp); sum += p.first; }
+    float cum = 0; size_t cut = ok.size();
+    for (size_t i = 0; i < ok.size(); i++) { ok[i].first /= sum; cum += ok[i].first; if (cum >= o.top_p) { cut = i + 1; break; } }
+    ok.resize(cut);
+    float r = std::uniform_real_distribution<float>(0.f, cum)(rng_), acc = 0;
+    for (auto& p : ok) { acc += p.first; if (r <= acc) return p.second; }
+    return ok.back().second;
+}
+
 static const char kImgMark = '\x01';   // never produced by the tokenizer's text
 
 std::vector<int> Chat::tokenize(const std::vector<Msg>& msgs_in, std::string& err) {
@@ -259,7 +355,9 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         }
         return true;
     };
-    if (draft_ && draft_->loaded()) {
+    // JSON-constrained stretches (tool calls) need token-by-token control: no drafting then
+    JsonCheck jc; bool json_on = false; std::string tail;
+    if (draft_ && draft_->loaded() && o.json_after.empty()) {
         const int V = m_.hp.n_vocab, DV = draft_->hp.n_vocab;
         int next = sample(logits, o, recent);   // emitted, not yet in the main model's cache
         if (emit(next)) {
@@ -343,9 +441,30 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         }
     }
     else for (int i = 0; i < budget; i++) {
-        int id = sample(logits, o, recent);
+        int id = -1;
+        if (json_on) id = sample_json(logits, o, recent, jc);
+        if (id < 0) id = sample(logits, o, recent);
         if (token_text(id, pc)) { pending += pc; break; }
         pending += pc;
+        if (!o.json_after.empty()) {
+            if (json_on) {   // advance the checker; the value is complete: free text again
+                for (char ch : pc) if (!jc.feed(ch)) { json_on = false; break; }
+                if (jc.done()) json_on = false;
+            } else {
+                tail += pc; if (tail.size() > 64) tail.erase(0, tail.size() - 64);
+                size_t e = tail.find_last_not_of(" \t\r\n");
+                bool hit = false;   // json_after may list several triggers separated by '|' (e.g. "<json>|```json")
+                for (size_t b = 0; e != std::string::npos && b <= o.json_after.size() && !hit;) {
+                    size_t z = o.json_after.find('|', b); if (z == std::string::npos) z = o.json_after.size();
+                    const std::string t = o.json_after.substr(b, z - b);
+                    hit = !t.empty() && e + 1 >= t.size() && tail.compare(e + 1 - t.size(), t.size(), t) == 0;
+                    b = z + 1;
+                }
+                if (hit) {
+                    json_on = true; jc = JsonCheck(); tail.clear();   // what follows the tag is only whitespace
+                }
+            }
+        }
         // Emit only complete UTF-8 sequences.
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {

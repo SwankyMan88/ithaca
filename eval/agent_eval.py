@@ -30,7 +30,7 @@ def get(port, path):
 
 def chat(port, messages, temperature, max_tokens):
     """Streams /api/chat; returns (text, stats, error)."""
-    body = json.dumps({'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens, 'stop': ['</tool_call>']}).encode()
+    body = json.dumps({'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens, 'stop': ['</tool_call>'], 'json_after': os.environ.get('ITHACA_JSON_AFTER', '<tool_call>')}).encode()
     req = urllib.request.Request(f'http://127.0.0.1:{port}/api/chat', data=body, method='POST')
     text, stats, err, buf = '', None, None, ''
     with urllib.request.urlopen(req, timeout=1800) as r:
