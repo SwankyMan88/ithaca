@@ -402,6 +402,34 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .orchg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;text-align:left}
 .orchg div{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel)}
 .orchg b{display:flex;align-items:center;gap:8px;margin-bottom:6px}.orchg p{margin:0;color:var(--dim);font-size:13.5px;line-height:1.5}
+.ocol{max-width:900px;padding:18px 20px 60px}.osetup .ot{display:flex;align-items:center;gap:10px;font-size:24px;margin:8px 0 4px}.osetup .ot .icon{width:24px;height:24px;color:var(--a1)}
+.osetup textarea{width:100%;box-sizing:border-box;margin:14px 0 6px;resize:vertical}
+.ogrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.omlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;max-height:280px;overflow:auto}
+.omchk{display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--panel);font-size:13.5px}
+.omchk input{width:auto;margin:0;flex:none;accent-color:var(--a1)}
+.omchk span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.omchk small{display:block;color:var(--faint);font-size:11.5px}
+.obar{display:flex;justify-content:flex-end;margin-bottom:8px}
+.ohead .oq{font-size:17px;font-weight:600;white-space:pre-wrap;margin-bottom:8px}
+.ometa{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.obadge,.omodel{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;border:1px solid var(--line);border-radius:99px;padding:3px 10px;color:var(--dim)}
+.obadge{background:var(--grad);color:#fff;border:0}.obadge .icon{width:14px;height:14px}
+.omodel.working{border-color:var(--a1);color:var(--text)}.omodel.done{color:var(--text)}.omodel.failed{text-decoration:line-through}
+.olive{font-family:var(--mono,monospace);font-size:12px;color:var(--faint);white-space:pre-wrap;max-height:110px;overflow:hidden;border-left:2px solid var(--line);padding:4px 10px;margin:6px 0 12px}
+.ofinal{border:1px solid var(--a1);border-radius:14px;padding:14px 16px;margin:12px 0;background:var(--panel);box-shadow:0 8px 30px rgba(63,182,255,.12)}
+.ofh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}.ofh span{color:var(--dim);font-size:13px}.ofh .icon{color:var(--a1)}
+.ovotes{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;color:var(--dim);margin:6px 0}
+.omsec{border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:12px 0;background:var(--panel)}
+.omh{display:flex;gap:10px;align-items:baseline;margin-bottom:8px}.omh span{color:var(--dim);font-size:13px}
+.ocand{border:1px solid var(--line);border-radius:10px;margin:6px 0;padding:0 10px}.ocand>summary{display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer;list-style:none}
+.ocand.best{border-color:var(--a1)}.ocand.del{opacity:.5}.ocand.del .ofirst{text-decoration:line-through}
+.ofirst{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim);font-size:13px}
+.ochip{font-size:11px;border-radius:99px;padding:1px 8px;border:1px solid var(--line);color:var(--dim)}
+.ochip.edited{color:#e3b341;border-color:#e3b34155}.ochip.added{color:#3fb950;border-color:#3fb95055}.ochip.deleted{color:#f85149;border-color:#f8514955}.ochip.best{color:var(--a1);border-color:var(--a1)}
+.oscore{font-size:12px;color:var(--text);font-weight:600}
+.olog{font-size:12px;color:var(--faint);padding:4px 0 10px}
+.orounds{margin-top:8px;font-size:13px;color:var(--dim)}.orounds summary{cursor:pointer}.oround{border-left:2px solid var(--line);padding:4px 10px;margin:8px 0}.oround b{color:var(--text)}.oact{color:var(--text);margin-top:4px}
+@media(max-width:820px){.ogrid{grid-template-columns:1fr}}
 @media(max-width:820px){.cwtree{display:none}.cwsugg,.orchg{grid-template-columns:1fr}.cwbar{flex-wrap:wrap}}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
@@ -452,7 +480,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
   <nav class="mainnav" id="nav">
     <button data-view="chat" class="on"><svg class="icon"><use href="#i-chat"/></svg>Chat</button>
     <button data-view="code"><svg class="icon"><use href="#i-code"/></svg>Coding</button>
-    <button data-view="orch"><svg class="icon"><use href="#i-orch"/></svg>Orchestration<span class="soon">Soon</span></button>
+    <button data-view="orch"><svg class="icon"><use href="#i-orch"/></svg>Orchestration</button>
     <div class="navlabel">Create</div>
     <button data-view="image"><svg class="icon"><use href="#i-image"/></svg>Image</button>
     <button data-view="video"><svg class="icon"><use href="#i-video"/></svg>Video</button>
@@ -462,6 +490,11 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
     <button class="newchat" id="newchat"><svg class="icon"><use href="#i-plus"/></svg>New chat</button>
     <input class="search" id="search" placeholder="Search chats">
     <div id="history"></div>
+  </div>
+  <div class="sidesec" id="sideOrch" hidden>
+    <button class="newchat" id="oNewSide"><svg class="icon"><use href="#i-plus"/></svg>New run</button>
+    <div class="group" style="padding-left:20px">Runs</div>
+    <div id="orchRuns" style="overflow:auto"></div>
   </div>
   <div class="sidesec" id="sideCode" hidden>
     <button class="newchat" id="cwNewSide"><svg class="icon"><use href="#i-plus"/></svg>New task</button>
@@ -1509,7 +1542,7 @@ async function cwSend(text){
     if(prefs.compact_code&&cs.msgs.length>=8){try{const c=await api('/api/count',{messages:[{role:'system',content:cwSystem()},...cs.msgs]});
       if(c.ctx&&c.tokens+Math.min(2048,c.ctx/4)>c.ctx*0.85)await cwCompact()}catch(e){}}
     const ai={t:'ai',text:''};cs.items.push(ai);
-    const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
+    const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],json_after:'<tool_call>',temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
     ai.text=r.text;if(r.error)ai.err=r.error;
     const call=cwParse(r.text);
     if(!cwShow(splitThink(r.text).body)&&!splitThink(r.text).think&&!ai.err)cs.items.splice(cs.items.indexOf(ai),1);
@@ -1609,17 +1642,234 @@ function drawCode(){
     $('cwSend').onclick=go;q.onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();go()}}}
   $('cwName').textContent=cw.root?cw.name:'Choose a folder';$('cwPath').textContent=cw.root||'The agent can only touch files inside it';
   $('cwAuto').checked=cwAuto;cwSetBusy();cwRender();cwTreeLoad();cwSide()}
-function drawOrch(){
-  $('studio').innerHTML=`<div class="orch"><div class="big">${ico('orch')}</div><h1>Model orchestration</h1>
-   <p>Several models working on one question: each with its own role and opinion, answering side by side, debating in rounds, and a judge model pulling it together. They run at the same time when your VRAM allows, one after another when it doesn't.</p>
-   <div class="orchg"><div><b>${ico('chat')}Panel</b><p>Every model answers on its own. Compare them side by side.</p></div><div><b>${ico('orch')}Debate</b><p>Models see each other's answers, push back and revise over a few rounds.</p></div><div><b>${ico('check')}Judge</b><p>One model reads it all and writes the final answer, with where they agreed and disagreed.</p></div></div>
-   <p style="margin-top:26px"><span class="soon" style="font-size:12px;padding:4px 12px">Coming next</span></p></div>`}
+/* ---------- orchestration ---------- */
+// Several models work on one request. Each mode has its own method (rule set); every model runs it on its own,
+// then a judge model compares the models' best answers.
+const OMODES={
+  deep:{name:'Hard question',icon:'brain',cands:3,min:4,max:6,judge:'merge',
+    desc:'Each model writes 3 answers, criticizes them and refines them at least 4 rounds: editing, deleting or adding answers until they hold up. Its best answer goes to the judge, which merges the strongest points.',
+    gen:'Answer thoroughly and carefully. Reason step by step, then give a clear, complete final answer.',
+    crit:'Be a harsh expert reviewer. Look for factual errors, faulty reasoning, missing cases, vague or unsupported claims, and anything that does not answer the question.',
+    variety:['Answer directly from first principles.','Consider the opposite view or the hardest counter-example first, then answer.','Answer as a careful specialist would, with concrete examples.']},
+  code:{name:'Code',icon:'code',cands:3,min:2,max:4,judge:'pick',run:true,
+    desc:'Each model writes 3 solutions. Python code is run, and the output goes into the reviews. Solutions are fixed, dropped or replaced over 2–4 rounds; the judge picks the one that works best.',
+    gen:'Write correct, complete, runnable code with a short explanation. Put all the code in one fenced code block.',
+    crit:'Review like a senior engineer: bugs, wrong output, edge cases, missing error handling, unclear names, needless complexity. Use the run output when it is given.',
+    variety:['Write the simplest correct solution.','Write a robust solution that handles edge cases and bad input.','Write an efficient solution and say why it is efficient.']},
+  math:{name:'Math & logic',icon:'check',cands:3,min:2,max:4,judge:'vote',
+    desc:'Each model solves it 3 independent ways, then re-checks every step over 2–4 rounds. Final answers are put to a vote across all models, and the judge writes up the winning solution.',
+    gen:'Solve step by step and check each step. End with a line "Final answer: ..." .',
+    crit:'Re-derive every step on your own. Find arithmetic and logic errors. Check the final answer by substituting it back or by a second method.',
+    variety:['Solve it the most direct way.','Solve it a different way than usual (another method or a sanity bound).','Solve it slowly and verify each line.']},
+  creative:{name:'Creative writing',icon:'edit',cands:3,min:3,max:4,judge:'pick',
+    desc:'Each model drafts 3 pieces in different styles and edits them like an editor would over 3–4 rounds, cutting weak drafts and trying new ones. The judge picks the strongest piece.',
+    gen:'Write it with a strong voice, vivid concrete detail and a satisfying shape.',
+    crit:'Critique like a demanding editor: voice, originality, imagery, rhythm, clichés, structure, and how well it fits the request.',
+    variety:['Take a bold, unexpected angle.','Keep it classic and polished.','Make it playful or surprising.']},
+  ideas:{name:'Ideas & plans',icon:'wand',cands:3,min:3,max:4,judge:'merge',
+    desc:'Each model proposes 3 plans, then over 3–4 rounds drops weak ones, merges overlaps and adds better ones. The judge combines the best into one plan.',
+    gen:'Give a concrete, practical proposal with clear steps.',
+    crit:'Judge feasibility, cost, risks, originality and what is missing. Point out overlaps between plans.',
+    variety:['Propose the most practical plan.','Propose an ambitious, unusual plan.','Propose the cheapest, fastest plan.']},
+  quick:{name:'Quick facts',icon:'chat',cands:1,min:0,max:0,judge:'consensus',
+    desc:'Each model answers once. The judge compares them, notes where they agree or disagree, and writes one answer.',
+    gen:'Answer accurately and concisely. Say so if you are not sure.',crit:'',variety:['']},
+};
+let orch={run:null,busy:false,stop:false,live:'',liveWho:'',models:null,runs:[]};
+const oId=()=>'o'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+const oShort=p=>String(p||'').split('\\').pop().replace(/\.gguf$/i,'');
+function oSave(){const r=orch.run;if(!r)return;r.updated=Date.now();return api('/api/orchruns/'+r.id,r)}
+async function oLoadRuns(){try{orch.runs=await api('/api/orchruns')}catch(e){orch.runs=[]}oSide()}
+function oSide(){const el=$('orchRuns');if(!el)return;
+  el.innerHTML=orch.runs.length?orch.runs.map(r=>`<div class="hitem${orch.run&&orch.run.id==r.id?' on':''}" data-oid="${r.id}"><span>${esc(r.title)}</span><button class="x" data-odel="${r.id}" title="Delete">${ico('trash')}</button></div>`).join(''):'<div class="sidehint">Your runs show up here.</div>';
+  el.querySelectorAll('[data-oid]').forEach(d=>d.onclick=async ev=>{if(ev.target.closest('[data-odel]')||orch.busy)return;const r=await api('/api/orchruns/'+d.dataset.oid);if(!r.error){orch.run=r;drawOrch();oSide()}});
+  el.querySelectorAll('[data-odel]').forEach(b=>b.onclick=async()=>{if(orch.busy&&orch.run&&orch.run.id==b.dataset.odel)return;if(!confirm('Delete this run?'))return;
+    await api('/api/orchruns/'+b.dataset.odel+'/delete',{});if(orch.run&&orch.run.id==b.dataset.odel){orch.run=null;drawOrch()}oLoadRuns()})}
+
+// one model call; json: the reply is one JSON object (constrained after <json>)
+async function oAsk(system,user,{temp=0.7,max=1500,json=false}={}){
+  if(orch.stop)throw new Error('stopped');
+  const sys=system+(json?'\n\nReply with <json> followed by one JSON object and nothing else.':'');
+  orch.live='';const r=await stream([{role:'system',content:sys},{role:'user',content:user}],
+    Object.assign({temperature:temp,max_tokens:max},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint()});
+  orch.live='';if(orch.stop)throw new Error('stopped');if(r.error)throw new Error(r.error);
+  let body=stripTags(splitThink(r.text||'').body).trim();
+  if(!body&&!oAsk.retry){oAsk.retry=1;try{return await oAsk(system,user+' /no_think',{temp,max:max+1024,json})}finally{oAsk.retry=0}}   // all of it went into thinking
+  // drop a chatty opener line ("Okay, here's the revised answer:")
+  if(!json)return body.replace(/^(?:okay|ok|sure|certainly|alright)?[,.!]?\s*(?:here(?:'|’)s|here is|below is)[^\n]{0,140}:\s*\n+/i,'').replace(/^(?:okay|sure|certainly)[,.!][^\n]{0,100}\n+/i,'');
+  const i=body.lastIndexOf('<json>'),s=(i>=0?body.slice(i+6):body).replace(/<\/json>[\s\S]*$/,'').replace(/```(?:json)?/g,'').trim();
+  const a=s.indexOf('{');if(a<0)return null;
+  try{return cwJson(s.slice(a,s.lastIndexOf('}')+1))}catch(e){}
+  try{return cwJson(oClose(s.slice(a)))}catch(e){return null}}
+// JSON cut off by the token limit: close the open string and brackets so the finished part can still be used
+function oClose(s){let st=[],q=false;for(let i=0;i<s.length;i++){const c=s[i];
+    if(q){if(c=='\\')i++;else if(c=='"')q=false;continue}
+    if(c=='"')q=true;else if(c=='{'||c=='[')st.push(c=='{'?'}':']');else if(c=='}'||c==']')st.pop()}
+  if(q)s+='"';s=s.replace(/[,:\s]+$/,'');if(st[st.length-1]=='}'&&/[{,]\s*"[^"]*"$/.test(s))s+=':null';   // a key with no value yet
+  return s+st.reverse().join('')}
+async function oUse(path){
+  if(status.loaded&&oShort(status.model).toLowerCase()==oShort(path).toLowerCase())return true;
+  orch.liveWho='Loading '+oShort(path)+'…';oPaint();
+  const r=await api('/api/load',{path,ctx:Math.max(8192,(status.opts&&status.opts.ctx)||0)});await refreshStatus();
+  return !r.error}
+const oNum=(list)=>list.map(c=>`### Answer ${c.n}\n${c.text}`).join('\n\n');
+const oFinal=t=>{const m=String(t).match(/final answer\s*[:：]\s*(.+)/i);return m?m[1].replace(/[*$`\\]/g,'').replace(/\s+/g,' ').trim().toLowerCase().replace(/\.$/,''):''};
+async function oRunCode(text){const m=String(text).match(/```(?:python|py)\s*\n([\s\S]*?)```/i);if(!m||!prefs.run_code)return '';
+  try{const r=await api('/api/run',{code:m[1]});return String(r.output||'').slice(0,1500)}catch(e){return ''}}
+
+// The rule set for one model: candidates, then critique/refine rounds, then its best answer.
+async function oModel(run,M){
+  const mode=OMODES[run.mode],q=run.prompt,P=M;let n=0;
+  P.state='working';oPaint();
+  const sysGen='You are one of several AI models working on the same request. '+mode.gen;
+  for(let k=0;k<mode.cands;k++){P.note=`Writing answer ${k+1} of ${mode.cands}`;
+    const text=await oAsk(sysGen+(mode.variety[k]?'\n'+mode.variety[k]:''),q,{temp:0.85,max:prefs.max_tokens||2048});
+    P.cands.push({n:++n,text,status:text?'new':'deleted',score:null,log:[text?`Written (${mode.variety[k]||'answer'})`:'Came back empty']});oPaint();await oSave()}
+  for(let round=1;round<=mode.max;round++){
+    const alive=P.cands.filter(c=>c.status!='deleted');if(!alive.length)break;
+    P.note=`Round ${round}: criticizing`;oPaint();
+    let runs='';
+    if(mode.run){for(const c of alive){const o=await oRunCode(c.text);if(o)runs+=`\n\nRun output of answer ${c.n}:\n${o}`}}
+    let rev=null;for(let t=0;t<2&&!(rev&&(Array.isArray(rev)||Object.values(rev).some(Array.isArray)));t++)rev=await oAsk('You review answers to a request. '+mode.crit+' Score each answer from 1 (bad) to 10 (excellent). Set good_enough to true only if the best answer has no real problems left.',
+      `Request:\n${q}\n\n${oNum(alive)}${runs}\n\nReview every answer above, in order. Example of the format: {"reviews":[{"answer_number":1,"score":0,"problems":["<a specific problem you found>"]},{"answer_number":2,"score":0,"problems":["<a specific problem>","<another>"]}],"good_enough":false} (replace each 0 with your score from 1 to 10, and each <...> with a real problem; use [] if there are none)`,{temp:t?0.1:0.3,json:true,max:1500});
+    const R={round,reviews:[],actions:[]};P.rounds.push(R);
+    // small models vary the shape: "Answer 2" or an id instead of a number, "7/10" scores, problems as one string
+    const list=rev?(Array.isArray(rev)?rev:Array.isArray(rev.reviews)?rev.reviews:Object.values(rev).find(Array.isArray)||[]):[];
+    const num=x=>{const m=String(x??'').match(/\d+(\.\d+)?/);return m?+m[0]:NaN};
+    list.forEach((v,i)=>{if(!v||typeof v!='object')return;
+      const id=num(v.answer_number??v.answer??v.id??v.n??v.number);const c=alive.find(x=>x.n==id)||alive[i];if(!c||R.reviews.some(z=>z.n==c.n))return;
+      const sc=num(v.score??v.rating);if(sc>=1)c.score=Math.min(10,Math.round(sc));   // 0: the example's placeholder
+      const pr=v.problems??v.issues??v.flaws??[];R.reviews.push({n:c.n,score:c.score,problems:(Array.isArray(pr)?pr:[pr]).filter(Boolean).map(String).filter(x=>!/^\s*<[^>]*>\s*$/.test(x)).slice(0,6)})});
+    R.raw=list.length?'':JSON.stringify(rev).slice(0,600);
+    oPaint();
+    const best=Math.max(0,...alive.map(c=>c.score||0));
+    if(round>mode.min-1&&round>=mode.min&&rev&&rev.good_enough&&best>=8){R.done=`Stopped after round ${round}: the answers hold up (best score ${best}/10).`;break}
+    // refine: decide per answer, then do the edits and additions as plain writing
+    P.note=`Round ${round}: refining`;oPaint();
+    const dec=await oAsk('You improve a set of answers using the reviews. For each answer choose "keep" (no real problems), "edit" (fixable problems) or "delete" (wrong or clearly worse than the others). If a better approach is missing, describe it in "add" (otherwise "").',
+      `Request:\n${q}\n\n${oNum(alive)}\n\nReviews:\n${R.reviews.map(v=>`Answer ${v.n} (score ${v.score}): ${v.problems.join('; ')||'no problems'}`).join('\n')}\n\nDecide for every answer above, in order. Example of the format: {"actions":[{"answer_number":1,"do":"edit"},{"answer_number":2,"do":"keep"},{"answer_number":3,"do":"delete"}],"add":""}`,{temp:0.3,json:true,max:600});
+    const al=dec?(Array.isArray(dec.actions)?dec.actions:Object.values(dec).find(Array.isArray)||[]):[];
+    let acts=al.length?al.map((a,i)=>{const id=num(a&&(a.answer_number??a.answer??a.id)),c=alive.find(x=>x.n==id)||alive[i];
+      return c?{answer:c.n,do:/del/i.test(a&&a.do)?'delete':/edit|fix|rewrite/i.test(a&&a.do)?'edit':'keep'}:null}).filter(Boolean)
+      :alive.map(c=>({answer:c.n,do:(c.score||0)>=8?'keep':'edit'}));
+    // never delete every answer: the best-scored one stays
+    const dels=acts.filter(a=>a.do=='delete').map(a=>+a.answer);
+    if(dels.length>=alive.length){const keep=alive.slice().sort((a,b)=>(b.score||0)-(a.score||0))[0];acts=acts.map(a=>+a.answer==keep.n?{answer:keep.n,do:'edit'}:a)}
+    for(const a of acts){const c=alive.find(x=>x.n==+a.answer);if(!c)continue;
+      if(a.do=='delete'){c.status='deleted';c.log.push(`Round ${round}: deleted`);R.actions.push(`Deleted answer ${c.n}`)}
+      else if(a.do=='edit'){P.note=`Round ${round}: editing answer ${c.n}`;oPaint();
+        const pr=(R.reviews.find(v=>v.n==c.n)||{problems:[]}).problems;
+        const nt=await oAsk(sysGen+'\nYou are revising your earlier answer. Fix every problem listed and keep what is already good. Reply with the full revised answer only, with no comments about the changes.',
+          `Earlier answer:\n${c.text}\n\nProblems to fix:\n- ${pr.join('\n- ')||'make it clearer and more complete'}\n\n---\nNow write the revised answer to this request:\n${q}`,{temp:0.5,max:prefs.max_tokens||2048});
+        if(nt)c.text=nt;
+        c.status='edited';c.log.push(`Round ${round}: edited`);R.actions.push(`Edited answer ${c.n}`)}
+      else{c.status=c.status=='new'?'kept':c.status;c.log.push(`Round ${round}: kept`);R.actions.push(`Kept answer ${c.n}`)}
+      oPaint()}
+    const add=dec&&typeof dec.add=='string'?dec.add.trim():'';
+    if(add&&P.cands.filter(c=>c.status!='deleted').length<mode.cands){P.note=`Round ${round}: adding an answer`;oPaint();
+      const text=await oAsk(sysGen+'\nTake this approach: '+add,q,{temp:0.7,max:prefs.max_tokens||2048});
+      P.cands.push({n:++n,text,status:'added',score:null,log:[`Round ${round}: added (${add.slice(0,80)})`]});R.actions.push(`Added answer ${n}`)}
+    oPaint();await oSave()}
+  // the model's own pick
+  const alive=P.cands.filter(c=>c.status!='deleted'&&c.text);
+  if(!alive.length){P.state='failed';P.note='No usable answer';oPaint();await oSave();return}
+  P.note='Choosing its best answer';oPaint();
+  let pick=null;
+  if(alive.length>1){const j=await oAsk('Choose the single best answer to the request. Judge correctness first, then completeness and clarity.',
+      `Request:\n${q}\n\n${oNum(alive)}\n\nExample of the format: {"best_answer_number":0,"why":"<one sentence>"} (0 = the number of the best answer)`,{temp:0.2,json:true,max:300});
+    if(j)pick={n:+String(j.best_answer_number??j.best??'').replace(/\D+/g,''),why:String(j.why||'')}}
+  const top=alive.find(c=>pick&&c.n==pick.n)||alive.slice().sort((a,b)=>(b.score||0)-(a.score||0))[0];
+  P.best={n:top.n,why:pick&&pick.n==top.n?pick.why:'highest review score'};top.best=true;
+  P.state='done';P.note='';oPaint();await oSave()}
+
+// The judge: compares the models' best answers (and, for math, the vote) and writes the final answer.
+async function oJudge(run){
+  const mode=OMODES[run.mode],q=run.prompt;
+  const fin=run.models.filter(m=>m.best).map((m,i)=>({k:i+1,model:m.name,text:m.cands.find(c=>c.n==m.best.n).text}));
+  if(!fin.length)return;
+  run.judging=true;oPaint();
+  const list=fin.map(f=>`### Finalist ${f.k} (${f.model})\n${f.text}`).join('\n\n');
+  let votes='';
+  if(mode.judge=='vote'){const tally={};run.models.forEach(m=>m.cands.filter(c=>c.status!='deleted').forEach(c=>{const a=oFinal(c.text);if(a)tally[a]=(tally[a]||0)+1}));
+    run.votes=Object.entries(tally).sort((a,b)=>b[1]-a[1]);votes=run.votes.length?'\n\nVotes for final answers across all surviving solutions:\n'+run.votes.map(([a,c])=>`${a}: ${c}`).join('\n'):''}
+  let best=1,why='';
+  if(fin.length>1){const j=await oAsk('You are the judge. Compare the finalists from different models and choose the best one. Judge correctness first, then completeness and clarity.'+(votes?' Weigh the vote, but a solution with correct steps beats the majority.':''),
+      `Request:\n${q}\n\n${list}${votes}\n\nExample of the format: {"best_finalist_number":1,"why":"one or two sentences"}`,{temp:0.2,json:true,max:400});
+    const bk=j&&+String(j.best_finalist_number??j.best??'').replace(/\D+/g,'');if(bk&&fin.some(f=>f.k==bk)){best=bk;why=String(j.why||'')}}
+  const w=fin.find(f=>f.k==best);let text=w.text;
+  if(mode.judge=='merge'&&fin.length>1)text=await oAsk('Write the best possible answer to the user\'s request. Below are draft answers from other models; the first one is the strongest. Build on it and add anything correct and valuable from the others. Reply with the answer only: no comments about the drafts, no mention of models or finalists.',
+      `Draft answers (for reference):\n\n### Strongest draft\n${w.text}\n\n${fin.filter(f=>f.k!=best).map(f=>`### Other draft\n${f.text}`).join('\n\n')}\n\n---\nNow write your answer to this request:\n${q}`,{temp:0.4,max:prefs.max_tokens||2048});
+  else if(mode.judge=='consensus'&&fin.length>1)text=await oAsk('Write one accurate answer to the user\'s request, using the draft answers below as reference. If they disagree on something, say so briefly and say which is more likely right. Reply with the answer only; do not mention drafts or models.',`Draft answers (for reference):\n\n${fin.map(f=>`### Draft\n${f.text}`).join('\n\n')}\n\n---\nNow write your answer to this request:\n${q}`,{temp:0.3,max:prefs.max_tokens||2048});
+  else if(mode.judge=='vote')text=await oAsk('Write a clean, step-by-step solution that ends with "Final answer: ...". Use the chosen finalist; fix any mistake you find.',`Request:\n${q}\n\n${w.text}`,{temp:0.2,max:prefs.max_tokens||2048});
+  run.final={text,from:w.model,finalist:best,why,merged:mode.judge=='merge'&&fin.length>1};run.judging=false;oPaint();await oSave()}
+
+async function oStart(){
+  if(orch.busy)return;
+  const q=$('oq').value.trim();if(!q){toast('Write a request first');return}
+  const picked=[...document.querySelectorAll('#oModels input:checked')].map(i=>i.value);
+  if(!picked.length){toast('Pick at least one model');return}
+  let judge=$('oJudge').value||picked[0];if(!picked.includes(judge))judge=picked[0];
+  // the judge runs last, so it is still loaded when judging (one load fewer)
+  const order=[...picked.filter(p=>p!=judge),judge];
+  orch.run={id:oId(),title:q.slice(0,60),prompt:q,mode:$('oMode').value,judge,created:Date.now(),models:order.map(p=>({path:p,name:oShort(p),cands:[],rounds:[],state:'waiting',note:''}))};
+  orch.busy=true;orch.stop=false;drawOrch();
+  try{
+    if(orch.run.mode=='auto'){orch.liveWho='Choosing a method';oPaint();await oUse(order[0]);
+      const j=await oAsk('Classify the request for a team of AI models. Modes: deep (a hard question that needs careful reasoning), code (write or fix code), math (math or logic with one right answer), creative (stories, poems, lyrics, names), ideas (brainstorming, plans, strategies), quick (a simple fact or short answer).',
+        orch.run.prompt+'\n\nReturn {"mode":"deep|code|math|creative|ideas|quick"}',{temp:0,json:true,max:60});
+      orch.run.mode=j&&OMODES[j.mode]?j.mode:'deep';orch.run.auto=true}
+    orch.run.title=`${OMODES[orch.run.mode].name}: ${orch.run.prompt.slice(0,50)}`;await oSave();oLoadRuns();
+    for(const M of orch.run.models){orch.liveWho='';
+      if(!await oUse(M.path)){M.state='failed';M.note='Could not load this model';oPaint();continue}
+      orch.liveWho=M.name;await oModel(orch.run,M)}
+    orch.liveWho='Judge: '+oShort(judge);if(await oUse(judge))await oJudge(orch.run);
+  }catch(e){if(String(e.message)!='stopped')toast('Run stopped: '+e.message);orch.run.stopped=!orch.run.final}
+  orch.busy=false;orch.liveWho='';orch.live='';await oSave();drawOrch();oLoadRuns()}
+function oStop(){orch.stop=true;stopGen()}
+setTimeout(()=>{const b=$('oNewSide');if(b)b.onclick=()=>{if(orch.busy)return;orch.run=null;drawOrch();oSide()}},0);
+
+let oPaintT=0;function oPaint(){if(oPaintT)return;oPaintT=requestAnimationFrame(()=>{oPaintT=0;if(view=='orch'&&orch.run)oDrawRun()})}
+const oChip=s=>`<span class="ochip ${s}">${{new:'new',kept:'kept',edited:'edited',deleted:'deleted',added:'added'}[s]||s}</span>`;
+function oDrawRun(){
+  const r=orch.run,mode=OMODES[r.mode]||{name:'Choosing a method…',icon:'orch'},el=$('oRun');if(!el)return;
+  const open=new Set([...el.querySelectorAll('details[open]')].map(d=>d.dataset.k));
+  const fin=r.final?`<div class="ofinal"><div class="ofh">${ico('check')}<b>Best answer</b><span>${r.final.merged?'merged by the judge from':'from'} ${esc(r.final.from)}${r.final.why?' · '+esc(r.final.why):''}</span></div><div class="content">${md(r.final.text)}</div></div>`:'';
+  const votes=r.votes&&r.votes.length?`<div class="ovotes">${ico('check')}Votes: ${r.votes.slice(0,5).map(([a,c])=>`<span><b>${esc(a)}</b> ×${c}</span>`).join('')}</div>`:'';
+  el.innerHTML=`<div class="ohead"><div class="oq">${esc(r.prompt)}</div><div class="ometa"><span class="obadge">${ico(mode.icon||'orch')}${esc(mode.name)}${r.auto?' (auto)':''}</span>${r.models.map(m=>`<span class="omodel ${m.state}">${esc(m.name)}</span>`).join('')}<span class="omodel">judge: ${esc(oShort(r.judge))}</span></div></div>
+   ${orch.busy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>${esc(orch.liveWho)}${(()=>{const m=r.models.find(x=>x.state=='working');return m&&m.note?' · '+esc(m.note):''})()}${r.judging?' · comparing the finalists':''}<button class="btn" id="oStop" style="margin-left:auto">${ico('stop')}Stop</button></div>${orch.live?`<div class="olive">${esc(orch.live.slice(-600))}</div>`:''}`:''}
+   ${r.stopped?'<div class="sidehint" style="margin:8px 0">This run was stopped before it finished.</div>':''}${fin}${votes}
+   ${r.models.map((m,mi)=>`<div class="omsec"><div class="omh"><b>${esc(m.name)}</b><span>${m.state=='done'?`best: answer ${m.best?m.best.n:'?'}${m.best&&m.best.why?' · '+esc(m.best.why):''}`:esc(m.note||m.state)}</span></div>
+     <div class="ocands">${m.cands.map(c=>`<details class="ocand${c.status=='deleted'?' del':''}${c.best?' best':''}" data-k="${mi}-${c.n}"${open.has(mi+'-'+c.n)?' open':''}><summary><b>Answer ${c.n}</b>${oChip(c.status)}${c.best?'<span class="ochip best">best</span>':''}${c.score!=null?`<span class="oscore">${c.score}/10</span>`:''}<span class="ofirst">${esc(c.text.replace(/\s+/g,' ').slice(0,110))}</span></summary><div class="content">${md(c.text)}</div><div class="olog">${c.log.map(esc).join(' · ')}</div></details>`).join('')}</div>
+     ${m.rounds.length?`<details class="orounds" data-k="r${mi}"${open.has('r'+mi)?' open':''}><summary>${m.rounds.length} round${m.rounds.length>1?'s':''} of review</summary>${m.rounds.map(R=>`<div class="oround"><b>Round ${R.round}</b>${R.reviews.map(v=>`<div>Answer ${v.n} · ${v.score??'?'}/10${v.problems.length?': '+esc(v.problems.join('; ')):''}</div>`).join('')}${R.actions.length?`<div class="oact">${esc(R.actions.join(' · '))}</div>`:''}${R.done?`<div class="oact">${esc(R.done)}</div>`:''}</div>`).join('')}</details>`:''}</div>`).join('')}`;
+  if($('oStop'))$('oStop').onclick=oStop}
+async function drawOrch(){
+  const S=$('studio');
+  if(orch.run){S.innerHTML=`<div class="col ocol"><div class="obar"><button class="btn" id="oNew"${orch.busy?' disabled':''}>${ico('plus')}New run</button></div><div id="oRun"></div></div>`;
+    $('oNew').onclick=()=>{orch.run=null;drawOrch();oSide()};oDrawRun();return}
+  if(!orch.models){try{orch.models=(await api('/api/models')).filter(m=>m.supported!==false&&!/mmproj|embed/i.test(m.name))}catch(e){orch.models=[]}}
+  const sel=new Set(prefs.orch_models||(status.model?[status.model]:[]));
+  S.innerHTML=`<div class="col ocol"><div class="osetup">
+   <h1 class="ot">${ico('orch')}Orchestration</h1><p class="sub">Several models work on one request. Each one writes answers, criticizes and refines them by the rules of the method, then a judge picks the best. Models run one after another, so a run takes a while.</p>
+   <textarea id="oq" rows="4" placeholder="Ask something hard, e.g. Why do ships float even though steel sinks?">${esc(prefs.orch_last||'')}</textarea>
+   <div class="ogrid"><div class="field"><label>Method</label><select id="oMode"><option value="auto">Auto: pick the method from the request</option>${Object.entries(OMODES).map(([k,m])=>`<option value="${k}" ${prefs.orch_mode==k?'selected':''}>${m.name}</option>`).join('')}</select><small id="oDesc"></small></div>
+   <div class="field"><label>Judge</label><select id="oJudge"></select><small>Compares the models' best answers at the end.</small></div></div>
+   <div class="field"><label>Models (${orch.models.length} on this PC)</label><div id="oModels" class="omlist">${orch.models.map(m=>`<label class="omchk"><input type="checkbox" value="${esc(m.path)}" ${sel.has(m.path)?'checked':''}><span>${esc(oShort(m.name))}<small>${m.params||''} · ${(m.mb/1024).toFixed(1)} GB</small></span></label>`).join('')||'<div class="sidehint">No models found. Add some in Models.</div>'}</div></div>
+   <button class="btn pri" id="oGo">${ico('orch')}Start</button></div></div>`;
+  const desc=()=>{const v=$('oMode').value;$('oDesc').textContent=v=='auto'?'The first model reads the request and picks one of the methods below.':OMODES[v].desc};
+  const judges=()=>{const p=[...document.querySelectorAll('#oModels input:checked')].map(i=>i.value),cur=$('oJudge').value||prefs.orch_judge;
+    $('oJudge').innerHTML=p.map(x=>`<option value="${esc(x)}" ${x==cur?'selected':''}>${esc(oShort(x))}</option>`).join('')||'<option value="">Pick models first</option>';
+    prefs.orch_models=p;prefs.orch_judge=$('oJudge').value;savePrefs()};
+  desc();judges();
+  $('oMode').onchange=()=>{desc();prefs.orch_mode=$('oMode').value;savePrefs()};
+  $('oModels').onchange=judges;$('oJudge').onchange=()=>{prefs.orch_judge=$('oJudge').value;savePrefs()};
+  $('oq').oninput=()=>{prefs.orch_last=$('oq').value;clearTimeout(drawOrch.t);drawOrch.t=setTimeout(savePrefs,600)};
+  $('oGo').onclick=oStart}
 function setView(v){const prev=view;view=v;
   if(prev!=v)setTimeout(()=>{const t=v=='chat'?$('log'):v=='code'?$('codev'):$('studio');if(t){t.classList.remove('viewin');void t.offsetWidth;t.classList.add('viewin')}});$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
   const chatv=v=='chat',codev=v=='code';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
   document.querySelector('.ctxwrap').style.visibility=chatv?'':'hidden';$('studio').style.display=chatv||codev?'none':'block';$('codev').style.display=codev?'flex':'none';
-  $('sideChat').hidden=codev;$('sideCode').hidden=!codev;
-  if(codev)drawCode();else if(v=='orch')drawOrch();else if(!chatv)drawStudio()}
+  $('sideChat').hidden=codev||v=='orch';$('sideCode').hidden=!codev;$('sideOrch').hidden=v!='orch';
+  if(codev)drawCode();else if(v=='orch'){drawOrch();oLoadRuns()}else if(!chatv)drawStudio()}
 function modelSelect(kind){const list=(mediaModels||[]).filter(m=>m.kind==kind),cur=prefs['media_'+kind]||'';
   return `<select id="mediaSel">${'<option value="">None selected</option>'+list.map(m=>`<option value="${esc(m.path)}" ${m.path==cur?'selected':''}>${esc(m.name)} (${(m.mb/1024).toFixed(1)} GB)</option>`).join('')}</select>
    <small>${list.length?`${list.length} ${kind} model(s) found on this PC.`:`No ${kind} models found yet. Put them in the <b>models</b> folder next to Ithaca.exe, or add their folder below.`}</small>

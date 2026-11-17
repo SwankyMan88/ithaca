@@ -177,9 +177,33 @@ bool handle_store(const std::string& method, const std::string& path, const std:
     if (path == "/api/prefs") { simple(L"prefs.json", "{}"); return true; }
     // Coding chats, one file per folder: <store>\code_chats\<id>.json (the page derives the id from the folder path).
     // Kept on disk in full, so they survive a browser change and can be read outside Ithaca.
-    if (path.rfind("/api/codechats/", 0) == 0) {
-        std::wstring dir = g_store_dir + L"\\code_chats"; CreateDirectoryW(dir.c_str(), nullptr);
-        std::string id = path.substr(15);
+    // Orchestration runs: <store>\orch_runs\<id>.json; GET /api/orchruns lists them, newest first
+    if (path == "/api/orchruns" && method == "GET") {
+        std::wstring dir = g_store_dir + L"\\orch_runs"; CreateDirectoryW(dir.c_str(), nullptr);
+        std::vector<std::pair<double, std::string>> rows;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"\\*.json").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                bool ok; std::string s = read_file(dir + L"\\" + fd.cFileName, ok);
+                J j; if (!ok || !json_parse(s, j)) continue;
+                std::string id = w_to_utf8(fd.cFileName); id.resize(id.size() - 5);
+                double upd = j["updated"].num(0);
+                rows.push_back({upd, "{\"id\":" + json_esc(id) + ",\"title\":" + json_esc(j["title"].str("Run")) + ",\"mode\":" +
+                                         json_esc(j["mode"].str()) + ",\"updated\":" + std::to_string((long long)upd) + "}"});
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        out = "[";
+        for (size_t i = 0; i < rows.size(); i++) out += (i ? "," : "") + rows[i].second;
+        out += "]";
+        return true;
+    }
+    if (path.rfind("/api/codechats/", 0) == 0 || path.rfind("/api/orchruns/", 0) == 0) {
+        const bool orch = path.rfind("/api/orchruns/", 0) == 0;
+        std::wstring dir = g_store_dir + (orch ? L"\\orch_runs" : L"\\code_chats"); CreateDirectoryW(dir.c_str(), nullptr);
+        std::string id = path.substr(orch ? 14 : 15);
         bool del = false;
         if (id.size() > 7 && id.compare(id.size() - 7, 7, "/delete") == 0) { del = true; id.resize(id.size() - 7); }
         if (!valid_id(id)) { code = 400; out = "{\"error\":\"bad id\"}"; return true; }

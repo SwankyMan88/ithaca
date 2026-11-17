@@ -4,6 +4,7 @@ outputs/
 voices/
 chats/
 code_chats/
+orch_runs/
 memories.json
 prefs.json
 ithaca.json
