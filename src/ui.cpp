@@ -406,6 +406,21 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .osetup textarea{width:100%;box-sizing:border-box;margin:14px 0 6px;resize:vertical}
 .ogrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .omlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;max-height:280px;overflow:auto}
+.owrap{display:flex;flex-direction:column;min-height:100%}.owrap>.ocol{flex:1;width:100%;box-sizing:border-box}
+.ocomp{position:sticky;bottom:0;padding:8px 20px 14px;background:linear-gradient(transparent,var(--bg) 22%)}
+.obox{max-width:860px}.obox textarea{min-height:44px;border:0!important;background:transparent!important;box-shadow:none!important;padding:4px 0!important;width:100%}.obox .boxrow{flex-wrap:wrap}
+.obox select.toggle{background:transparent;appearance:none;-webkit-appearance:none;cursor:pointer;max-width:240px;text-overflow:ellipsis}
+.odesc{max-width:860px;justify-content:center}
+.opanel{max-width:860px;margin:0 auto 8px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:var(--shadow);max-height:52vh;overflow:auto;padding:4px 14px 12px}
+.oph{display:flex;align-items:center;gap:10px;position:sticky;top:0;background:var(--panel);padding:10px 0;z-index:1}.oph .search{margin:0;flex:1;max-width:260px}.oph span{color:var(--dim);font-size:13px;margin-left:auto}
+.ogroup{margin-top:8px}.ogh{display:flex;align-items:baseline;gap:8px;margin:6px 0}.ogh span{color:var(--faint);font-size:12.5px}
+.linkbtn{margin-left:auto;color:var(--a1);font-size:12.5px;background:none;border:0;cursor:pointer}
+.omchk.on{border-color:var(--a1)}
+.ointro{max-width:760px;margin:6vh auto 20px;text-align:center}.ointro .big{width:64px;height:64px;border-radius:18px;background:var(--grad);display:grid;place-items:center;margin:0 auto 16px;color:#fff}
+.ointro .big .icon{width:30px;height:30px}.ointro h1{margin:0 0 8px;font-size:24px}.ointro>p{color:var(--dim);line-height:1.6;margin:0 auto 22px;max-width:580px}
+.ometh{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:left}.ometh div{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel)}
+.ometh b{display:flex;align-items:center;gap:7px;margin-bottom:4px;font-size:14px}.ometh b .icon{width:15px;height:15px;color:var(--a1)}.ometh p{margin:0;color:var(--dim);font-size:12.5px;line-height:1.45}
+@media(max-width:820px){.ometh{grid-template-columns:1fr}}
 .omchk{display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--panel);font-size:13.5px}
 .omchk input{width:auto;margin:0;flex:none;accent-color:var(--a1)}
 .omchk span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.omchk small{display:block;color:var(--faint);font-size:11.5px}
@@ -1806,13 +1821,13 @@ async function oJudge(run){
 async function oStart(){
   if(orch.busy)return;
   const q=$('oq').value.trim();if(!q){toast('Write a request first');return}
-  const picked=[...document.querySelectorAll('#oModels input:checked')].map(i=>i.value);
-  if(!picked.length){toast('Pick at least one model');return}
+  const picked=(prefs.orch_models||[]).filter(p=>(orch.models||[]).some(m=>m.path==p));
+  if(!picked.length){toast('Pick at least one model');orch.mopen=true;oRedrawComposer();return}
   let judge=$('oJudge').value||picked[0];if(!picked.includes(judge))judge=picked[0];
   // the judge runs last, so it is still loaded when judging (one load fewer)
   const order=[...picked.filter(p=>p!=judge),judge];
   orch.run={id:oId(),title:q.slice(0,60),prompt:q,mode:$('oMode').value,judge,created:Date.now(),models:order.map(p=>({path:p,name:oShort(p),cands:[],rounds:[],state:'waiting',note:''}))};
-  orch.busy=true;orch.stop=false;drawOrch();
+  orch.busy=true;orch.stop=false;orch.mopen=false;prefs.orch_last='';savePrefs();drawOrch();oSave();setTimeout(oLoadRuns,300);
   try{
     if(orch.run.mode=='auto'){orch.liveWho='Choosing a method';oPaint();await oUse(order[0]);
       const j=await oAsk('Classify the request for a team of AI models. Modes: deep (a hard question that needs careful reasoning), code (write or fix code), math (math or logic with one right answer), creative (stories, poems, lyrics, names), ideas (brainstorming, plans, strategies), quick (a simple fact or short answer).',
@@ -1836,34 +1851,68 @@ function oDrawRun(){
   const fin=r.final?`<div class="ofinal"><div class="ofh">${ico('check')}<b>Best answer</b><span>${r.final.merged?'merged by the judge from':'from'} ${esc(r.final.from)}${r.final.why?' · '+esc(r.final.why):''}</span></div><div class="content">${md(r.final.text)}</div></div>`:'';
   const votes=r.votes&&r.votes.length?`<div class="ovotes">${ico('check')}Votes: ${r.votes.slice(0,5).map(([a,c])=>`<span><b>${esc(a)}</b> ×${c}</span>`).join('')}</div>`:'';
   el.innerHTML=`<div class="ohead"><div class="oq">${esc(r.prompt)}</div><div class="ometa"><span class="obadge">${ico(mode.icon||'orch')}${esc(mode.name)}${r.auto?' (auto)':''}</span>${r.models.map(m=>`<span class="omodel ${m.state}">${esc(m.name)}</span>`).join('')}<span class="omodel">judge: ${esc(oShort(r.judge))}</span></div></div>
-   ${orch.busy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>${esc(orch.liveWho)}${(()=>{const m=r.models.find(x=>x.state=='working');return m&&m.note?' · '+esc(m.note):''})()}${r.judging?' · comparing the finalists':''}<button class="btn" id="oStop" style="margin-left:auto">${ico('stop')}Stop</button></div>${orch.live?`<div class="olive">${esc(orch.live.slice(-600))}</div>`:''}`:''}
+   ${orch.busy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>${esc(orch.liveWho||'Starting')}${(()=>{const m=r.models.find(x=>x.state=='working');return m&&m.note?' · '+esc(m.note):''})()}${r.judging?' · comparing the finalists':''}<button class="btn" id="oStop" style="margin-left:auto">${ico('stop')}Stop</button></div>${orch.live?`<div class="olive">${esc(orch.live.slice(-600))}</div>`:''}`:''}
    ${r.stopped?'<div class="sidehint" style="margin:8px 0">This run was stopped before it finished.</div>':''}${fin}${votes}
    ${r.models.map((m,mi)=>`<div class="omsec"><div class="omh"><b>${esc(m.name)}</b><span>${m.state=='done'?`best: answer ${m.best?m.best.n:'?'}${m.best&&m.best.why?' · '+esc(m.best.why):''}`:esc(m.note||m.state)}</span></div>
      <div class="ocands">${m.cands.map(c=>`<details class="ocand${c.status=='deleted'?' del':''}${c.best?' best':''}" data-k="${mi}-${c.n}"${open.has(mi+'-'+c.n)?' open':''}><summary><b>Answer ${c.n}</b>${oChip(c.status)}${c.best?'<span class="ochip best">best</span>':''}${c.score!=null?`<span class="oscore">${c.score}/10</span>`:''}<span class="ofirst">${esc(c.text.replace(/\s+/g,' ').slice(0,110))}</span></summary><div class="content">${md(c.text)}</div><div class="olog">${c.log.map(esc).join(' · ')}</div></details>`).join('')}</div>
      ${m.rounds.length?`<details class="orounds" data-k="r${mi}"${open.has('r'+mi)?' open':''}><summary>${m.rounds.length} round${m.rounds.length>1?'s':''} of review</summary>${m.rounds.map(R=>`<div class="oround"><b>Round ${R.round}</b>${R.reviews.map(v=>`<div>Answer ${v.n} · ${v.score??'?'}/10${v.problems.length?': '+esc(v.problems.join('; ')):''}</div>`).join('')}${R.actions.length?`<div class="oact">${esc(R.actions.join(' · '))}</div>`:''}${R.done?`<div class="oact">${esc(R.done)}</div>`:''}</div>`).join('')}</details>`:''}</div>`).join('')}`;
   if($('oStop'))$('oStop').onclick=oStop}
+// size groups for the model picker (by parameter count)
+const OGROUPS=[['Large','over 16B',16,1e9],['Medium','6–16B',6,16],['Small','2–6B',2,6],['Tiny','under 2B',0,2]];
+const oParams=m=>{const x=String(m.params||'').match(/([\d.]+)\s*([BbMm])/);return x?(+x[1])*(/m/i.test(x[2])?0.001:1):(m.mb||0)/600};
+function oModelPanel(){
+  const sel=new Set(prefs.orch_models||[]),q=(orch.mq||'').toLowerCase(),vram=sysinfo&&sysinfo.gpu?sysinfo.gpu.vram_mb:0;
+  const list=(orch.models||[]).filter(m=>!q||m.name.toLowerCase().includes(q));
+  return OGROUPS.map(([g,range,lo,hi])=>{const ms=list.filter(m=>{const p=oParams(m);return p>=lo&&p<hi}).sort((a,b)=>oParams(b)-oParams(a)||a.name.localeCompare(b.name));
+    if(!ms.length)return '';const all=ms.every(m=>sel.has(m.path));
+    return `<div class="ogroup"><div class="ogh"><b>${g}</b><span>${range} · ${ms.length}</span><button class="linkbtn" data-ogall="${g}">${all?'Clear':'Select all'}</button></div>
+      <div class="omlist">${ms.map(m=>{const fits=vram?m.mb<vram*0.92:null;
+        return `<label class="omchk${sel.has(m.path)?' on':''}"><input type="checkbox" value="${esc(m.path)}" data-g="${g}" ${sel.has(m.path)?'checked':''}><span>${esc(oShort(m.name))}<small>${esc(m.params||'?')} · ${(m.mb/1024).toFixed(1)} GB${fits==null?'':fits?' · fits in VRAM':' · partly in RAM'}</small></span></label>`}).join('')}</div></div>`}).join('')
+    ||'<div class="sidehint">No models match.</div>'}
+function oComposer(){
+  const sel=prefs.orch_models||[],n=sel.length;
+  const judge=sel.includes(prefs.orch_judge)?prefs.orch_judge:sel[0]||'';
+  return `<div class="ocomp">${orch.mopen?`<div class="opanel"><div class="oph"><b>Models</b><input id="oMq" class="search" placeholder="Filter" value="${esc(orch.mq||'')}"><span>${n} picked</span><button class="btn" id="oMdone">Done</button></div><div id="oMl">${oModelPanel()}</div></div>`:''}
+   <div class="box obox"><textarea id="oq" rows="2" placeholder="Ask something hard, e.g. Why do ships float even though steel sinks?">${esc(prefs.orch_last||'')}</textarea>
+    <div class="boxrow">
+     <button class="toggle" id="oMbtn">${ico('chip')}${n?`${n} model${n>1?'s':''}`:'Pick models'}</button>
+     <select id="oMode" class="toggle"><option value="auto">Auto method</option>${Object.entries(OMODES).map(([k,m])=>`<option value="${k}" ${prefs.orch_mode==k?'selected':''}>${m.name}</option>`).join('')}</select>
+     <select id="oJudge" class="toggle" title="The judge compares the models' best answers">${sel.map(x=>`<option value="${esc(x)}" ${x==judge?'selected':''}>Judge: ${esc(oShort(x))}</option>`).join('')||'<option value="">Judge: pick models</option>'}</select>
+     <button class="send" id="oGo" title="${orch.busy?'Stop':'Start'}">${ico(orch.busy?'stop':'up')}</button></div></div>
+   <div class="under odesc" id="oDesc"></div></div>`}
+function oBindComposer(){
+  const desc=()=>{const v=$('oMode').value;$('oDesc').textContent=v=='auto'?'Picks the method from your request':OMODES[v].desc.split('. ')[0]+'.'};desc();
+  $('oMode').onchange=()=>{desc();prefs.orch_mode=$('oMode').value;savePrefs()};
+  $('oJudge').onchange=()=>{prefs.orch_judge=$('oJudge').value;savePrefs()};
+  $('oMbtn').onclick=async()=>{orch.mopen=!orch.mopen;if(orch.mopen){await getSys().catch(()=>{});if(!orch.models)await oLoadModels()}oRedrawComposer()};
+  const q=$('oq');q.oninput=()=>{prefs.orch_last=q.value;clearTimeout(drawOrch.t);drawOrch.t=setTimeout(savePrefs,600)};
+  q.onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();if(!orch.busy)oStart()}};
+  $('oGo').onclick=()=>orch.busy?oStop():oStart();
+  if(orch.mopen){
+    $('oMdone').onclick=()=>{orch.mopen=false;oRedrawComposer()};
+    $('oMq').oninput=e=>{orch.mq=e.target.value;$('oMl').innerHTML=oModelPanel();oBindModels()};
+    oBindModels()}}
+function oBindModels(){
+  const save=()=>{prefs.orch_models=[...new Set(prefs.orch_models||[])];if(!prefs.orch_models.includes(prefs.orch_judge))prefs.orch_judge=prefs.orch_models[0]||'';savePrefs();
+    const b=$('oMbtn'),n=prefs.orch_models.length;if(b)b.innerHTML=ico('chip')+(n?`${n} model${n>1?'s':''}`:'Pick models');
+    const j=$('oJudge');if(j)j.innerHTML=prefs.orch_models.map(x=>`<option value="${esc(x)}" ${x==prefs.orch_judge?'selected':''}>Judge: ${esc(oShort(x))}</option>`).join('')||'<option value="">Judge: pick models</option>';
+    const c=document.querySelector('.oph span');if(c)c.textContent=n+' picked'};
+  $('oMl').querySelectorAll('input[type=checkbox]').forEach(i=>i.onchange=()=>{const s=new Set(prefs.orch_models||[]);i.checked?s.add(i.value):s.delete(i.value);
+    prefs.orch_models=[...s];i.closest('.omchk').classList.toggle('on',i.checked);save();const g=i.dataset.g,b=$('oMl').querySelector(`[data-ogall="${g}"]`);
+    if(b)b.textContent=[...$('oMl').querySelectorAll(`input[data-g="${g}"]`)].every(x=>x.checked)?'Clear':'Select all'});
+  $('oMl').querySelectorAll('[data-ogall]').forEach(b=>b.onclick=()=>{const boxes=[...$('oMl').querySelectorAll(`input[data-g="${b.dataset.ogall}"]`)],on=!boxes.every(x=>x.checked),s=new Set(prefs.orch_models||[]);
+    boxes.forEach(x=>{x.checked=on;on?s.add(x.value):s.delete(x.value);x.closest('.omchk').classList.toggle('on',on)});prefs.orch_models=[...s];b.textContent=on?'Clear':'Select all';save()})}
+function oRedrawComposer(){const c=document.querySelector('#studio .ocomp');if(!c)return drawOrch();const keep=$('oq')?$('oq').value:'';c.outerHTML=oComposer();if($('oq'))$('oq').value=keep;oBindComposer()}
+async function oLoadModels(){try{orch.models=(await api('/api/models')).filter(m=>m.supported!==false&&!/mmproj|embed/i.test(m.name))}catch(e){orch.models=[]}}
 async function drawOrch(){
   const S=$('studio');
-  if(orch.run){S.innerHTML=`<div class="col ocol"><div class="obar"><button class="btn" id="oNew"${orch.busy?' disabled':''}>${ico('plus')}New run</button></div><div id="oRun"></div></div>`;
-    $('oNew').onclick=()=>{orch.run=null;drawOrch();oSide()};oDrawRun();return}
-  if(!orch.models){try{orch.models=(await api('/api/models')).filter(m=>m.supported!==false&&!/mmproj|embed/i.test(m.name))}catch(e){orch.models=[]}}
-  const sel=new Set(prefs.orch_models||(status.model?[status.model]:[]));
-  S.innerHTML=`<div class="col ocol"><div class="osetup">
-   <h1 class="ot">${ico('orch')}Orchestration</h1><p class="sub">Several models work on one request. Each one writes answers, criticizes and refines them by the rules of the method, then a judge picks the best. Models run one after another, so a run takes a while.</p>
-   <textarea id="oq" rows="4" placeholder="Ask something hard, e.g. Why do ships float even though steel sinks?">${esc(prefs.orch_last||'')}</textarea>
-   <div class="ogrid"><div class="field"><label>Method</label><select id="oMode"><option value="auto">Auto: pick the method from the request</option>${Object.entries(OMODES).map(([k,m])=>`<option value="${k}" ${prefs.orch_mode==k?'selected':''}>${m.name}</option>`).join('')}</select><small id="oDesc"></small></div>
-   <div class="field"><label>Judge</label><select id="oJudge"></select><small>Compares the models' best answers at the end.</small></div></div>
-   <div class="field"><label>Models (${orch.models.length} on this PC)</label><div id="oModels" class="omlist">${orch.models.map(m=>`<label class="omchk"><input type="checkbox" value="${esc(m.path)}" ${sel.has(m.path)?'checked':''}><span>${esc(oShort(m.name))}<small>${m.params||''} · ${(m.mb/1024).toFixed(1)} GB</small></span></label>`).join('')||'<div class="sidehint">No models found. Add some in Models.</div>'}</div></div>
-   <button class="btn pri" id="oGo">${ico('orch')}Start</button></div></div>`;
-  const desc=()=>{const v=$('oMode').value;$('oDesc').textContent=v=='auto'?'The first model reads the request and picks one of the methods below.':OMODES[v].desc};
-  const judges=()=>{const p=[...document.querySelectorAll('#oModels input:checked')].map(i=>i.value),cur=$('oJudge').value||prefs.orch_judge;
-    $('oJudge').innerHTML=p.map(x=>`<option value="${esc(x)}" ${x==cur?'selected':''}>${esc(oShort(x))}</option>`).join('')||'<option value="">Pick models first</option>';
-    prefs.orch_models=p;prefs.orch_judge=$('oJudge').value;savePrefs()};
-  desc();judges();
-  $('oMode').onchange=()=>{desc();prefs.orch_mode=$('oMode').value;savePrefs()};
-  $('oModels').onchange=judges;$('oJudge').onchange=()=>{prefs.orch_judge=$('oJudge').value;savePrefs()};
-  $('oq').oninput=()=>{prefs.orch_last=$('oq').value;clearTimeout(drawOrch.t);drawOrch.t=setTimeout(savePrefs,600)};
-  $('oGo').onclick=oStart}
+  if(!orch.models)await oLoadModels();
+  if(!prefs.orch_models)prefs.orch_models=status.model?(orch.models.filter(m=>oShort(m.path).toLowerCase()==oShort(status.model).toLowerCase()).map(m=>m.path)):[];
+  const intro=`<div class="ointro"><div class="big">${ico('orch')}</div><h1>Orchestration</h1><p>Several models work on one request. Each one writes answers, criticizes and refines them by the rules of the method, then a judge picks the best. Models run one after another, so a run takes a while.</p>
+    <div class="ometh">${Object.values(OMODES).map(m=>`<div><b>${ico(m.icon)}${m.name}</b><p>${m.desc}</p></div>`).join('')}</div></div>`;
+  S.innerHTML=`<div class="owrap"><div class="col ocol">${orch.run?`<div id="oRun"></div>`:intro}</div>${oComposer()}</div>`;
+  oBindComposer();
+  if(orch.run)oDrawRun()}
 function setView(v){const prev=view;view=v;
   if(prev!=v)setTimeout(()=>{const t=v=='chat'?$('log'):v=='code'?$('codev'):$('studio');if(t){t.classList.remove('viewin');void t.offsetWidth;t.classList.add('viewin')}});$('nav').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.view==v));
   const chatv=v=='chat',codev=v=='code';$('log').style.display=chatv?'':'none';document.querySelector('.composer').style.display=chatv?'':'none';
