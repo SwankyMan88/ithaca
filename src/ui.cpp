@@ -1705,6 +1705,8 @@ function oSide(){const el=$('orchRuns');if(!el)return;
 async function oAsk(system,user,{temp=0.7,max=1500,json=false}={}){
   if(orch.stop)throw new Error('stopped');
   const sys=system+(json?'\n\nReply with <json> followed by one JSON object and nothing else.':'');
+  // Qwen3 thinks at length before every reply: only on Thorough
+  if(orch.run&&orch.run.effort!='thorough'&&/qwen3/i.test((status.arch||'')+' '+(status.name||''))&&!/\/no_think/.test(user))user+=' /no_think';
   orch.live='';const r=await stream([{role:'system',content:sys},{role:'user',content:user}],
     Object.assign({temperature:temp,max_tokens:max},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint()});
   orch.live='';if(orch.stop)throw new Error('stopped');if(r.error)throw new Error(r.error);
@@ -1733,20 +1735,30 @@ async function oRunCode(text){const m=String(text).match(/```(?:python|py)\s*\n(
   try{const r=await api('/api/run',{code:m[1]});return String(r.output||'').slice(0,1500)}catch(e){return ''}}
 
 // The rule set for one model: candidates, then critique/refine rounds, then its best answer.
+// How much work each model does. Balanced keeps each method's minimum number of rounds.
+const OEFFORT={
+  fast:{name:'Fast',cands:2,rounds:m=>Math.min(2,m.max),tok:600,mins:3,edits:1},
+  balanced:{name:'Balanced',cands:3,rounds:m=>m.min,tok:900,mins:8,edits:2},
+  thorough:{name:'Thorough',cands:3,rounds:m=>m.max,tok:1500,mins:20,edits:3}};
 async function oModel(run,M){
-  const mode=OMODES[run.mode],q=run.prompt,P=M;let n=0;
-  P.state='working';oPaint();
-  const sysGen='You are one of several AI models working on the same request. '+mode.gen;
-  for(let k=0;k<mode.cands;k++){P.note=`Writing answer ${k+1} of ${mode.cands}`;
-    const text=await oAsk(sysGen+(mode.variety[k]?'\n'+mode.variety[k]:''),q,{temp:0.85,max:prefs.max_tokens||2048});
-    P.cands.push({n:++n,text,status:text?'new':'deleted',score:null,log:[text?`Written (${mode.variety[k]||'answer'})`:'Came back empty']});oPaint();await oSave()}
-  for(let round=1;round<=mode.max;round++){
+  const mode=OMODES[run.mode],q=run.prompt,P=M,E=OEFFORT[run.effort||'balanced']||OEFFORT.balanced;let n=0;
+  const t0=Date.now(),over=()=>Date.now()-t0>E.mins*60000;
+  P.state='working';P.started=t0;oPaint();
+  const cands=Math.min(mode.cands,E.cands),rounds=mode.max?Math.max(1,E.rounds(mode)):0,tok=Math.min(E.tok,prefs.max_tokens||2048);
+  const sysGen='You are one of several AI models working on the same request. '+mode.gen+' Be complete but concise.';
+  for(let k=0;k<cands;k++){P.note=`Writing answer ${k+1} of ${cands}`;
+    const text=await oAsk(sysGen+(mode.variety[k]?'\n'+mode.variety[k]:''),q,{temp:0.85,max:tok});
+    P.cands.push({n:++n,text,status:text?'new':'deleted',score:null,log:[text?`Written (${mode.variety[k]||'answer'})`:'Came back empty']});oPaint();await oSave();
+    if(over())break}
+  let bestSoFar=0,stall=0;
+  for(let round=1;round<=rounds&&!over();round++){
     const alive=P.cands.filter(c=>c.status!='deleted');if(!alive.length)break;
-    P.note=`Round ${round}: criticizing`;oPaint();
+    P.note=`Round ${round} of ${rounds}: reviewing`;oPaint();
     let runs='';
     if(mode.run){for(const c of alive){const o=await oRunCode(c.text);if(o)runs+=`\n\nRun output of answer ${c.n}:\n${o}`}}
-    let rev=null;for(let t=0;t<2&&!(rev&&(Array.isArray(rev)||Object.values(rev).some(Array.isArray)));t++)rev=await oAsk('You review answers to a request. '+mode.crit+' Score each answer from 1 (bad) to 10 (excellent). Set good_enough to true only if the best answer has no real problems left.',
-      `Request:\n${q}\n\n${oNum(alive)}${runs}\n\nReview every answer above, in order. Example of the format: {"reviews":[{"answer_number":1,"score":0,"problems":["<a specific problem you found>"]},{"answer_number":2,"score":0,"problems":["<a specific problem>","<another>"]}],"good_enough":false} (replace each 0 with your score from 1 to 10, and each <...> with a real problem; use [] if there are none)`,{temp:t?0.1:0.3,json:true,max:1500});
+    let rev=null;for(let t=0;t<2&&!(rev&&(Array.isArray(rev)||Object.values(rev).some(Array.isArray)));t++)rev=await oAsk('You review answers to a request. '+mode.crit+' Score each answer from 1 (bad) to 10 (excellent). Give the specific problems, briefly.'+
+      (round>1?` This is review round ${round}: the answers were already reviewed and revised, so be stricter than before. Look for what an expert would still fix; give 9 or 10 only when nothing is left.`:''),
+      `Request:\n${q}\n\n${oNum(alive)}${runs}\n\nReview every answer above, in order. Example of the format: {"reviews":[{"answer_number":1,"score":0,"problems":["<a specific problem you found>"]},{"answer_number":2,"score":0,"problems":["<a specific problem>","<another>"]}]} (replace each 0 with your score from 1 to 10, and each <...> with a real problem; use [] if there are none)`,{temp:t?0.1:0.3,json:true,max:900});
     const R={round,reviews:[],actions:[]};P.rounds.push(R);
     // small models vary the shape: "Answer 2" or an id instead of a number, "7/10" scores, problems as one string
     const list=rev?(Array.isArray(rev)?rev:Array.isArray(rev.reviews)?rev.reviews:Object.values(rev).find(Array.isArray)||[]):[];
@@ -1755,47 +1767,44 @@ async function oModel(run,M){
       const id=num(v.answer_number??v.answer??v.id??v.n??v.number);const c=alive.find(x=>x.n==id)||alive[i];if(!c||R.reviews.some(z=>z.n==c.n))return;
       const sc=num(v.score??v.rating);if(sc>=1)c.score=Math.min(10,Math.round(sc));   // 0: the example's placeholder
       const pr=v.problems??v.issues??v.flaws??[];R.reviews.push({n:c.n,score:c.score,problems:(Array.isArray(pr)?pr:[pr]).filter(Boolean).map(String).filter(x=>!/^\s*<[^>]*>\s*$/.test(x)).slice(0,6)})});
-    R.raw=list.length?'':JSON.stringify(rev).slice(0,600);
     oPaint();
+    if(!R.reviews.length){R.done='The review could not be read; moving on.';break}
     const best=Math.max(0,...alive.map(c=>c.score||0));
-    if(round>mode.min-1&&round>=mode.min&&rev&&rev.good_enough&&best>=8){R.done=`Stopped after round ${round}: the answers hold up (best score ${best}/10).`;break}
-    // refine: decide per answer, then do the edits and additions as plain writing
-    P.note=`Round ${round}: refining`;oPaint();
-    const dec=await oAsk('You improve a set of answers using the reviews. For each answer choose "keep" (no real problems), "edit" (fixable problems) or "delete" (wrong or clearly worse than the others). If a better approach is missing, describe it in "add" (otherwise "").',
-      `Request:\n${q}\n\n${oNum(alive)}\n\nReviews:\n${R.reviews.map(v=>`Answer ${v.n} (score ${v.score}): ${v.problems.join('; ')||'no problems'}`).join('\n')}\n\nDecide for every answer above, in order. Example of the format: {"actions":[{"answer_number":1,"do":"edit"},{"answer_number":2,"do":"keep"},{"answer_number":3,"do":"delete"}],"add":""}`,{temp:0.3,json:true,max:600});
-    const al=dec?(Array.isArray(dec.actions)?dec.actions:Object.values(dec).find(Array.isArray)||[]):[];
-    let acts=al.length?al.map((a,i)=>{const id=num(a&&(a.answer_number??a.answer??a.id)),c=alive.find(x=>x.n==id)||alive[i];
-      return c?{answer:c.n,do:/del/i.test(a&&a.do)?'delete':/edit|fix|rewrite/i.test(a&&a.do)?'edit':'keep'}:null}).filter(Boolean)
-      :alive.map(c=>({answer:c.n,do:(c.score||0)>=8?'keep':'edit'}));
-    // never delete every answer: the best-scored one stays
-    const dels=acts.filter(a=>a.do=='delete').map(a=>+a.answer);
-    if(dels.length>=alive.length){const keep=alive.slice().sort((a,b)=>(b.score||0)-(a.score||0))[0];acts=acts.map(a=>+a.answer==keep.n?{answer:keep.n,do:'edit'}:a)}
-    for(const a of acts){const c=alive.find(x=>x.n==+a.answer);if(!c)continue;
-      if(a.do=='delete'){c.status='deleted';c.log.push(`Round ${round}: deleted`);R.actions.push(`Deleted answer ${c.n}`)}
-      else if(a.do=='edit'){P.note=`Round ${round}: editing answer ${c.n}`;oPaint();
+    // early stops only after the method's minimum number of reviews (4 for hard questions on Balanced)
+    const minR=Math.min(mode.min,rounds);
+    stall=best>bestSoFar?0:stall+1;bestSoFar=Math.max(bestSoFar,best);
+    if(round>=minR&&alive.every(c=>(c.score||0)>=8)){R.done=`Stopped after round ${round}: every answer scores 8 or more.`;break}
+    if(round>=minR&&stall>=2){R.done=`Stopped after round ${round}: the scores stopped improving.`;break}
+    if(round==rounds)break;   // the last round only scores; no edits nobody will review
+    // refine by score: 8+ kept, 4-7 edited, 3 or less deleted (one always survives); a deleted answer is replaced
+    const ranked=alive.slice().sort((a,b)=>(b.score||0)-(a.score||0));let deleted=0;
+    // what gets rewritten: everything under 8; if nothing is, the weakest answer that still has listed problems
+    // (models grade their own answers kindly, so this keeps every round refining). Capped per round by effort.
+    const probs=c=>(R.reviews.find(v=>v.n==c.n)||{problems:[]}).problems.length;
+    let edit=alive.filter(c=>(c.score||5)>3&&(c.score||5)<8);
+    if(!edit.length){const w=ranked.slice().reverse().find(c=>(c.score||5)<10&&probs(c));if(w)edit=[w]}
+    edit=new Set(edit.sort((a,b)=>(a.score||5)-(b.score||5)).slice(0,E.edits));
+    for(const c of alive){const s=c.score||5;
+      if(s<=3&&c!==ranked[0]){c.status='deleted';deleted++;c.log.push(`Round ${round}: deleted (${s}/10)`);R.actions.push(`Deleted answer ${c.n}`)}
+      else if(!edit.has(c)){c.status=c.status=='new'?'kept':c.status;c.log.push(`Round ${round}: kept (${s}/10)`);R.actions.push(`Kept answer ${c.n}`)}
+      else{if(over())break;P.note=`Round ${round} of ${rounds}: editing answer ${c.n}`;oPaint();
         const pr=(R.reviews.find(v=>v.n==c.n)||{problems:[]}).problems;
         const nt=await oAsk(sysGen+'\nYou are revising your earlier answer. Fix every problem listed and keep what is already good. Reply with the full revised answer only, with no comments about the changes.',
-          `Earlier answer:\n${c.text}\n\nProblems to fix:\n- ${pr.join('\n- ')||'make it clearer and more complete'}\n\n---\nNow write the revised answer to this request:\n${q}`,{temp:0.5,max:prefs.max_tokens||2048});
-        if(nt)c.text=nt;
-        c.status='edited';c.log.push(`Round ${round}: edited`);R.actions.push(`Edited answer ${c.n}`)}
-      else{c.status=c.status=='new'?'kept':c.status;c.log.push(`Round ${round}: kept`);R.actions.push(`Kept answer ${c.n}`)}
+          `Earlier answer:\n${c.text}\n\nProblems to fix:\n- ${pr.join('\n- ')||'make it clearer and more complete'}\n\n---\nNow write the revised answer to this request:\n${q}`,{temp:0.5,max:tok});
+        if(nt)c.text=nt;c.status='edited';c.log.push(`Round ${round}: edited (was ${s}/10)`);R.actions.push(`Edited answer ${c.n}`)}
       oPaint()}
-    const add=dec&&typeof dec.add=='string'?dec.add.trim():'';
-    if(add&&P.cands.filter(c=>c.status!='deleted').length<mode.cands){P.note=`Round ${round}: adding an answer`;oPaint();
-      const text=await oAsk(sysGen+'\nTake this approach: '+add,q,{temp:0.7,max:prefs.max_tokens||2048});
-      P.cands.push({n:++n,text,status:'added',score:null,log:[`Round ${round}: added (${add.slice(0,80)})`]});R.actions.push(`Added answer ${n}`)}
+    if(deleted&&!over()){const lost=R.reviews.filter(v=>(v.score||0)<=3).flatMap(v=>v.problems).slice(0,4);
+      P.note=`Round ${round} of ${rounds}: adding an answer`;oPaint();
+      const text=await oAsk(sysGen+'\nTake a different approach from the earlier attempts'+(lost.length?', avoiding these mistakes: '+lost.join('; '):'')+'.',q,{temp:0.8,max:tok});
+      if(text){P.cands.push({n:++n,text,status:'added',score:null,log:[`Round ${round}: added to replace a deleted answer`]});R.actions.push(`Added answer ${n}`)}}
     oPaint();await oSave()}
-  // the model's own pick
+  if(over()&&P.rounds.length<rounds){const R=P.rounds[P.rounds.length-1];if(R)R.done=(R.done?R.done+' ':'')+`Time limit (${E.mins} min) reached.`}
+  // the model's best: the highest review score (no extra call); ties go to the answer reviewed last
   const alive=P.cands.filter(c=>c.status!='deleted'&&c.text);
   if(!alive.length){P.state='failed';P.note='No usable answer';oPaint();await oSave();return}
-  P.note='Choosing its best answer';oPaint();
-  let pick=null;
-  if(alive.length>1){const j=await oAsk('Choose the single best answer to the request. Judge correctness first, then completeness and clarity.',
-      `Request:\n${q}\n\n${oNum(alive)}\n\nExample of the format: {"best_answer_number":0,"why":"<one sentence>"} (0 = the number of the best answer)`,{temp:0.2,json:true,max:300});
-    if(j)pick={n:+String(j.best_answer_number??j.best??'').replace(/\D+/g,''),why:String(j.why||'')}}
-  const top=alive.find(c=>pick&&c.n==pick.n)||alive.slice().sort((a,b)=>(b.score||0)-(a.score||0))[0];
-  P.best={n:top.n,why:pick&&pick.n==top.n?pick.why:'highest review score'};top.best=true;
-  P.state='done';P.note='';oPaint();await oSave()}
+  const top=alive.slice().sort((a,b)=>(b.score||0)-(a.score||0)||(b.status=='edited')-(a.status=='edited'))[0];
+  P.best={n:top.n,why:top.score?`highest review score (${top.score}/10)`:'its only answer'};top.best=true;
+  P.secs=Math.round((Date.now()-t0)/1000);P.state='done';P.note='';oPaint();await oSave()}
 
 // The judge: compares the models' best answers (and, for math, the vote) and writes the final answer.
 async function oJudge(run){
@@ -1813,7 +1822,7 @@ async function oJudge(run){
     const bk=j&&+String(j.best_finalist_number??j.best??'').replace(/\D+/g,'');if(bk&&fin.some(f=>f.k==bk)){best=bk;why=String(j.why||'')}}
   const w=fin.find(f=>f.k==best);let text=w.text;
   if(mode.judge=='merge'&&fin.length>1)text=await oAsk('Write the best possible answer to the user\'s request. Below are draft answers from other models; the first one is the strongest. Build on it and add anything correct and valuable from the others. Reply with the answer only: no comments about the drafts, no mention of models or finalists.',
-      `Draft answers (for reference):\n\n### Strongest draft\n${w.text}\n\n${fin.filter(f=>f.k!=best).map(f=>`### Other draft\n${f.text}`).join('\n\n')}\n\n---\nNow write your answer to this request:\n${q}`,{temp:0.4,max:prefs.max_tokens||2048});
+      `Draft answers (for reference):\n\n### Strongest draft\n${w.text}\n\n${fin.filter(f=>f.k!=best).map(f=>`### Other draft\n${f.text}`).join('\n\n')}\n\n---\nNow write your answer to this request:\n${q}`,{temp:0.4,max:Math.min(1500,prefs.max_tokens||2048)});
   else if(mode.judge=='consensus'&&fin.length>1)text=await oAsk('Write one accurate answer to the user\'s request, using the draft answers below as reference. If they disagree on something, say so briefly and say which is more likely right. Reply with the answer only; do not mention drafts or models.',`Draft answers (for reference):\n\n${fin.map(f=>`### Draft\n${f.text}`).join('\n\n')}\n\n---\nNow write your answer to this request:\n${q}`,{temp:0.3,max:prefs.max_tokens||2048});
   else if(mode.judge=='vote')text=await oAsk('Write a clean, step-by-step solution that ends with "Final answer: ...". Use the chosen finalist; fix any mistake you find.',`Request:\n${q}\n\n${w.text}`,{temp:0.2,max:prefs.max_tokens||2048});
   run.final={text,from:w.model,finalist:best,why,merged:mode.judge=='merge'&&fin.length>1};run.judging=false;oPaint();await oSave()}
@@ -1826,7 +1835,7 @@ async function oStart(){
   let judge=$('oJudge').value||picked[0];if(!picked.includes(judge))judge=picked[0];
   // the judge runs last, so it is still loaded when judging (one load fewer)
   const order=[...picked.filter(p=>p!=judge),judge];
-  orch.run={id:oId(),title:q.slice(0,60),prompt:q,mode:$('oMode').value,judge,created:Date.now(),models:order.map(p=>({path:p,name:oShort(p),cands:[],rounds:[],state:'waiting',note:''}))};
+  orch.run={id:oId(),title:q.slice(0,60),prompt:q,mode:$('oMode').value,effort:$('oEffort').value||'balanced',judge,created:Date.now(),models:order.map(p=>({path:p,name:oShort(p),cands:[],rounds:[],state:'waiting',note:''}))};
   orch.busy=true;orch.stop=false;orch.mopen=false;prefs.orch_last='';savePrefs();drawOrch();oSave();setTimeout(oLoadRuns,300);
   try{
     if(orch.run.mode=='auto'){orch.liveWho='Choosing a method';oPaint();await oUse(order[0]);
@@ -1841,6 +1850,7 @@ async function oStart(){
   }catch(e){if(String(e.message)!='stopped')toast('Run stopped: '+e.message);orch.run.stopped=!orch.run.final}
   orch.busy=false;orch.liveWho='';orch.live='';await oSave();drawOrch();oLoadRuns()}
 function oStop(){orch.stop=true;stopGen()}
+setInterval(()=>{if(orch.busy&&view=='orch')oPaint()},1000);
 setTimeout(()=>{const b=$('oNewSide');if(b)b.onclick=()=>{if(orch.busy)return;orch.run=null;drawOrch();oSide()}},0);
 
 let oPaintT=0;function oPaint(){if(oPaintT)return;oPaintT=requestAnimationFrame(()=>{oPaintT=0;if(view=='orch'&&orch.run)oDrawRun()})}
@@ -1850,10 +1860,10 @@ function oDrawRun(){
   const open=new Set([...el.querySelectorAll('details[open]')].map(d=>d.dataset.k));
   const fin=r.final?`<div class="ofinal"><div class="ofh">${ico('check')}<b>Best answer</b><span>${r.final.merged?'merged by the judge from':'from'} ${esc(r.final.from)}${r.final.why?' · '+esc(r.final.why):''}</span></div><div class="content">${md(r.final.text)}</div></div>`:'';
   const votes=r.votes&&r.votes.length?`<div class="ovotes">${ico('check')}Votes: ${r.votes.slice(0,5).map(([a,c])=>`<span><b>${esc(a)}</b> ×${c}</span>`).join('')}</div>`:'';
-  el.innerHTML=`<div class="ohead"><div class="oq">${esc(r.prompt)}</div><div class="ometa"><span class="obadge">${ico(mode.icon||'orch')}${esc(mode.name)}${r.auto?' (auto)':''}</span>${r.models.map(m=>`<span class="omodel ${m.state}">${esc(m.name)}</span>`).join('')}<span class="omodel">judge: ${esc(oShort(r.judge))}</span></div></div>
+  el.innerHTML=`<div class="ohead"><div class="oq">${esc(r.prompt)}</div><div class="ometa"><span class="obadge">${ico(mode.icon||'orch')}${esc(mode.name)}${r.auto?' (auto)':''}</span><span class="omodel">${esc((OEFFORT[r.effort]||OEFFORT.balanced).name)}</span>${r.models.map(m=>`<span class="omodel ${m.state}">${esc(m.name)}</span>`).join('')}<span class="omodel">judge: ${esc(oShort(r.judge))}</span></div></div>
    ${orch.busy?`<div class="cwwork"><span class="dots"><span></span><span></span><span></span></span>${esc(orch.liveWho||'Starting')}${(()=>{const m=r.models.find(x=>x.state=='working');return m&&m.note?' · '+esc(m.note):''})()}${r.judging?' · comparing the finalists':''}<button class="btn" id="oStop" style="margin-left:auto">${ico('stop')}Stop</button></div>${orch.live?`<div class="olive">${esc(orch.live.slice(-600))}</div>`:''}`:''}
    ${r.stopped?'<div class="sidehint" style="margin:8px 0">This run was stopped before it finished.</div>':''}${fin}${votes}
-   ${r.models.map((m,mi)=>`<div class="omsec"><div class="omh"><b>${esc(m.name)}</b><span>${m.state=='done'?`best: answer ${m.best?m.best.n:'?'}${m.best&&m.best.why?' · '+esc(m.best.why):''}`:esc(m.note||m.state)}</span></div>
+   ${r.models.map((m,mi)=>`<div class="omsec"><div class="omh"><b>${esc(m.name)}</b><span>${m.state=='done'?`best: answer ${m.best?m.best.n:'?'}${m.best&&m.best.why?' · '+esc(m.best.why):''}${m.secs?` · ${Math.floor(m.secs/60)}:${String(m.secs%60).padStart(2,'0')}`:''}`:esc(m.note||m.state)+(m.state=='working'&&m.started?` · ${Math.floor((Date.now()-m.started)/60000)}:${String(Math.floor((Date.now()-m.started)/1000)%60).padStart(2,'0')}`:'')}</span></div>
      <div class="ocands">${m.cands.map(c=>`<details class="ocand${c.status=='deleted'?' del':''}${c.best?' best':''}" data-k="${mi}-${c.n}"${open.has(mi+'-'+c.n)?' open':''}><summary><b>Answer ${c.n}</b>${oChip(c.status)}${c.best?'<span class="ochip best">best</span>':''}${c.score!=null?`<span class="oscore">${c.score}/10</span>`:''}<span class="ofirst">${esc(c.text.replace(/\s+/g,' ').slice(0,110))}</span></summary><div class="content">${md(c.text)}</div><div class="olog">${c.log.map(esc).join(' · ')}</div></details>`).join('')}</div>
      ${m.rounds.length?`<details class="orounds" data-k="r${mi}"${open.has('r'+mi)?' open':''}><summary>${m.rounds.length} round${m.rounds.length>1?'s':''} of review</summary>${m.rounds.map(R=>`<div class="oround"><b>Round ${R.round}</b>${R.reviews.map(v=>`<div>Answer ${v.n} · ${v.score??'?'}/10${v.problems.length?': '+esc(v.problems.join('; ')):''}</div>`).join('')}${R.actions.length?`<div class="oact">${esc(R.actions.join(' · '))}</div>`:''}${R.done?`<div class="oact">${esc(R.done)}</div>`:''}</div>`).join('')}</details>`:''}</div>`).join('')}`;
   if($('oStop'))$('oStop').onclick=oStop}
@@ -1877,13 +1887,16 @@ function oComposer(){
     <div class="boxrow">
      <button class="toggle" id="oMbtn">${ico('chip')}${n?`${n} model${n>1?'s':''}`:'Pick models'}</button>
      <select id="oMode" class="toggle"><option value="auto">Auto method</option>${Object.entries(OMODES).map(([k,m])=>`<option value="${k}" ${prefs.orch_mode==k?'selected':''}>${m.name}</option>`).join('')}</select>
+     <select id="oEffort" class="toggle" title="How much work each model does">${Object.entries(OEFFORT).map(([k,e])=>`<option value="${k}" ${(prefs.orch_effort||'balanced')==k?'selected':''}>${e.name}</option>`).join('')}</select>
      <select id="oJudge" class="toggle" title="The judge compares the models' best answers">${sel.map(x=>`<option value="${esc(x)}" ${x==judge?'selected':''}>Judge: ${esc(oShort(x))}</option>`).join('')||'<option value="">Judge: pick models</option>'}</select>
      <button class="send" id="oGo" title="${orch.busy?'Stop':'Start'}">${ico(orch.busy?'stop':'up')}</button></div></div>
    <div class="under odesc" id="oDesc"></div></div>`}
 function oBindComposer(){
-  const desc=()=>{const v=$('oMode').value;$('oDesc').textContent=v=='auto'?'Picks the method from your request':OMODES[v].desc.split('. ')[0]+'.'};desc();
+  const desc=()=>{const v=$('oMode').value,E=OEFFORT[$('oEffort').value]||OEFFORT.balanced;
+    $('oDesc').textContent=(v=='auto'?'Picks the method from your request':OMODES[v].desc.split('. ')[0]+'.')+` · ${E.name}: up to ${E.mins} min per model`};desc();
   $('oMode').onchange=()=>{desc();prefs.orch_mode=$('oMode').value;savePrefs()};
   $('oJudge').onchange=()=>{prefs.orch_judge=$('oJudge').value;savePrefs()};
+  $('oEffort').onchange=()=>{prefs.orch_effort=$('oEffort').value;savePrefs();desc()};
   $('oMbtn').onclick=async()=>{orch.mopen=!orch.mopen;if(orch.mopen){await getSys().catch(()=>{});if(!orch.models)await oLoadModels()}oRedrawComposer()};
   const q=$('oq');q.oninput=()=>{prefs.orch_last=q.value;clearTimeout(drawOrch.t);drawOrch.t=setTimeout(savePrefs,600)};
   q.onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();if(!orch.busy)oStart()}};
