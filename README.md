@@ -19,7 +19,7 @@
   <img src="docs/demo-chat-image.webp" alt="Asking Ithaca for a picture, watching it render, copying it into a new chat and asking what it shows">
 </p>
 
-Chat with language models, show them pictures, hand them PDFs, and have them make images, video and speech. Everything runs on your own PC, from one exe of about 2 MB.
+Chat with language models, show them pictures, hand them PDFs, and have them make images, video and speech. Let one work on the code and Office files in a folder, or put several on one hard question. Everything runs on your own PC, from one exe of about 3 MB.
 
 There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model loaders, tokenizers, transformer code, CPU and GPU kernels, the image, video and speech engines and the web UI are all written from scratch in C++. GPU code is generated as PTX at startup and compiled by the NVIDIA driver you already have.
 
@@ -68,10 +68,36 @@ Open **Coding** in the sidebar, pick a folder, and ask for a change. The model w
 - **You stay in charge.** Every change is shown as a diff to approve, or applied straight away if you turn on auto-apply. Commands (tests, builds) always ask first, have a time limit, and stop with **Stop** or Esc.
 - **Undo.** Each change can be undone, or **Undo all** rolls back a whole task. Deleted files go to the Recycle Bin.
 - **Only this PC.** The file tools answer requests from this computer only, never through `--host` or from another website.
+- **Valid tool calls, even from small models.** Once the model starts a tool call, Ithaca only lets it pick tokens that keep the JSON valid. With Gemma 3 4B, broken tool calls dropped from most calls to about 1 in 27.
+- **Doesn't get stuck.** When the model repeats the same step with the same result, Ithaca tells it to try something else, and stops the task if it keeps going.
+- **Chats are kept per folder.** Each folder's chat is saved in full next to the exe, so it comes back when you switch folders. Delete one from the sidebar; the folder itself is never touched.
+- **Long tasks fit.** When a task nears the context limit, older steps are compacted into a summary and the newest steps stay word for word. This works in Chat too, and both can be turned off under Settings → General.
 
 Models trained for tool calls work best. Qwen3-Coder 30B-A3B runs at about 15–18 tokens a second on a 12 GB card, with the rest of the model in RAM.
 
 **The test bench.** `eval/agent_eval.py` gives the agent 8 small tasks (fix a bug, add a feature, rename a function, edit a Word file and a spreadsheet, change a config, write a README, answer a question). Each task has a hidden check, so pass rates are measured, not guessed. You can also compare system prompts. `eval/chat_eval.py` does the same for the Chat page with 12 auto-checked questions. Running these benches is what pushed the agent from 38% to 75%: most of the gains came from fixing how Ithaca reads tool calls, not from changing the prompt.
+
+## Orchestration
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/orch-dark.svg">
+  <img src="docs/orch-light.svg" alt="A request goes to several models; each writes answers, criticizes and refines them round after round, keeping, editing, deleting or adding answers; a judge compares their best answers">
+</picture>
+
+Open **Orchestration**, tick the models you want, pick a judge, and ask. Each model works through the request on its own: it writes several answers, reviews them, and refines them over several rounds, keeping, editing, deleting or adding answers until they hold up. Then the judge compares each model's best answer.
+
+The steps change with the kind of request. **Auto** reads the request and picks one of these:
+
+| Method | Each model | The judge |
+|---|---|---|
+| Hard question | 3 answers, criticized and refined for at least 4 rounds (up to 6) | merges the strongest points |
+| Code | 3 solutions; Python is run, and the output goes into the reviews; 2–4 rounds | picks the solution that works |
+| Math & logic | 3 independent solutions, every step re-checked; 2–4 rounds | holds a vote on the final answers, then writes up the winner |
+| Creative writing | 3 drafts in different styles, edited like an editor would; 3–4 rounds | picks the strongest piece |
+| Ideas & plans | 3 plans; weak ones dropped, overlaps merged, new ones added; 3–4 rounds | combines them into one plan |
+| Quick facts | one answer | writes one answer and notes where the models disagree |
+
+You see everything: every answer with its score and whether it was kept, edited, deleted or added, every round of review, and which model the best answer came from. Runs are saved next to the exe and listed in the sidebar. Models run one after another (the judge goes last, so it's still loaded), so a run with two small models takes about 10 minutes.
 
 ## Speed, compared with llama.cpp
 
@@ -277,6 +303,7 @@ src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 - Faster gpt-oss prompts; DeepSeek V3 routing.
 - SD3, LoRAs, image-to-video; faster Flux and Wan 14B on 12 GB cards.
 - AMD and Intel GPUs (Vulkan).
+- Orchestration: run small models at the same time when they fit in VRAM together.
 
 ## License
 

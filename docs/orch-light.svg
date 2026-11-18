@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="330" viewBox="0 0 1100 330" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif">
+<style>
+.up{opacity:0;transform-box:fill-box;transform:translateY(10px);animation:up .6s cubic-bezier(.2,.8,.2,1) forwards}
+.flow{stroke-dasharray:6 8;animation:flow 1.2s linear infinite}
+.spin{transform-box:fill-box;transform-origin:center;animation:spin 6s linear infinite}
+@keyframes up{to{opacity:1;transform:none}}
+@keyframes flow{to{stroke-dashoffset:-28}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.up,.flow,.spin{animation:none;opacity:1;transform:none}}
+</style>
+<defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b7dff"/><stop offset="1" stop-color="#38bdf8"/></linearGradient></defs>
+<rect width="1100" height="330" rx="16" fill="#ffffff"/>
+<text x="36" y="48" font-size="22" fill="#1f2328" font-weight="600">Several models, one answer that held up</text>
+<text x="36" y="76" font-size="15" fill="#59636e">Every model runs the method for the kind of request; a judge compares their best answers</text>
+<g class="up" style="animation-delay:0.10s"><rect x="36" y="104" width="200" height="150" rx="14" fill="#f6f8fa" stroke="#d0d7de"/><text x="54" y="136" font-size="16.5" fill="#1f2328" font-weight="600">Request</text><text x="54" y="160" font-size="12.5" fill="#59636e">Auto picks a method:</text><text x="54" y="179" font-size="12.5" fill="#59636e">hard question, code, math,</text><text x="54" y="198" font-size="12.5" fill="#59636e">creative, ideas, quick</text></g>
+<line class="flow" x1="240" y1="179" x2="270" y2="179" stroke="url(#acc)" stroke-width="2.5"/>
+<g class="up" style="animation-delay:0.25s"><rect x="274" y="104" width="520" height="150" rx="14" fill="#f6f8fa" stroke="url(#acc)" stroke-width="1.5"/><text x="292" y="136" font-size="16.5" fill="#1f2328" font-weight="600">Each model, by the method’s rules</text><text x="292" y="160" font-size="12.5" fill="#59636e">3 answers  →  criticize and score  →  refine, round after round  →  its best</text></g>
+<g class="up" style="animation-delay:0.45s"><rect x="292" y="180" width="80" height="26" rx="13" fill="none" stroke="#8b949e"/><text x="332" y="198" font-size="12.5" fill="#8b949e" text-anchor="middle">kept</text></g>
+<g class="up" style="animation-delay:0.55s"><rect x="384" y="180" width="80" height="26" rx="13" fill="none" stroke="#e3b341"/><text x="424" y="198" font-size="12.5" fill="#e3b341" text-anchor="middle">edited</text></g>
+<g class="up" style="animation-delay:0.65s"><rect x="476" y="180" width="80" height="26" rx="13" fill="none" stroke="#f85149"/><text x="516" y="198" font-size="12.5" fill="#f85149" text-anchor="middle">deleted</text></g>
+<g class="up" style="animation-delay:0.75s"><rect x="568" y="180" width="80" height="26" rx="13" fill="none" stroke="#3fb950"/><text x="608" y="198" font-size="12.5" fill="#3fb950" text-anchor="middle">added</text></g>
+<g class="up" style="animation-delay:0.9s"><circle class="spin" cx="730" cy="193" r="20" fill="none" stroke="url(#acc)" stroke-width="2.5" stroke-dasharray="90 36"/><text x="730" y="198" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">×4+</text></g>
+<text x="292" y="236" font-size="12" fill="#59636e">Hard questions: at least 4 rounds · code is run · math answers are voted on</text>
+<line class="flow" x1="798" y1="179" x2="828" y2="179" stroke="url(#acc)" stroke-width="2.5"/>
+<g class="up" style="animation-delay:0.60s"><rect x="832" y="104" width="232" height="150" rx="14" fill="#f6f8fa" stroke="#d0d7de"/><text x="850" y="136" font-size="16.5" fill="#1f2328" font-weight="600">Judge</text><text x="850" y="160" font-size="12.5" fill="#59636e">compares each model’s best,</text><text x="850" y="179" font-size="12.5" fill="#59636e">then picks, merges or</text><text x="850" y="198" font-size="12.5" fill="#59636e">goes with the vote</text></g>
+<g class="up" style="animation-delay:1.1s"><rect x="36" y="272" width="1028" height="36" rx="10" fill="none" stroke="#d0d7de"/><text x="54" y="295" font-size="13.5" fill="#1f2328"><tspan font-weight="600">Best answer</tspan><tspan fill="#59636e">  ·  every answer, score, review and edit stays visible, and runs are saved next to the exe</tspan></text></g>
+</svg>
