@@ -166,7 +166,24 @@ private:
     bool moe_ = false, all_logits_ = false;
     uint64_t dLOGA_ = 0; int loga_rows_ = 0;
     std::vector<float> moe_x_, router_;
-    std::vector<uint16_t> kc_, vc_;
+    // Host K/V cache, fp16, [layer][pos][kvd]. Committed but untouched until a layer that runs on the CPU writes it:
+    // VirtualAlloc pages read as zero and take no RAM until written. A zero-filled vector made a long context cost
+    // its full size in RAM up front (8.6 GB for a 32B model at 32K) even when every layer runs on the GPU.
+    struct KvBuf {
+        uint16_t* p = nullptr; size_t n = 0;
+        KvBuf() = default; KvBuf(const KvBuf&) = delete; KvBuf& operator=(const KvBuf&) = delete;
+        ~KvBuf() { clear(); }
+        void assign(size_t count, uint16_t) {
+            clear();
+            if (count) { p = (uint16_t*)VirtualAlloc(nullptr, count * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); n = p ? count : 0; }
+        }
+        void clear() { if (p) VirtualFree(p, 0, MEM_RELEASE); p = nullptr; n = 0; }
+        void shrink_to_fit() {}
+        size_t size() const { return n; }
+        uint16_t& operator[](size_t i) { return p[i]; }
+        const uint16_t& operator[](size_t i) const { return p[i]; }
+    };
+    KvBuf kc_, vc_;
 
     int bufn_ = 0;
     std::vector<float> x_, xn_, q_, k_, v_, att_, ff1_, ff2_, tmp_, logits_, qg_;

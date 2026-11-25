@@ -260,6 +260,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     size_t kvd = (size_t)hp.n_kv * hp.hd;
     kc_.assign((size_t)hp.n_layer * ctx * kvd, 0);
     vc_.assign((size_t)hp.n_layer * ctx * kvd, 0);
+    if (kc_.size() == 0 || vc_.size() == 0) { err = "not enough memory for a " + std::to_string(ctx) + "-token context: choose a smaller context"; return false; }
     n_past = 0;
 
     int nt = o.threads > 0 ? o.threads : std::max(1, (int)std::thread::hardware_concurrency() / 2);
@@ -304,7 +305,10 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     }
     MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms);
     int64_t kv_bytes = (int64_t)(kc_.size() + vc_.size()) * 2;
-    int64_t ram_budget = o.ram_mb < 0 ? (int64_t)ms.ullAvailPhys - (2560ll << 20) - kv_bytes : (o.ram_mb << 20);
+    // The host KV cache above is already allocated and zeroed, so the available-memory figure already excludes it.
+    // Subtracting it again counted it twice: at a long context (32K on a 32B model, ~8.6 GB) the RAM budget hit zero
+    // and the layers that didn't fit in VRAM streamed from disk on every token (0.25 tok/s).
+    int64_t ram_budget = o.ram_mb < 0 ? (int64_t)ms.ullAvailPhys - (2560ll << 20) : (o.ram_mb << 20);
     if (ram_budget < 0) ram_budget = 0;
 
     int64_t vused = 0, rused = 0;
@@ -317,8 +321,10 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         c += (size_t)ctx * kv_pos_bytes();  // K+V cache in VRAM
         if (gpu_open && vused + (int64_t)c <= vram_budget) { L.plan = TIER_GPU; vused += c; continue; }
         gpu_open = false;
-        if (rused + (int64_t)L.bytes() <= ram_budget) { L.plan = TIER_RAM; rused += L.bytes(); }
-        else L.plan = TIER_DISK;
+        // a layer the CPU runs also fills its share of the host K/V cache as the context grows
+        const int64_t kvl = (int64_t)ctx * (int64_t)kvd * 4;
+        if (rused + (int64_t)L.bytes() + kvl <= ram_budget) { L.plan = TIER_RAM; rused += L.bytes() + kvl; }
+        else { L.plan = TIER_DISK; rused += kvl; }
     }
     if (rused > 0) {
         SIZE_T mn = (SIZE_T)(rused + (512ll << 20)), mx = (SIZE_T)(rused + kv_bytes + (2048ll << 20));
