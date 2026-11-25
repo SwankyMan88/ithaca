@@ -53,7 +53,7 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
 | **Ithaca Image.exe**, **Video**, **Audio** | Its own window, just that studio. |
 | **Ithaca.exe** | Opens Ithaca in your browser. Use it to reach Ithaca from other devices (`--host`) or as an API server (`--server`). |
 
-They all share the same folder, models and data, and only one runs at a time: opening a second one adds a window to the Ithaca that is already running, so two never fight over the GPU. The app windows use WebView2, the web engine built into Windows 10 and 11, so there is nothing else to install.
+They all share the same folder, models and data, and only one runs at a time: opening another one opens a window (or a browser tab, for `Ithaca.exe`) on the Ithaca that is already running, so two never fight over the GPU. The app windows use WebView2, the web engine built into Windows 10 and 11, so there is nothing else to install.
 
 The top bar shows on every page what the GPU is doing (writing a reply, making an image at 40%, loading a model) and where the model's weights are (VRAM, RAM, disk). An image, video or clip keeps rendering when you switch pages, and it's still there when you come back.
 
