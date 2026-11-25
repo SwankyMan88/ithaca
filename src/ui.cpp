@@ -137,6 +137,7 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .rshimmer{position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.08) 50%,transparent 70%);background-size:250% 100%;background-repeat:no-repeat;animation:shim 1.6s linear infinite}
 @keyframes shim{from{background-position:150% 0}to{background-position:-100% 0}}
 .rimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;filter:blur(14px) saturate(1.2);transform:scale(1.06);transition:opacity .5s,filter 1.2s,transform 1.2s;image-rendering:auto}
+.rframe .rvid{opacity:1;filter:blur(.6px) saturate(1.15);transform:none;image-rendering:auto}   /* the looping video preview */
 .rframe.has .rimg+.rimg{filter:blur(2px) saturate(1.1);transform:scale(1.01);transition:opacity .45s}   /* later previews only cross-fade */
 .rframe.has .rimg.in{opacity:1;filter:blur(2px) saturate(1.1);transform:scale(1.01)}
 .rframe.has .rshimmer{opacity:.35}
@@ -2187,13 +2188,25 @@ function watchProgress(el,whenIdle){let on=true,seen=-1;
     n.onload=()=>{if(!on)return;fr.insertBefore(n,img.nextSibling);fr.classList.add('has');
       requestAnimationFrame(()=>{n.classList.add('in');const old=img;img=n;setTimeout(()=>{if(old!==img)old.remove()},600)})};
     n.src=src};
+  // A video preview is every frame of the clip so far, stacked in one picture: play it on a loop on a canvas, at the
+  // clip's real speed (one preview frame stands for 4 video frames). Each new preview swaps in without a restart.
+  let anim=null;
+  const play=(src,frames,fps)=>{const n=new Image();
+    n.onload=()=>{if(!on)return;
+      if(!anim){const cv=document.createElement('canvas');cv.className='rimg in rvid';fr.insertBefore(cv,img.nextSibling);fr.classList.add('has');img.remove();img=cv;
+        anim={cv,k:0,t:0};const tick=ts=>{if(!on||!anim)return;const a=anim,ms=4000/Math.max(1,a.fps||16);
+          if(a.pic&&ts-a.t>=ms){a.t=ts;a.k=(a.k+1)%a.frames;const w=a.pic.naturalWidth,h=a.pic.naturalHeight/a.frames;
+            if(a.cv.width!=w||a.cv.height!=h){a.cv.width=w;a.cv.height=h;fr.style.aspectRatio=w+'/'+h}a.cv.getContext('2d').drawImage(a.pic,0,a.k*h,w,h,0,0,w,h)}
+          requestAnimationFrame(tick)};requestAnimationFrame(tick)}
+      anim.pic=n;anim.frames=frames;anim.fps=fps;if(anim.k>=frames)anim.k=0};
+    n.src=src};
   (async()=>{while(on){try{const p=await api('/api/media/progress');if(!on)break;
     const l=el.querySelector('.mp-l'),b=el.querySelector('.mp-b'),pc=el.querySelector('.mp-p');
     if(p.busy){const f=p.total?Math.min(1,(p.step+(p.phase=='Decoding'?1:0))/p.total):0;
       l.textContent=p.total?`${p.phase} · ${p.step}/${p.total}`:p.phase;b.style.width=Math.max(3,f*100)+'%';pc.textContent=Math.round(f*100)+'%';
-      if(p.preview&&p.preview!=seen){seen=p.preview;show('/api/media/preview?'+seen)}}else if(whenIdle){whenIdle();break}}catch(e){}
+      if(p.preview&&p.preview!=seen){seen=p.preview;(p.frames>1?play:show)('/api/media/preview?'+seen,p.frames,p.fps)}}else if(whenIdle){whenIdle();break}}catch(e){}
     await new Promise(r=>setTimeout(r,400))}})();
-  return()=>{on=false}}
+  return()=>{on=false;anim=null}}
 $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 // Editions (Ithaca Chat, Image, Video, Audio windows): only that part of the app shows. The edition comes from the
 // window's first URL and is kept for this window's session.

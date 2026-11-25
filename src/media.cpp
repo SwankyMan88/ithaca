@@ -19,19 +19,21 @@ static std::string g_phase, g_media_kind, g_media_prompt;   // what is being mad
 static int g_step = 0, g_total = 0;
 static std::string g_preview;   // latest live preview as a BMP file
 static int g_preview_n = 0;      // bumps on every new preview
+static int g_preview_frames = 1, g_preview_fps = 0;   // a video preview is a sprite of frames, played at fps / 4 (one latent frame = 4 video frames)
 static std::atomic<bool> g_media_busy{false}, g_media_cancel{false};
 bool media_busy() { return g_media_busy; }
 
 std::string b64decode(const std::string& in);
 void chat_model_release();
 void chat_model_restore_later();
+bool chat_model_settling();
 // Frees the chat model's VRAM when a job needs more than is free; restores it when the job ends.
 struct VramLease {
     bool released = false;
     explicit VramLease(int64_t need_mb) {
         size_t f = 0, t = 0;
         Model::cuda().mem_info(f, t);
-        if ((int64_t)(f >> 20) < need_mb) { chat_model_release(); released = true; }
+        if ((int64_t)(f >> 20) < need_mb || chat_model_settling()) { chat_model_release(); released = true; }
     }
     ~VramLease() { if (released) { gx().trim(); chat_model_restore_later(); } }
 };
@@ -48,7 +50,7 @@ static std::string read_text(const std::wstring& p) {
 std::string media_progress_json() {
     std::lock_guard<std::mutex> l(g_prog_m);
     return "{\"busy\":" + std::string(g_media_busy ? "true" : "false") + ",\"kind\":" + json_esc(g_media_kind) + ",\"prompt\":" + json_esc(g_media_prompt.substr(0, 200)) + ",\"phase\":" + json_esc(g_phase) +
-           ",\"step\":" + std::to_string(g_step) + ",\"total\":" + std::to_string(g_total) + ",\"preview\":" + std::to_string(g_preview_n) + "}";
+           ",\"step\":" + std::to_string(g_step) + ",\"total\":" + std::to_string(g_total) + ",\"preview\":" + std::to_string(g_preview_n) + ",\"frames\":" + std::to_string(g_preview_frames) + ",\"fps\":" + std::to_string(g_preview_fps) + "}";
 }
 std::string media_preview_bmp() { std::lock_guard<std::mutex> l(g_prog_m); return g_preview; }
 static void set_preview(const std::vector<uint8_t>& rgb, int w, int h) {
@@ -83,7 +85,7 @@ std::string media_generate_image(const J& req) {
     std::string model = req["model"].str(prefs["media_image"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No image model is loaded or selected. Pick one in the Image studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
-    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "image"; g_media_prompt = req["prompt"].str(); }
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "image"; g_media_prompt = req["prompt"].str(); g_preview_frames = 1; g_preview_fps = 0; }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     // The chat model makes way when the picture would not fit beside it: the weights (about the checkpoint's
@@ -178,12 +180,16 @@ std::string media_generate_video(const J& req) {
     std::string model = req["model"].str(prefs["media_video"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No video model is loaded or selected. Pick one in the Video studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
-    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "video"; g_media_prompt = req["prompt"].str(); }
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "video"; g_media_prompt = req["prompt"].str(); g_preview_frames = 1; g_preview_fps = 0; }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     VramLease lease(11000);
     WanEngine& e = wan_engine();
     std::string err;
+    e.on_preview = [&e](const std::vector<uint8_t>& rgb, int w, int h, int frames) {
+        set_preview(rgb, w, h * frames);
+        std::lock_guard<std::mutex> l(g_prog_m); g_preview_frames = frames; g_preview_fps = e.fps();
+    };
     if (!e.loaded() || e.path != utf8_to_w(model)) {
         { std::lock_guard<std::mutex> l(g_prog_m); g_phase = "Loading video model"; g_step = 0; g_total = 0; }
         if (!e.load(utf8_to_w(model), L"", L"", err)) return "{\"error\":" + json_esc("Could not load the video model: " + err) + "}";
@@ -293,7 +299,7 @@ std::string media_generate_audio(const J& req) {
     std::string text = req["prompt"].str(req["text"].str());
     if (text.empty()) return "{\"error\":\"nothing to say\"}";
     std::lock_guard<std::mutex> lk(g_media);
-    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "audio"; g_media_prompt = req["prompt"].str(); }
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "audio"; g_media_prompt = req["prompt"].str(); g_preview_frames = 1; g_preview_fps = 0; }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     VramLease lease(2000);

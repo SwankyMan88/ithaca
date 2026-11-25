@@ -343,6 +343,9 @@ void chat_model_release() {
     g_chat.reset();
     if (!g_model.park()) g_model.unload();   // parked: weights wait in RAM and return in a fraction of a second
 }
+// True while the chat model is still moving into VRAM (right after a load or a restore): the VRAM it is about to
+// take still looks free, so a media job starting now has to count it as taken.
+bool chat_model_settling() { return g_model.loaded() && g_model.migrating(); }
 void media_release_engines();
 void chat_model_restore() {
     std::lock_guard<std::mutex> rl(g_release_m);

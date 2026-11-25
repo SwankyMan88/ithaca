@@ -32,6 +32,9 @@ public:
     bool vae_decode(const std::vector<float>& z, int F, int H, int W, std::vector<float>& rgb, int& oF, int& oH, int& oW);
     int dim = 0, heads = 0, layers = 0, zc = 48, ffn = 0;
     int fps() const { return zc == 48 ? 24 : 16; }   // Wan 2.1 is trained at 16 fps, 2.2 TI2V at 24
+    // Live preview while sampling: every frame of the current estimate, as a sprite (frames stacked top to bottom),
+    // made with a latent-to-RGB map fitted from one small VAE decode. rgb is w x (h * frames), 8-bit.
+    std::function<void(const std::vector<uint8_t>& rgb, int w, int h, int frames)> on_preview;
 private:
     SafeTensors dit_, te_, vae_;
     bool loaded_ = false;
@@ -45,6 +48,9 @@ private:
     SafeTensors* D_ = &dit_;
     Gg* Q_ = nullptr;
     float boundary_ = 0.f;
+    std::vector<float> pv_w_;   // preview map: (zc + 1) x 3 (weights per latent channel, then bias), normalized latents -> RGB 0..1
+    std::wstring pv_for_;
+    bool preview_fit();
     bool gguf_open(const std::wstring& p, SafeTensors& st, Gg& gg, std::string& err);
     bool gguf_upload(Gg& gg, std::string& err);
     void gguf_free(Gg& gg);

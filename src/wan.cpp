@@ -665,6 +665,57 @@ bool WanEngine::vae_decode(const std::vector<float>& z, int F, int Hl, int Wl, s
 }
 
 // =============================================================================================
+// Live preview: a linear map from (normalized) latent channels to RGB, fitted once per model by decoding one small
+// random latent with the real VAE and least-squares matching each latent cell to the average colour of its pixels.
+// Cheap enough to run after every step; good enough to watch the clip take shape.
+// =============================================================================================
+bool WanEngine::preview_fit() {
+    if (!pv_w_.empty() && pv_for_ == path) return true;
+    pv_w_.clear();
+    const int sp = zc == 48 ? 16 : 8, Hl = 16, Wl = 16, N = Hl * Wl, K = zc + 1;
+    std::mt19937 rng(7); std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<float> zn((size_t)zc * N), z((size_t)zc * N);
+    for (int c = 0; c < zc; c++) {
+        const float sd = zc == 48 ? kWan22Std[c] : kWan21Std[c], mu = zc == 48 ? kWan22Mean[c] : kWan21Mean[c];
+        for (int q = 0; q < N; q++) { zn[(size_t)c * N + q] = nd(rng); z[(size_t)c * N + q] = zn[(size_t)c * N + q] * sd + mu; }
+    }
+    std::vector<float> rgb; int oF = 0, oH = 0, oW = 0;
+    if (!vae_decode(z, 1, Hl, Wl, rgb, oF, oH, oW) || oH < Hl * sp || oW < Wl * sp) return false;
+    // normal equations (A'A + l I) w = A'b for the three colours, A = [latents, 1]
+    std::vector<double> ata((size_t)K * K, 0.0), atb((size_t)K * 3, 0.0);
+    for (int y = 0; y < Hl; y++)
+        for (int x = 0; x < Wl; x++) {
+            double col[3] = {0, 0, 0};
+            for (int py = 0; py < sp; py++)
+                for (int px = 0; px < sp; px++)
+                    for (int c = 0; c < 3; c++) col[c] += rgb[((size_t)(y * sp + py) * oW + x * sp + px) * 3 + c];
+            for (int c = 0; c < 3; c++) col[c] /= sp * sp;
+            std::vector<double> a(K);
+            for (int c = 0; c < zc; c++) a[c] = zn[(size_t)c * N + y * Wl + x];
+            a[zc] = 1.0;
+            for (int i = 0; i < K; i++) { for (int k = 0; k < K; k++) ata[(size_t)i * K + k] += a[i] * a[k]; for (int c = 0; c < 3; c++) atb[(size_t)i * 3 + c] += a[i] * col[c]; }
+        }
+    for (int i = 0; i < K; i++) ata[(size_t)i * K + i] += 1e-3 * N;
+    for (int i = 0; i < K; i++) {   // Gauss-Jordan with partial pivoting
+        int p = i; for (int r = i + 1; r < K; r++) if (std::fabs(ata[(size_t)r * K + i]) > std::fabs(ata[(size_t)p * K + i])) p = r;
+        if (std::fabs(ata[(size_t)p * K + i]) < 1e-12) return false;
+        if (p != i) { for (int k = 0; k < K; k++) std::swap(ata[(size_t)i * K + k], ata[(size_t)p * K + k]); for (int c = 0; c < 3; c++) std::swap(atb[(size_t)i * 3 + c], atb[(size_t)p * 3 + c]); }
+        const double d = ata[(size_t)i * K + i];
+        for (int k = 0; k < K; k++) ata[(size_t)i * K + k] /= d;
+        for (int c = 0; c < 3; c++) atb[(size_t)i * 3 + c] /= d;
+        for (int r = 0; r < K; r++) if (r != i) {
+            const double f = ata[(size_t)r * K + i]; if (f == 0) continue;
+            for (int k = 0; k < K; k++) ata[(size_t)r * K + k] -= f * ata[(size_t)i * K + k];
+            for (int c = 0; c < 3; c++) atb[(size_t)r * 3 + c] -= f * atb[(size_t)i * 3 + c];
+        }
+    }
+    pv_w_.assign((size_t)K * 3, 0.f);
+    for (int i = 0; i < K * 3; i++) pv_w_[i] = (float)atb[i];
+    pv_for_ = path;
+    return true;
+}
+
+// =============================================================================================
 // Sampling (rectified flow, Euler)
 // =============================================================================================
 bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW, int& oH, int& oF, std::string& err,
@@ -691,9 +742,14 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
         if (!gguf_upload(gg_[0], err)) return false;
         vb = 0;   // the few F16 matrices (embeddings) stream: every MB of VRAM goes to activations next to the 4-bit expert
     }
+    // the preview map needs one small VAE decode: before the diffusion weights take the VRAM
+    const bool live = on_preview && preview_fit();
+    if (on_preview) g.trim();
     g.weights_begin(D_, vb, !qg && (dit_bytes() > vb || getenv("ITHACA_Q8")));
     g.set_half(true);
     GT ce = text_embed(cc), ue = text_embed(cu);
+    std::vector<float> x0;
+    std::vector<uint8_t> pv;
     std::mt19937_64 rng(j.seed ? j.seed : std::random_device{}());
     std::normal_distribution<float> nd(0.f, 1.f);
     std::vector<float> x(n), vc, vu;
@@ -717,7 +773,24 @@ bool WanEngine::generate(const VideoJob& jb, std::vector<uint8_t>& out, int& oW,
         dit(x, F, H, W, s * 1000.f, ce, vc);
         if (j.cfg != 1.f) dit(x, F, H, W, s * 1000.f, ue, vu);
         float dt = sig[i + 1] - s;
-        for (size_t q = 0; q < n; q++) { float v = j.cfg != 1.f ? vu[q] + j.cfg * (vc[q] - vu[q]) : vc[q]; x[q] += dt * v; }
+        if (live) x0.resize(n);
+        for (size_t q = 0; q < n; q++) {
+            float v = j.cfg != 1.f ? vu[q] + j.cfg * (vc[q] - vu[q]) : vc[q];
+            if (live) x0[q] = x[q] - s * v;   // rectified flow: the clip this step predicts
+            x[q] += dt * v;
+        }
+        if (live) {   // every frame, latent cells -> RGB with the fitted map, stacked into one sprite
+            const size_t per = (size_t)H * W;
+            pv.assign(per * F * 3, 0);
+            for (int f = 0; f < F; f++)
+                for (size_t p = 0; p < per; p++)
+                    for (int c = 0; c < 3; c++) {
+                        float a = pv_w_[(size_t)zc * 3 + c];
+                        for (int k = 0; k < zc; k++) a += pv_w_[(size_t)k * 3 + c] * x0[((size_t)k * F + f) * per + p];
+                        pv[((size_t)f * per + p) * 3 + c] = (uint8_t)std::min(255.f, std::max(0.f, a * 255.f + 0.5f));
+                    }
+            on_preview(pv, W, H, F);
+        }
         if (getenv("ITHACA_WAN_T")) fprintf(stderr, "[wan] step %d: %.1f s\n", i, now_sec() - tstep);
     }
     g.free(ce); g.free(ue);
