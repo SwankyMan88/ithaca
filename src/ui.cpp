@@ -2200,6 +2200,16 @@ function watchProgress(el,whenIdle){let on=true,seen=-1;
     await new Promise(r=>setTimeout(r,400))}})();
   return()=>{on=false}}
 $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+// Editions (Ithaca Chat, Image, Video, Audio windows): only that part of the app shows. The edition comes from the
+// window's first URL and is kept for this window's session.
+const EDITION=(()=>{let e=new URLSearchParams(location.search).get('e')||'';try{if(e)sessionStorage.setItem('ith_ed',e);else e=sessionStorage.getItem('ith_ed')||''}catch(x){}
+  return ['chat','image','video','audio'].includes(e)?e:''})();
+if(EDITION){
+  $('nav').querySelectorAll('button').forEach(b=>{if(b.dataset.view!=EDITION)b.style.display='none'});
+  document.querySelectorAll('#nav .navgroup,#nav .group,#nav h4,#nav .navlabel').forEach(g=>g.style.display='none');
+  if(EDITION!='chat'){$('sideChat').style.display='none';document.querySelector('.ctxwrap').style.display='none'}
+  document.title='Ithaca '+EDITION[0].toUpperCase()+EDITION.slice(1);
+  setTimeout(()=>setView(EDITION),0)}
 $('cwNewSide').onclick=()=>{setView('code');cwNew()};
 
 /* ---------- composer ---------- */

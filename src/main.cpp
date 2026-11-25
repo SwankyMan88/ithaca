@@ -47,6 +47,14 @@ static std::mutex g_gen;           // one generation / load at a time
 static std::atomic<bool> g_stop{false};
 [[noreturn]] static void quit_now();
 std::atomic<bool> g_busy{false};
+// Editions (build flag ITHACA_EDITION, or --window <edition>): "" is the classic exe that opens your browser;
+// "app", "chat", "image", "video", "audio" open Ithaca's own window (appwin.cpp) showing everything or one part.
+#ifndef ITHACA_EDITION
+#define ITHACA_EDITION ""
+#endif
+static std::string g_edition = ITHACA_EDITION;
+static std::atomic<int> g_bound_port{0};
+static int serve(int port, bool open_browser, bool explicit_port);
 // What the model is busy with, for the status shown on every page: "chat", "coding", "orchestration", "api", "load:<name>"
 static std::mutex g_task_m;
 static std::string g_task;
@@ -381,12 +389,14 @@ static bool send_all(SOCKET s, const std::string& d) {
     }
     return true;
 }
-static thread_local std::string t_hdrs;   // extra headers for this request's response (Set-Cookie)
+// Extra headers for this request's response (Set-Cookie). The string lives in handle(); thread-local storage only
+// holds a pointer to it (MinGW frees thread_local objects with destructors through the wrong heap at thread exit).
+static thread_local std::string* t_hdrs = nullptr;
 static void respond(SOCKET s, int code, const std::string& type, const std::string& body) {
     std::string h = "HTTP/1.1 " + std::to_string(code) + (code == 200 ? " OK" : code == 302 ? " Found" : " Error") + "\r\nContent-Type: " + type +
                     "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nCache-Control: no-store\r\n" +
-                    "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n" + t_hdrs + "Connection: close\r\n\r\n";
-    t_hdrs.clear();
+                    "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n" + (t_hdrs ? *t_hdrs : std::string()) + "Connection: close\r\n\r\n";
+    if (t_hdrs) t_hdrs->clear();
     send_all(s, h + body);
 }
 
@@ -761,7 +771,8 @@ static void handle(SOCKET s) {
     // Which device is asking (privacy.h). API requests use the shared store and never see a device's data.
     const bool api_req = path.rfind("/v1", 0) == 0 || path == "/health";
     const int pstate = api_req ? 0 : privacy_begin(req.substr(0, hdr_end + 2));
-    struct PrivacyEnd { ~PrivacyEnd() { privacy_end(); t_hdrs.clear(); } } privacy_end_;
+    std::string hdrs; t_hdrs = &hdrs;
+    struct PrivacyEnd { ~PrivacyEnd() { privacy_end(); t_hdrs = nullptr; } } privacy_end_;
     privacy_api_request(api_req);
 
     if (handle_v1(s, method, path, lower, body)) { shutdown(s, SD_SEND); closesocket(s); return; }
@@ -776,14 +787,23 @@ static void handle(SOCKET s) {
     const bool device_path = path.rfind("/api/", 0) == 0 || path.rfind("/outputs/", 0) == 0 || path.rfind("/voices/", 0) == 0;
     if (page == "/" || page == "/index.html") {
         bool redirect = false;
-        t_hdrs += privacy_page(path.size() > page.size() ? path.substr(page.size() + 1) : "", pstate, redirect);
-        if (redirect) { t_hdrs += "Location: /\r\n"; respond(s, 302, "text/plain", "moved"); }
-        else { t_hdrs += "X-Frame-Options: SAMEORIGIN\r\n"; respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
+        *t_hdrs += privacy_page(path.size() > page.size() ? path.substr(page.size() + 1) : "", pstate, redirect);
+        if (redirect) {
+            std::string q = path.size() > page.size() ? path.substr(page.size() + 1) : "", keep;
+            for (size_t b = 0; b <= q.size();) {
+                size_t e = q.find('&', b); if (e == std::string::npos) e = q.size();
+                std::string kv = q.substr(b, e - b);
+                if (!kv.empty() && kv.rfind("k=", 0) != 0 && kv.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789=_-") == std::string::npos) keep += (keep.empty() ? "?" : "&") + kv;
+                b = e + 1;
+            }
+            *t_hdrs += "Location: /" + keep + "\r\n"; respond(s, 302, "text/plain", "moved");
+        }
+        else { *t_hdrs += "X-Frame-Options: SAMEORIGIN\r\n"; respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
     }
     else if (page.rfind("/api/device", 0) == 0) {
         int code = 200; std::string out, sc;
         handle_device(method, page, body, code, out, sc);
-        t_hdrs += sc;
+        *t_hdrs += sc;
         respond(s, code, "application/json", out);
     }
     // everything else of the app needs a device that is unlocked
@@ -942,6 +962,30 @@ static BOOL WINAPI on_console(DWORD ev) {
 }
 
 // One Ithaca at a time: a second launch just opens the running one instead of loading models twice.
+static int run_edition(int port, bool explicit_port, const std::string& model) {
+    extern int run_app_window(const std::string& url, const std::wstring& title, const std::wstring& profile_dir);
+    std::wstring title = L"Ithaca";
+    if (g_edition != "app" && !g_edition.empty()) { std::wstring e = utf8_to_w(g_edition); e[0] = towupper(e[0]); title += L" " + e; }
+    const std::wstring profile = g_store_dir + L"\\webview";   // the window's own cookies and cache, apart from any browser
+    auto url_for = [&](int p) { return "http://127.0.0.1:" + std::to_string(p) + "/?k=" + privacy_launch_token() + "&e=" + g_edition; };
+    HANDLE m = CreateMutexW(nullptr, TRUE, L"Local\\IthacaServer");
+    if (m && GetLastError() == ERROR_ALREADY_EXISTS) {   // Ithaca is already running: a window on it (one GPU, one server)
+        int p = 0; FILE* f = _wfopen((g_store_dir + L"\\port.txt").c_str(), L"rb");
+        if (f) { if (fscanf(f, "%d", &p) != 1) p = 0; fclose(f); }
+        return run_app_window(url_for(p ? p : port), title, profile);
+    }
+    privacy_init(false);
+    std::thread([port, explicit_port] { serve(port, false, explicit_port); }).detach();
+    for (int i = 0; i < 200 && g_bound_port == 0; i++) Sleep(25);
+    if (g_bound_port <= 0) { MessageBoxW(nullptr, L"Ithaca could not open a local port.", title.c_str(), MB_ICONERROR); return 1; }
+    // the chat model loads behind the window (the page shows it loading); the media editions don't need it
+    if (!model.empty() && (g_edition == "app" || g_edition == "chat"))
+        std::thread([model] { std::string err; do_load(model, err); }).detach();   // do_load takes the generation lock itself
+    int r = run_app_window(url_for(g_bound_port), title, profile);
+    g_stop = true;   // window closed: Ithaca closes with it
+    quit_now();
+    return r;
+}
 static bool other_instance(int port, bool open_browser) {
     HANDLE m = CreateMutexW(nullptr, TRUE, L"Local\\IthacaServer");
     if (!(m && GetLastError() == ERROR_ALREADY_EXISTS)) return false;   // we keep the mutex until exit
@@ -964,7 +1008,8 @@ static int serve(int port, bool open_browser, bool explicit_port) {
         a.sin_port = htons((u_short)p);
         if (bind(ls, (sockaddr*)&a, sizeof a) == 0) { bound = p; break; }
     }
-    if (!bound || listen(ls, 16) != 0) { printf("could not open a local port\n"); return 1; }
+    if (!bound || listen(ls, 16) != 0) { printf("could not open a local port\n"); g_bound_port = -1; return 1; }
+    g_bound_port = bound;
     std::string url = "http://127.0.0.1:" + std::to_string(bound) + "/";
     if (!explicit_port && !g_server_mode) { FILE* f = _wfopen((g_store_dir + L"\\port.txt").c_str(), L"wb"); if (f) { fprintf(f, "%d", bound); fclose(f); } }
     if (g_server_mode) {
@@ -1020,6 +1065,7 @@ int main() {
         else if (k == "--temp") temp = (float)atof(nx().c_str());
         else if (k == "--port") { port = atoi(nx().c_str()); explicit_port = true; }
         else if (k == "--no-browser") browser = false;
+        else if (k == "--window") g_edition = i + 1 < args.size() && args[i + 1][0] != '-' ? nx() : "app";
         else if (k == "--server") { g_server_mode = true; browser = false; }
         else if (k == "--host") g_host = nx();
         else if (k == "--api-key") g_api_key = nx();
@@ -1206,6 +1252,7 @@ int main() {
 
     if (g_api_key.empty()) { char kb[256]; if (GetEnvironmentVariableA("ITHACA_API_KEY", kb, sizeof kb)) g_api_key = kb; }
     if (g_server_mode && !explicit_port) { port = 8080; explicit_port = true; }   // like llama.cpp's server; the app keeps 7860
+    if (!g_edition.empty() && !g_server_mode) return run_edition(port, explicit_port, model.empty() ? last : model);
     if (!explicit_port && other_instance(port, browser)) return 0;
     privacy_init(g_server_mode);
     std::string m = model.empty() ? last : model;

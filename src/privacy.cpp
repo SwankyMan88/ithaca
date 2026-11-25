@@ -125,10 +125,13 @@ std::wstring devices_dir() { std::wstring d = g_store_dir + L"\\devices"; Create
 
 // ---- devices and sessions ----
 struct Dev { std::string id, devkey; Key base{}, data{}; std::wstring dir; bool pc = false; };
-thread_local Dev t_dev;
+// Per-request state. Thread-local storage holds only plain values and a pointer: MinGW frees thread_local objects
+// that have destructors through the wrong heap when a thread ends (heap corruption), so the request owns the context.
+struct Ctx { Dev dev; std::string ses; };
+thread_local Ctx* t_ctx = nullptr;
 thread_local int t_state = 0;   // 0 no device, 1 ready, 2 locked
-thread_local std::string t_ses;
 thread_local bool t_api = false;   // an API (/v1) request: uses the shared store, never a device's
+Ctx& ctx() { if (!t_ctx) t_ctx = new Ctx(); return *t_ctx; }
 
 std::mutex g_m;
 struct Ses { std::string id; Key data; double last; };
@@ -219,8 +222,8 @@ void remove_tree(const std::wstring& dir) {
 // Old installs kept everything in plain files next to the exe: move them into "This PC", encrypted, and delete the
 // plain copies only once each encrypted copy reads back identical.
 void migrate_legacy(const Dev& pc) {
-    Dev saved = t_dev; int st = t_state;
-    t_dev = pc; t_state = 1;
+    Dev saved = ctx().dev; int st = t_state;
+    ctx().dev = pc; t_state = 1;
     int moved = 0, kept = 0;
     auto one = [&](const std::wstring& rel) {
         std::wstring src = g_store_dir + L"\\" + rel; std::string a, b;
@@ -238,7 +241,7 @@ void migrate_legacy(const Dev& pc) {
         RemoveDirectoryW((g_store_dir + L"\\" + d).c_str());   // only when empty
     }
     if (moved || kept) printf("  Privacy: moved %d saved item(s) into \"This PC\", encrypted%s.\n", moved, kept ? " (some could not be moved and were left as they were)" : "");
-    t_dev = saved; t_state = st;
+    ctx().dev = saved; t_state = st;
 }
 std::string short_id(const std::string& id) { return id.substr(0, 6); }
 }  // namespace
@@ -249,21 +252,21 @@ void privacy_api_request(bool on) { t_api = on; }
 // A page request without an unlocked device gets no storage at all (never the shared folder): only API requests
 // and the API-only server use the shared store.
 static bool shared_ok() { return t_api || g_server_mode; }
-static std::wstring full(const std::wstring& rel) { return t_state == 1 ? t_dev.dir + L"\\" + rel : shared_ok() ? g_store_dir + L"\\" + rel : L""; }
+static std::wstring full(const std::wstring& rel) { return t_state == 1 ? ctx().dev.dir + L"\\" + rel : shared_ok() ? g_store_dir + L"\\" + rel : L""; }
 bool store_read(const std::wstring& rel, std::string& out) {
     out.clear();
     if (!safe_rel(rel)) return false;
     std::wstring p = full(rel); if (p.empty()) return false;
     std::string c; if (!file_read(p, c)) return false;
     if (t_state != 1) { out = c; return true; }
-    return open_(t_dev.data, c, out);
+    return open_(ctx().dev.data, c, out);
 }
 bool store_write(const std::wstring& rel, const std::string& data) {
     if (!safe_rel(rel)) return false;
     std::wstring p = full(rel); if (p.empty()) return false;
     make_dirs(p);
     if (t_state != 1) return file_write(p, data);
-    std::string c = seal(t_dev.data, data);
+    std::string c = seal(ctx().dev.data, data);
     return !c.empty() && file_write(p, c);
 }
 bool store_delete(const std::wstring& rel) { return safe_rel(rel) && !full(rel).empty() && DeleteFileW(full(rel).c_str()); }
@@ -371,23 +374,26 @@ static std::string cookie_val(const std::string& cookies, const std::string& nam
     return "";
 }
 int privacy_begin(const std::string& raw) {
-    t_state = 0; t_dev = Dev(); t_ses.clear();
+    t_state = 0; ctx().dev = Dev(); ctx().ses.clear();
     if (g_server_mode) return 0;
     std::string cookies = header(raw, "cookie"), key;
     if (!unb64url(cookie_val(cookies, "ith_dev"), key) || key.size() != 32) return 0;
-    t_dev = make_dev(key);
-    if (has_pin(t_dev)) {
-        t_ses = cookie_val(cookies, "ith_ses");
+    ctx().dev = make_dev(key);
+    if (has_pin(ctx().dev)) {
+        ctx().ses = cookie_val(cookies, "ith_ses");
         std::lock_guard<std::mutex> l(g_m);
-        auto it = g_ses.find(t_ses);
-        if (it == g_ses.end() || it->second.id != t_dev.id || now_sec() - it->second.last > 12 * 3600) return t_state = 2;
+        auto it = g_ses.find(ctx().ses);
+        if (it == g_ses.end() || it->second.id != ctx().dev.id || now_sec() - it->second.last > 12 * 3600) return t_state = 2;
         it->second.last = now_sec();
-        t_dev.data = it->second.data;
+        ctx().dev.data = it->second.data;
     }
-    CreateDirectoryW(t_dev.dir.c_str(), nullptr);
+    CreateDirectoryW(ctx().dev.dir.c_str(), nullptr);
     return t_state = 1;
 }
-void privacy_end() { t_api = false; SecureZeroMemory(t_dev.data.data(), 32); SecureZeroMemory(t_dev.base.data(), 32); t_dev = Dev(); t_state = 0; t_ses.clear(); }
+void privacy_end() {
+    t_api = false; t_state = 0;
+    if (t_ctx) { SecureZeroMemory(t_ctx->dev.data.data(), 32); SecureZeroMemory(t_ctx->dev.base.data(), 32); delete t_ctx; t_ctx = nullptr; }
+}
 
 std::string privacy_page(const std::string& query, int state, bool& redirect) {
     redirect = false;
@@ -416,8 +422,8 @@ bool handle_device(const std::string& method, const std::string& path, const std
         std::string name;
         if (t_state == 1) { std::string s; if (store_read(L"device.json", s)) { J d; json_parse(s, d); name = d["name"].str(); } }
         out = "{\"ready\":" + std::string(t_state == 1 ? "true" : "false") + ",\"locked\":" + (t_state == 2 ? "true" : "false") +
-              ",\"pc\":" + (t_dev.pc ? "true" : "false") + ",\"id\":" + json_esc(t_dev.id.empty() ? "" : short_id(t_dev.id)) +
-              ",\"pin\":" + (t_state && has_pin(t_dev) ? "true" : "false") + ",\"name\":" + json_esc(name) + "}";
+              ",\"pc\":" + (ctx().dev.pc ? "true" : "false") + ",\"id\":" + json_esc(ctx().dev.id.empty() ? "" : short_id(ctx().dev.id)) +
+              ",\"pin\":" + (t_state && has_pin(ctx().dev) ? "true" : "false") + ",\"name\":" + json_esc(name) + "}";
         return true;
     }
     if (method != "POST" && path != "/api/device/others") return err(405, "POST only");
@@ -426,18 +432,18 @@ bool handle_device(const std::string& method, const std::string& path, const std
         double now = now_sec();
         {
             std::lock_guard<std::mutex> l(g_m);
-            Fails& f = g_fails[t_dev.id];
+            Fails& f = g_fails[ctx().dev.id];
             if (now < f.until) return err(429, "Too many wrong PINs. Try again in " + std::to_string((int)(f.until - now) + 1) + " s.");
         }
         Key data;
-        if (!pin_key(t_dev, j["pin"].str(), data)) {
+        if (!pin_key(ctx().dev, j["pin"].str(), data)) {
             std::lock_guard<std::mutex> l(g_m);
-            Fails& f = g_fails[t_dev.id];
+            Fails& f = g_fails[ctx().dev.id];
             if (++f.n >= 5) f.until = now + std::min(3600.0, 30.0 * (1 << std::min(7, f.n - 5)));   // 30 s, 60 s, ... up to an hour
             return err(403, "Wrong PIN.");
         }
-        { std::lock_guard<std::mutex> l(g_m); g_fails.erase(t_dev.id); }
-        set_cookie = cookie("ith_ses", new_session(t_dev, data), false);
+        { std::lock_guard<std::mutex> l(g_m); g_fails.erase(ctx().dev.id); }
+        set_cookie = cookie("ith_ses", new_session(ctx().dev, data), false);
         out = "{}";
         return true;
     }
@@ -463,17 +469,17 @@ bool handle_device(const std::string& method, const std::string& path, const std
         return true;
     }
     if (path == "/api/device/recovery") {
-        if (has_pin(t_dev)) { Key k; if (!pin_key(t_dev, j["pin"].str(), k)) return err(403, "Enter this device's PIN to see its recovery code."); }
-        out = "{\"code\":" + json_esc(b64url(t_dev.devkey)) + "}";
+        if (has_pin(ctx().dev)) { Key k; if (!pin_key(ctx().dev, j["pin"].str(), k)) return err(403, "Enter this device's PIN to see its recovery code."); }
+        out = "{\"code\":" + json_esc(b64url(ctx().dev.devkey)) + "}";
         return true;
     }
     if (path == "/api/device/pin") {
         const std::string pin = j["pin"].str();
-        if (has_pin(t_dev)) { Key k; if (!pin_key(t_dev, j["current"].str(), k)) return err(403, "The current PIN is wrong."); }
+        if (has_pin(ctx().dev)) { Key k; if (!pin_key(ctx().dev, j["current"].str(), k)) return err(403, "The current PIN is wrong."); }
         if (pin.empty()) {   // remove the PIN: back to the device key alone
-            if (!has_pin(t_dev)) { out = "{}"; return true; }
-            if (!rekey(t_dev, t_dev.data, t_dev.base)) return err(500, "Could not re-encrypt this device's data.");
-            DeleteFileW(pin_file(t_dev).c_str());
+            if (!has_pin(ctx().dev)) { out = "{}"; return true; }
+            if (!rekey(ctx().dev, ctx().dev.data, ctx().dev.base)) return err(500, "Could not re-encrypt this device's data.");
+            DeleteFileW(pin_file(ctx().dev).c_str());
             set_cookie = cookie("ith_ses", "", false);
             out = "{}";
             return true;
@@ -481,17 +487,17 @@ bool handle_device(const std::string& method, const std::string& path, const std
         if (pin.size() < 4 || pin.size() > 64) return err(400, "Use 4 to 64 characters.");
         char salt[16]; rnd(salt, 16);
         Key pk; if (!pbkdf2(pin, std::string(salt, 16), 310000, pk)) return err(500, "Could not derive a key.");
-        Key nd = sha256("ithaca/pin/" + bytes(t_dev.base) + bytes(pk));
-        if (!rekey(t_dev, t_dev.data, nd)) return err(500, "Could not re-encrypt this device's data.");
-        const std::string chk = seal(nd, "ithaca-ok:" + t_dev.id);
+        Key nd = sha256("ithaca/pin/" + bytes(ctx().dev.base) + bytes(pk));
+        if (!rekey(ctx().dev, ctx().dev.data, nd)) return err(500, "Could not re-encrypt this device's data.");
+        const std::string chk = seal(nd, "ithaca-ok:" + ctx().dev.id);
         std::string meta = "{\"salt\":\"" + hex((uint8_t*)salt, 16) + "\",\"iters\":310000,\"check\":\"" + hex((const uint8_t*)chk.data(), chk.size()) + "\"}";
-        if (!file_write(pin_file(t_dev), meta)) return err(500, "Could not save the PIN.");
-        set_cookie = cookie("ith_ses", new_session(t_dev, nd), false);
+        if (!file_write(pin_file(ctx().dev), meta)) return err(500, "Could not save the PIN.");
+        set_cookie = cookie("ith_ses", new_session(ctx().dev, nd), false);
         out = "{}";
         return true;
     }
     if (path == "/api/device/others") {   // This PC only: other devices' folders (sizes; their contents can't be read)
-        if (!t_dev.pc) return err(403, "Only This PC can manage other devices.");
+        if (!ctx().dev.pc) return err(403, "Only This PC can manage other devices.");
         std::string s = "[";
         WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((devices_dir() + L"\\*").c_str(), &fd);
         int n = 0;
@@ -513,7 +519,7 @@ bool handle_device(const std::string& method, const std::string& path, const std
         return true;
     }
     if (path == "/api/device/others/delete") {
-        if (!t_dev.pc) return err(403, "Only This PC can manage other devices.");
+        if (!ctx().dev.pc) return err(403, "Only This PC can manage other devices.");
         std::string id = j["id"].str();
         if (id.size() != 24 || id.find_first_not_of("0123456789abcdef") != std::string::npos || id == g_pc_id) return err(400, "bad id");
         remove_tree(devices_dir() + L"\\" + utf8_to_w(id));
