@@ -112,6 +112,14 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .under{max-width:780px;margin:8px auto 0;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--faint)}
 .ring{display:flex;align-items:center;gap:7px;cursor:pointer;position:relative}
 .ring svg{width:22px;height:22px;transform:rotate(-90deg)}
+.gstat{margin-left:auto;display:flex;align-items:center;gap:12px;min-width:0}
+.gact{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 11px;max-width:340px;min-width:0;background:none;cursor:pointer}
+.gact span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gdot{width:8px;height:8px;border-radius:50%;background:var(--ok,#3fb950);flex:none}
+.gact.busy{color:var(--text);border-color:var(--a1)}.gact.busy .gdot{background:#e3b341;animation:pulse 1s infinite}
+.gact.load .gdot{background:var(--a1);animation:pulse 1s infinite}
+.topbar .ring #ringText{font-size:12px;color:var(--dim);white-space:nowrap}
+.topbar .ringtip{top:34px;bottom:auto;left:auto;right:0}
 .ringtip{position:absolute;bottom:30px;left:0;background:var(--raise);border:1px solid var(--line);border-radius:12px;padding:12px;width:300px;color:var(--dim);display:none;box-shadow:var(--shadow);z-index:5;font-size:12.5px;line-height:1.5}
 .ring:hover .ringtip{display:block}.ringtip .bars{display:flex;flex-wrap:wrap;gap:2px;margin:8px 0}.ringtip .bars i{width:8px;height:14px;border-radius:2px}
 .under .note{margin-left:auto}
@@ -528,6 +536,11 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
       <div class="ctxbar" id="ctxBar"><i></i></div>
       <button class="pill" id="compact" title="Summarize older messages to free context space"><svg class="icon" style="width:14px;height:14px"><use href="#i-compact"/></svg>Compact</button>
     </div>
+    <div class="gstat" id="gstat">
+      <button class="gact" id="gact" title="What the GPU is doing"><span class="gdot"></span><span id="gactText">Idle</span></button>
+      <div class="ring" id="ring" tabindex="0"><svg viewBox="0 0 36 36" id="ringSvg"></svg><span id="ringText">no model</span>
+        <div class="ringtip" id="ringTip"></div></div>
+    </div>
   </div>
   <div id="log"></div>
   <div id="studio"></div>
@@ -545,8 +558,6 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
       </div>
     </div>
     <div class="under">
-      <div class="ring" id="ring" tabindex="0"><svg viewBox="0 0 36 36" id="ringSvg"></svg><span id="ringText">no model</span>
-        <div class="ringtip" id="ringTip"></div></div>
       <span class="note">Runs fully on this PC. Can make mistakes.</span>
     </div>
   </div>
@@ -1098,8 +1109,19 @@ async function compactChat(auto){
 function drawSpec(){const e=$('specState');if(!e)return;const d=status.draft||'off';
   e.textContent=d.startsWith('on: ')?'Draft model in use: '+d.slice(4):d=='off'?'Off.':d.charAt(0).toUpperCase()+d.slice(1)+'.';
   if(d.startsWith('no matching'))e.textContent+=' Download a small model from the same family (for example Qwen3 0.6B for Qwen3 models) to enable it.'}
+// The pill in the top bar: what the GPU is doing right now, on every page. Click: go to that job.
+function drawActivity(){const b=$('gact'),t=$('gactText');if(!b)return;const m=status.media||{},task=status.task||'';let txt='Idle',cls='',go=null;
+  if(task.startsWith('load:')){txt='Loading '+task.slice(5).replace(/\.gguf$/i,'')+'…';cls='load'}
+  else if(m.busy){const k={image:'an image',video:'a video',audio:'speech'}[m.kind]||'media';txt=`Making ${k}`+(m.total?` · ${Math.round(100*Math.min(1,m.step/m.total))}%`:m.phase?` · ${m.phase}`:'');cls='busy';go=m.kind}
+  else if(status.busy){txt={coding:'Coding agent working',orchestration:'Orchestration running',api:'Answering an API request'}[task]||'Writing a reply';cls='busy';
+    go={coding:'code',orchestration:'orch',chat:'chat'}[task]||null}
+  else if(status.paused)txt='Model paused while media is made';
+  else if(!status.loaded)txt='No model loaded';
+  b.className='gact'+(cls?' '+cls:'');t.textContent=txt;b.title=txt+(go?' (click to open)':'');b.onclick=go?()=>setView(go):null;
+  clearTimeout(drawActivity.t);if(cls)drawActivity.t=setTimeout(refreshStatus,800)}
 async function refreshStatus(){
   try{status=await api('/api/status')}catch(e){return}
+  drawActivity();
   drawSpec();
   $('modelName').textContent=status.loaded?status.name:status.paused?'Paused for media':'No model loaded';
   const svg=$('ringSvg');
@@ -1109,7 +1131,8 @@ async function refreshStatus(){
   svg.innerHTML='<circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="4"/>'+L.map((l,i)=>`<circle cx="18" cy="18" r="15" fill="none" stroke="${col(l[1])}" stroke-width="4" stroke-dasharray="${Math.max(.2,seg-gap)} ${C}" stroke-dashoffset="${-i*seg}" opacity="${l[1]==l[0]?1:.45}"/>`).join('');
   const cnt=t=>L.filter(l=>l[1]==t).length,moving=L.filter(l=>l[1]!=l[0]).length;
   const st=status.stats||{};
-  $('ringText').textContent=`${cnt(2)} VRAM · ${cnt(1)} RAM · ${cnt(0)} SSD`+(moving?` · moving ${moving}…`:'')+(st.tps?` · ${st.tps} tok/s`:'');
+  const gb=x=>(x/1024).toFixed(x<10240?1:0)+' GB';   // where the weights are, in plain words
+  $('ringText').textContent=`Weights: VRAM ${gb(status.gpu_mb||0)} · RAM ${gb(status.ram_mb||0)}`+(cnt(0)?` · ${cnt(0)} layers on disk`:'')+(moving?` · moving ${moving}…`:'')+(st.tps?` · ${st.tps} tok/s`:'');
   $('ringTip').innerHTML=`<b style="color:var(--text)">${esc(status.name)}</b> (${esc(status.arch)})<br>${esc(status.gpu)}<div class="bars">`+
     L.map((l,i)=>`<i style="background:${col(l[1])};opacity:${l[1]==l[0]?1:.45}" title="${i<n-1?'layer '+i:'output head'}"></i>`).join('')+
     `</div>VRAM ${status.gpu_mb} MB · pinned RAM ${status.ram_mb} MB<br>opened in ${status.load_ms} ms · ${status.threads} CPU threads · context ${status.ctx}`+
@@ -1557,7 +1580,7 @@ async function cwSend(text){
     if(prefs.compact_code&&cs.msgs.length>=8){try{const c=await api('/api/count',{messages:[{role:'system',content:cwSystem()},...cs.msgs]});
       if(c.ctx&&c.tokens+Math.min(2048,c.ctx/4)>c.ctx*0.85)await cwCompact()}catch(e){}}
     const ai={t:'ai',text:''};cs.items.push(ai);
-    const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],json_after:'<tool_call>',temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
+    const r=await stream([{role:'system',content:cwSystem()},...cs.msgs],{stop:['</tool_call>'],json_after:'<tool_call>',purpose:'coding',temperature:0.2,max_tokens:Math.max(2048,prefs.max_tokens||0)},t=>{ai.text=t;cwRender()});
     ai.text=r.text;if(r.error)ai.err=r.error;
     const call=cwParse(r.text);
     if(!cwShow(splitThink(r.text).body)&&!splitThink(r.text).think&&!ai.err)cs.items.splice(cs.items.indexOf(ai),1);
@@ -1697,7 +1720,7 @@ function oSave(){const r=orch.run;if(!r)return;r.updated=Date.now();return api('
 async function oLoadRuns(){try{orch.runs=await api('/api/orchruns')}catch(e){orch.runs=[]}oSide()}
 function oSide(){const el=$('orchRuns');if(!el)return;
   el.innerHTML=orch.runs.length?orch.runs.map(r=>`<div class="hitem${orch.run&&orch.run.id==r.id?' on':''}" data-oid="${r.id}"><span>${esc(r.title)}</span><button class="x" data-odel="${r.id}" title="Delete">${ico('trash')}</button></div>`).join(''):'<div class="sidehint">Your runs show up here.</div>';
-  el.querySelectorAll('[data-oid]').forEach(d=>d.onclick=async ev=>{if(ev.target.closest('[data-odel]')||orch.busy)return;const r=await api('/api/orchruns/'+d.dataset.oid);if(!r.error){orch.run=r;drawOrch();oSide()}});
+  el.querySelectorAll('[data-oid]').forEach(d=>d.onclick=async ev=>{if(ev.target.closest('[data-odel]')||orch.busy)return;const r=await api('/api/orchruns/'+d.dataset.oid);if(!r.error){if(!r.final&&r.models.some(m=>m.state=='working'||m.state=='waiting')){r.stopped=true;r.models.forEach(m=>{if(m.state=='working')m.state='stopped'})}orch.run=r;drawOrch();oSide()}});
   el.querySelectorAll('[data-odel]').forEach(b=>b.onclick=async()=>{if(orch.busy&&orch.run&&orch.run.id==b.dataset.odel)return;if(!confirm('Delete this run?'))return;
     await api('/api/orchruns/'+b.dataset.odel+'/delete',{});if(orch.run&&orch.run.id==b.dataset.odel){orch.run=null;drawOrch()}oLoadRuns()})}
 
@@ -1708,7 +1731,7 @@ async function oAsk(system,user,{temp=0.7,max=1500,json=false}={}){
   // Qwen3 thinks at length before every reply: only on Thorough
   if(orch.run&&orch.run.effort!='thorough'&&/qwen3/i.test((status.arch||'')+' '+(status.name||''))&&!/\/no_think/.test(user))user+=' /no_think';
   orch.live='';const r=await stream([{role:'system',content:sys},{role:'user',content:user}],
-    Object.assign({temperature:temp,max_tokens:max},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint()});
+    Object.assign({temperature:temp,max_tokens:max,purpose:'orchestration'},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint()});
   orch.live='';if(orch.stop)throw new Error('stopped');if(r.error)throw new Error(r.error);
   let body=stripTags(splitThink(r.text||'').body).trim();
   if(!body&&!oAsk.retry){oAsk.retry=1;try{return await oAsk(system,user+' /no_think',{temp,max:max+1024,json})}finally{oAsk.retry=0}}   // all of it went into thinking
@@ -2035,12 +2058,25 @@ async function drawStudio(){
       if(startPic){delete extra.width;delete extra.height;extra.init_image=startPic.src;extra.strength=startPic.strength;if(startPic.painted)extra.mask=startPic.mask.toDataURL('image/png')}}
     if(kind=='audio'){Object.assign(extra,{speed:+$('a_speed').value})}
     if(kind=='video'){const r32=v=>Math.max(256,Math.round(v/32)*32);Object.assign(extra,{width:r32(+$('v_w').value),height:r32(+$('v_h').value),steps:+$('v_steps').value,cfg:+$('v_cfg').value,seconds:+$('v_len').value})}
-    const b=$('gen');b.disabled=true;const stop=watchProgress($('res'));
+    if(mediaJob&&mediaJob.running){toast('Another '+mediaJob.kind+' is still being made');return}
+    const job=mediaJob={kind,prompt,running:true,stop:watchProgress($('res'))};$('gen').disabled=true;
     const r=await api('/api/media/generate',Object.assign({kind,prompt,mode:vsel.amode},extra));
-    stop();b.disabled=false;
+    job.stop();job.running=false;job.result=r;
+    if(view!=kind||!$('res')){if(r.url)toast(`Your ${kind} is ready`);return}   // the user moved on: it shows when they come back
+    $('gen').disabled=false;
     const media=r.url?(kind=='video'?`<video class="genimg" controls autoplay loop src="${esc(r.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(r.url)}"></audio>`:`<div class="gwrap"><img class="genimg" src="${esc(r.url)}" onclick="viewImg(this.src)"></div>`):'';
     $('res').innerHTML=r.url?`${media}<div class="meta" style="margin:0">${r.width?r.width+' × '+r.height+' · ':''}seed ${r.seed} · ${r.seconds} s</div>`:`<span class="err">${esc(r.error)}</span>`;
-    if(r.url)drawGallery()}}
+    if(r.url)drawGallery()}
+  // a job still running (or finished while this page was away) shows here again
+  if(mediaJob&&mediaJob.kind==kind){
+    if(mediaJob.running){$('gen').disabled=true;mediaJob.stop();mediaJob.stop=watchProgress($('res'))}
+    else if(mediaJob.result&&!mediaJob.shown){mediaJob.shown=true;const r=mediaJob.result;
+      $('res').innerHTML=r.url?(kind=='video'?`<video class="genimg" controls loop src="${esc(r.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(r.url)}"></audio>`:`<img class="genimg" src="${esc(r.url)}" onclick="viewImg(this.src)">`)+`<div class="meta" style="margin:0">${r.width?r.width+' × '+r.height+' · ':''}seed ${r.seed} · ${r.seconds} s</div>`:`<span class="err">${esc(r.error||'')}</span>`}}
+  else if(!mediaJob&&status.media&&status.media.busy&&status.media.kind==kind){   // started before a page reload
+    $('gen').disabled=true;const stop=watchProgress($('res'),async()=>{stop();if(view!=kind)return;$('gen').disabled=false;drawGallery();
+      const x=(await api('/api/media/gallery')).find(g=>(g.kind||'image')==kind);   // show what it made
+      if(x&&$('res'))$('res').innerHTML=kind=='video'?`<video class="genimg" controls loop src="${esc(x.url)}"></video>`:kind=='audio'?`<audio controls src="${esc(x.url)}"></audio>`:`<img class="genimg" src="${esc(x.url)}" onclick="viewImg(this.src)">`})}}
+let mediaJob=null;
 // ---- Image studio: a start picture with an optional painted mask (white = repaint)
 let startPic=null;
 function setStartPic(src){const im=new Image();im.onload=()=>{const c=document.createElement('canvas');c.width=im.naturalWidth;c.height=im.naturalHeight;
@@ -2081,7 +2117,7 @@ async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api
     :`<div class="galimg"><img src="${esc(x.url)}" title="${esc(x.prompt)}" alt="${esc(x.prompt)}" loading="lazy" style="${st}" onclick="viewImg(this.src)">${galBtns(x)}</div>`).join(''):`<div class="ph">Nothing yet</div>`}
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.
-function watchProgress(el){let on=true,seen=-1;
+function watchProgress(el,whenIdle){let on=true,seen=-1;
   el.innerHTML=`<div class="rcard"><div class="rframe"><div class="rshimmer" style="${phase(1600)}"></div><img class="rimg" alt=""><div class="rbadge"><span class="rdot"></span><span class="mp-l">Starting</span></div></div>
     <div class="rfoot"><div class="rbar"><i class="mp-b"></i></div><span class="rpct mp-p">0%</span><button class="btn mp-c">Cancel</button></div></div>`;
   el.querySelector('.mp-c').onclick=()=>fetch('/api/media/cancel',{method:'POST'});
@@ -2095,7 +2131,7 @@ function watchProgress(el){let on=true,seen=-1;
     const l=el.querySelector('.mp-l'),b=el.querySelector('.mp-b'),pc=el.querySelector('.mp-p');
     if(p.busy){const f=p.total?Math.min(1,(p.step+(p.phase=='Decoding'?1:0))/p.total):0;
       l.textContent=p.total?`${p.phase} · ${p.step}/${p.total}`:p.phase;b.style.width=Math.max(3,f*100)+'%';pc.textContent=Math.round(f*100)+'%';
-      if(p.preview&&p.preview!=seen){seen=p.preview;show('/api/media/preview?'+seen)}}}catch(e){}
+      if(p.preview&&p.preview!=seen){seen=p.preview;show('/api/media/preview?'+seen)}}else if(whenIdle){whenIdle();break}}catch(e){}
     await new Promise(r=>setTimeout(r,400))}})();
   return()=>{on=false}}
 $('nav').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.view));

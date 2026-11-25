@@ -13,7 +13,7 @@ extern std::wstring g_store_dir;
 
 static std::mutex g_media;                 // one media job at a time
 static std::mutex g_prog_m;
-static std::string g_phase;
+static std::string g_phase, g_media_kind, g_media_prompt;   // what is being made (for the status everywhere)
 static int g_step = 0, g_total = 0;
 static std::string g_preview;   // latest live preview as a BMP file
 static int g_preview_n = 0;      // bumps on every new preview
@@ -45,7 +45,7 @@ static std::string read_text(const std::wstring& p) {
 
 std::string media_progress_json() {
     std::lock_guard<std::mutex> l(g_prog_m);
-    return "{\"busy\":" + std::string(g_media_busy ? "true" : "false") + ",\"phase\":" + json_esc(g_phase) +
+    return "{\"busy\":" + std::string(g_media_busy ? "true" : "false") + ",\"kind\":" + json_esc(g_media_kind) + ",\"prompt\":" + json_esc(g_media_prompt.substr(0, 200)) + ",\"phase\":" + json_esc(g_phase) +
            ",\"step\":" + std::to_string(g_step) + ",\"total\":" + std::to_string(g_total) + ",\"preview\":" + std::to_string(g_preview_n) + "}";
 }
 std::string media_preview_bmp() { std::lock_guard<std::mutex> l(g_prog_m); return g_preview; }
@@ -81,6 +81,7 @@ std::string media_generate_image(const J& req) {
     std::string model = req["model"].str(prefs["media_image"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No image model is loaded or selected. Pick one in the Image studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "image"; g_media_prompt = req["prompt"].str(); }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     // The chat model makes way when the picture would not fit beside it: the weights (about the checkpoint's
@@ -180,6 +181,7 @@ std::string media_generate_video(const J& req) {
     std::string model = req["model"].str(prefs["media_video"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No video model is loaded or selected. Pick one in the Video studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "video"; g_media_prompt = req["prompt"].str(); }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     VramLease lease(11000);
@@ -299,6 +301,7 @@ std::string media_generate_audio(const J& req) {
     std::string text = req["prompt"].str(req["text"].str());
     if (text.empty()) return "{\"error\":\"nothing to say\"}";
     std::lock_guard<std::mutex> lk(g_media);
+    { std::lock_guard<std::mutex> lk(g_prog_m); g_media_kind = "audio"; g_media_prompt = req["prompt"].str(); }
     g_media_busy = true; g_media_cancel = false;
     struct Done { ~Done() { g_media_busy = false; } } done;
     VramLease lease(2000);

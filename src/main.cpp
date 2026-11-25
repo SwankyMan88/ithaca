@@ -46,6 +46,14 @@ static std::mutex g_gen;           // one generation / load at a time
 static std::atomic<bool> g_stop{false};
 [[noreturn]] static void quit_now();
 std::atomic<bool> g_busy{false};
+// What the model is busy with, for the status shown on every page: "chat", "coding", "orchestration", "api", "load:<name>"
+static std::mutex g_task_m;
+static std::string g_task;
+struct Task {
+    explicit Task(const std::string& t) { std::lock_guard<std::mutex> l(g_task_m); g_task = t; }
+    ~Task() { std::lock_guard<std::mutex> l(g_task_m); g_task.clear(); }
+};
+static std::string task_now() { std::lock_guard<std::mutex> l(g_task_m); return g_task; }
 static std::string g_last_stats = "{}";
 static std::mutex g_stats_m;
 static LoadOpts g_opts;
@@ -518,6 +526,7 @@ static void v1_chat(SOCKET s, const J& j, bool text_completion = false) {
     bool stopped_by_stop = false;
     g_stop = false; g_busy = true;
     ClientWatch watch(s);
+    Task task("api");
     GenStats st = g_chat.generate(msgs, o, [&](const std::string& t) {
         if (g_stop) return false;
         text += t;
@@ -760,7 +769,8 @@ static void handle(SOCKET s) {
         st.pop_back();
         {
             std::lock_guard<std::mutex> l(g_stats_m);
-            st += ",\"busy\":" + std::string(g_busy ? "true" : "false") + ",\"paused\":" + std::string(chat_model_paused() ? "true" : "false") + ",\"stats\":" + g_last_stats +
+            extern std::string media_progress_json();
+            st += ",\"task\":" + json_esc(task_now()) + ",\"media\":" + media_progress_json() + ",\"busy\":" + std::string(g_busy ? "true" : "false") + ",\"paused\":" + std::string(chat_model_paused() ? "true" : "false") + ",\"stats\":" + g_last_stats +
                   ",\"model\":" + json_esc(g_model.path_utf8) + ",\"name\":" + json_esc(chat_model_name()) +
                   ",\"opts\":{\"threads\":" + std::to_string(g_opts.threads) + ",\"ctx\":" + std::to_string(g_opts.ctx) +
                   ",\"vram_mb\":" + std::to_string(g_opts.vram_mb) + ",\"ram_mb\":" + std::to_string(g_opts.ram_mb) +
@@ -811,6 +821,7 @@ static void handle(SOCKET s) {
         g_opts.ram_mb = (int64_t)j["ram_mb"].num((double)g_opts.ram_mb);
         std::string p = j["path"].str(g_model.path_utf8);
         g_stop = true;
+        Task task("load:" + p.substr(p.find_last_of("\\/") + 1));
         std::string err;
         if (p.empty()) respond(s, 400, "application/json", "{\"error\":\"no model selected\"}");
         else if (do_load(p, err)) respond(s, 200, "application/json", g_model.tier_json());
@@ -836,6 +847,9 @@ static void handle(SOCKET s) {
         std::string pend; bool hit = false;
         g_stop = false; g_busy = true;
         ClientWatch watch(s);
+        std::string purpose = j["purpose"].str("chat");
+        if (purpose != "coding" && purpose != "orchestration") purpose = "chat";
+        Task task(purpose);
         GenStats st = g_chat.generate(msgs, o, [&](const std::string& t) {
             if (g_stop) return false;
             if (stops.empty()) return send_all(s, "data: {\"t\":" + json_esc(t) + "}\n\n");
