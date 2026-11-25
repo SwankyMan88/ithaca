@@ -14,7 +14,7 @@
 </style>
 <defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient></defs>
 <rect width="1104" height="616" rx="16" fill="#ffffff"/>
-<text x="30" y="52" font-size="22" fill="#1f2328" font-weight="600">Everything in one 2 MB exe</text>
+<text x="30" y="52" font-size="22" fill="#1f2328" font-weight="600">Everything in one 3 MB exe</text>
 <g class="up" style="animation-delay:0.05s"><rect x="30" y="80" width="336" height="112" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
 <g><rect x="48" y="100" width="44" height="44" rx="11.0" fill="url(#acc)" opacity="0.16"/><path transform="translate(56.8 108.8) scale(1.0999999999999999)" d="M4 5h16v10H9l-5 4z" fill="none" stroke="#7c6cff" stroke-width="1.8181818181818183" stroke-linecap="round" stroke-linejoin="round"/></g>
 <text x="106" y="122" font-size="17" fill="#1f2328" font-weight="600">Chat</text>

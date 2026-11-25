@@ -10,7 +10,7 @@ import argparse, json, os, re, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from agent_eval import post, get   # same HTTP helpers
+from agent_eval import post, get, urlopen   # same HTTP helpers (and the same device cookie)
 
 ROOT = os.path.dirname(HERE)
 
@@ -31,7 +31,7 @@ def chat(port, system, user, temperature, max_tokens=1024):
     import urllib.request
     req = urllib.request.Request(f'http://127.0.0.1:{port}/api/chat', data=body, method='POST')
     text, stats, buf = '', None, ''
-    with urllib.request.urlopen(req, timeout=900) as r:
+    with urlopen(req, timeout=900) as r:
         for raw in r:
             buf += raw.decode('utf8', 'replace')
             while '\n\n' in buf:

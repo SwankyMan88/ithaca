@@ -8,11 +8,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/NVIDIA-GTX%2010%2B%20or%20CPU-76b900" alt="NVIDIA GTX 10 series or newer, or CPU">
-  <img src="https://img.shields.io/badge/size-~2%20MB-555" alt="About 2 MB">
+  <img src="https://img.shields.io/badge/size-~3%20MB-555" alt="About 3 MB">
 </p>
 
 <p align="center">
-  <b><a href="https://github.com/SwankyMan88/ithaca/releases/latest">Download Ithaca.exe</a></b> · double-click it · pick a model · chat
+  <b><a href="https://github.com/SwankyMan88/ithaca/releases/latest">Download Ithaca</a></b> · double-click it · pick a model · chat
 </p>
 
 <p align="center">
@@ -37,12 +37,25 @@ There is no installer, no Python, no llama.cpp and no CUDA toolkit. The model lo
   <img src="docs/steps-light.svg" alt="Download, double-click, pick a model, chat">
 </picture>
 
-1. Download `Ithaca.exe` and put it in its own folder.
-2. Double-click it. A console window opens and the chat page opens in your browser.
+1. Download an exe (see below) and put it in its own folder.
+2. Double-click it. Ithaca opens in its own window, or in your browser for `Ithaca.exe`.
 3. Click **Models** and download one, or point it at a folder of `.gguf` files. It also finds models from GPT4All and LM Studio on its own.
 4. Load the model and start typing. You can type before it has finished loading.
 
-Settings, chats and memories are kept next to the exe, so the folder is portable. **Quit** in the sidebar (or closing the console) stops everything and frees all memory.
+**Quit** in the sidebar (or closing the window or console) stops everything and frees all memory.
+
+### Which exe?
+
+| | |
+|---|---|
+| **Ithaca App.exe** | Ithaca in its own window, with everything. No browser opens. |
+| **Ithaca Chat.exe** | Its own window, chat only. |
+| **Ithaca Image.exe**, **Video**, **Audio** | Its own window, just that studio. |
+| **Ithaca.exe** | Opens Ithaca in your browser. Use it to reach Ithaca from other devices (`--host`) or as an API server (`--server`). |
+
+They all share the same folder, models and data, and only one runs at a time: opening a second one adds a window to the Ithaca that is already running, so two never fight over the GPU. The app windows use WebView2, the web engine built into Windows 10 and 11, so there is nothing else to install.
+
+The top bar shows on every page what the GPU is doing (writing a reply, making an image at 40%, loading a model) and where the model's weights are (VRAM, RAM, disk). An image, video or clip keeps rendering when you switch pages, and it's still there when you come back.
 
 ## See it work
 
@@ -97,7 +110,18 @@ The steps change with the kind of request. **Auto** reads the request and picks 
 | Ideas & plans | 3 plans; weak ones dropped, overlaps merged, new ones added; 3–4 rounds | combines them into one plan |
 | Quick facts | one answer | writes one answer and notes where the models disagree |
 
-You see everything: every answer with its score and whether it was kept, edited, deleted or added, every round of review, and which model the best answer came from. Runs are saved next to the exe and listed in the sidebar. Models run one after another (the judge goes last, so it's still loaded), so a run with two small models takes about 10 minutes.
+You see everything: every answer with its score and whether it was kept, edited, deleted or added, every round of review, and which model the best answer came from. Runs are saved with your other data and listed in the sidebar. Models run one after another (the judge goes last, so it's still loaded). An **Effort** setting decides how much work each model does: Fast, Balanced (the default) or Thorough, each with a time limit per model and for the whole run. Two mid-size models on a hard question take about 4 minutes on Balanced.
+
+## Privacy
+
+Every device that opens Ithaca gets its own data: the PC itself, a second browser, the app window, a phone on your network. A device's chats, coding chats, orchestration runs, memories, settings, voices, images, videos and clips are stored on the PC running Ithaca, **encrypted with that device's own key** (AES-256-GCM, through Windows' built-in cryptography). The key lives in a cookie that the page's scripts can't read, and the PC never saves it. So one device can't open another's data, and copying the folder gives no one your chats.
+
+- **This PC.** The window or browser that the exe opens gets the PC's own key through a one-time link. That key is protected by your Windows account (DPAPI), so your data comes back after a reboot or in another browser that Ithaca opens. Data saved by older versions moves into This PC, encrypted, the first time you start this one.
+- **PIN.** Any device can add a PIN in **Settings → Privacy**. Its data then needs the PIN as well as the key. Ithaca asks for it once per browser session, and wrong guesses are slowed down.
+- **Recovery code.** Shown in **Settings → Privacy**. Clearing a browser's cookies loses that browser's key; the code brings the data back, or opens the same data in another browser. Keep it private.
+- **Other devices.** This PC can see how much space other devices use and delete their data, but it can't read it.
+
+What's shared by everyone using the PC: the models, the model settings and the GPU. The API (`/v1`) doesn't belong to a device, and it keeps using the plain shared folder.
 
 ## Speed, compared with llama.cpp
 
@@ -150,10 +174,10 @@ Not supported yet: DeepSeek V3/R1 (full size), Llama 4, SD3, LoRAs, image-to-vid
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/inside-dark.svg">
-  <img src="docs/inside-light.svg" alt="What is inside the 2 MB exe">
+  <img src="docs/inside-light.svg" alt="What is inside the 3 MB exe">
 </picture>
 
-- One 2 MB file: no install, no service, no runtime downloads.
+- One 3 MB file: no install, no service, no runtime downloads.
 - Images, video and speech out, and pictures and documents in, all in the same chat.
 - Models bigger than your VRAM still run, and you can type before loading finishes.
 - **Speculative decoding** is automatic: with a small model of the same family installed (Qwen3 0.6B next to Qwen3 14B), it drafts tokens for the big one. Qwen3 14B writes code at about 44 tok/s this way.

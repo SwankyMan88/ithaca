@@ -12,6 +12,17 @@ import argparse, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.r
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tasks as T
+import http.cookiejar
+# Ithaca keeps each device's data apart (a key cookie): the bench is one device, like a browser
+_jar = http.cookiejar.CookieJar()
+_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_jar))
+_have_device = set()
+def urlopen(req, timeout=60):
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    base = url.split('/', 3)[:3]; base = '/'.join(base)
+    if base not in _have_device:
+        _opener.open(base + '/', timeout=30).read(); _have_device.add(base)
+    return _opener.open(req, timeout=timeout)
 import variants as V
 
 ROOT = os.path.dirname(HERE)
@@ -19,12 +30,12 @@ ROOT = os.path.dirname(HERE)
 
 def post(port, path, body, timeout=900):
     req = urllib.request.Request(f'http://127.0.0.1:{port}{path}', data=json.dumps(body).encode(), method='POST', headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode('utf8', 'replace'))
 
 
 def get(port, path):
-    with urllib.request.urlopen(f'http://127.0.0.1:{port}{path}', timeout=60) as r:
+    with urlopen(f'http://127.0.0.1:{port}{path}', timeout=60) as r:
         return json.loads(r.read().decode('utf8', 'replace'))
 
 
@@ -33,7 +44,7 @@ def chat(port, messages, temperature, max_tokens):
     body = json.dumps({'messages': messages, 'temperature': temperature, 'max_tokens': max_tokens, 'stop': ['</tool_call>'], 'json_after': os.environ.get('ITHACA_JSON_AFTER', '<tool_call>')}).encode()
     req = urllib.request.Request(f'http://127.0.0.1:{port}/api/chat', data=body, method='POST')
     text, stats, err, buf = '', None, None, ''
-    with urllib.request.urlopen(req, timeout=1800) as r:
+    with urlopen(req, timeout=1800) as r:
         for raw in r:
             buf += raw.decode('utf8', 'replace')
             while '\n\n' in buf:

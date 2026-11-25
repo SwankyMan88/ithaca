@@ -14,7 +14,7 @@
 </style>
 <defs><linearGradient id="acc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#2fb5ff"/></linearGradient></defs>
 <rect width="1100" height="330" rx="16" fill="#ffffff"/>
-<text x="36" y="48" font-size="22" fill="#1f2328" font-weight="600">What's inside the 2 MB</text>
+<text x="36" y="48" font-size="22" fill="#1f2328" font-weight="600">What's inside the 3 MB</text>
 <text x="36" y="76" font-size="15" fill="#59636e">Written from scratch in C++. GPU code is generated at startup and compiled by the driver you already have.</text>
 <g class="up" style="animation-delay:0.08s"><rect x="36" y="100" width="244" height="88" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
 <path transform="translate(54 130) scale(1.1666666666666667)" d="M7 7h10v10H7z M10 3v4 M14 3v4 M10 17v4 M14 17v4 M3 10h4 M3 14h4 M17 10h4 M17 14h4" fill="none" stroke="#7c6cff" stroke-width="1.7142857142857142" stroke-linecap="round" stroke-linejoin="round"/>

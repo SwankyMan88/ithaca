@@ -20,7 +20,7 @@
 <circle cx="164" cy="34" r="12" fill="url(#acc)"/>
 <text x="164" y="39" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">1</text>
 <text x="136" y="128" font-size="18" fill="#1f2328" font-weight="600" text-anchor="middle">Download</text>
-<text x="136" y="152" font-size="14" fill="#59636e" text-anchor="middle">Ithaca.exe, about 2 MB</text>
+<text x="136" y="152" font-size="14" fill="#59636e" text-anchor="middle">Ithaca.exe, about 3 MB</text>
 </g>
 <path class="flow" d="M225 62 H293" stroke="#7c6cff" stroke-width="2.5"/>
 <g class="up" style="animation-delay:0.28s">

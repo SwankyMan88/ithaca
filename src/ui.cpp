@@ -408,16 +408,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .cwdone{display:flex;align-items:center;gap:9px;margin:14px 0 4px;padding:9px 12px;border:1px solid var(--line);border-radius:11px;background:var(--panel);font-size:13.5px;color:var(--dim)}
 .cwdone .icon{color:var(--ok)}.cwdone span{flex:1}
 /* orchestration (coming next) */
-.orch{max-width:760px;margin:8vh auto;padding:0 20px;text-align:center}
-.orch .big{width:72px;height:72px;border-radius:20px;background:var(--grad);display:grid;place-items:center;margin:0 auto 20px;color:#fff;box-shadow:0 12px 44px rgba(63,182,255,.3)}
-.orch .big .icon{width:34px;height:34px}
-.orch h1{margin:0 0 10px;font-size:26px}.orch>p{color:var(--dim);line-height:1.6;margin:0 auto 26px;max-width:560px}
-.orchg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;text-align:left}
-.orchg div{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel)}
-.orchg b{display:flex;align-items:center;gap:8px;margin-bottom:6px}.orchg p{margin:0;color:var(--dim);font-size:13.5px;line-height:1.5}
-.ocol{max-width:900px;padding:18px 20px 60px}.osetup .ot{display:flex;align-items:center;gap:10px;font-size:24px;margin:8px 0 4px}.osetup .ot .icon{width:24px;height:24px;color:var(--a1)}
-.osetup textarea{width:100%;box-sizing:border-box;margin:14px 0 6px;resize:vertical}
-.ogrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ocol{max-width:900px;padding:18px 20px 60px}
 .omlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;max-height:280px;overflow:auto}
 .owrap{display:flex;flex-direction:column;min-height:100%}.owrap>.ocol{flex:1;width:100%;box-sizing:border-box}
 .ocomp{position:sticky;bottom:0;padding:8px 20px 14px;background:linear-gradient(transparent,var(--bg) 22%)}
@@ -445,7 +436,6 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .omchk{display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--panel);font-size:13.5px}
 .omchk input{width:auto;margin:0;flex:none;accent-color:var(--a1)}
 .omchk span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.omchk small{display:block;color:var(--faint);font-size:11.5px}
-.obar{display:flex;justify-content:flex-end;margin-bottom:8px}
 .ohead .oq{font-size:17px;font-weight:600;white-space:pre-wrap;margin-bottom:8px}
 .ometa{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
 .obadge,.omodel{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;border:1px solid var(--line);border-radius:99px;padding:3px 10px;color:var(--dim)}
@@ -465,8 +455,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .oscore{font-size:12px;color:var(--text);font-weight:600}
 .olog{font-size:12px;color:var(--faint);padding:4px 0 10px}
 .orounds{margin-top:8px;font-size:13px;color:var(--dim)}.orounds summary{cursor:pointer}.oround{border-left:2px solid var(--line);padding:4px 10px;margin:8px 0}.oround b{color:var(--text)}.oact{color:var(--text);margin-top:4px}
-@media(max-width:820px){.ogrid{grid-template-columns:1fr}}
-@media(max-width:820px){.cwtree{display:none}.cwsugg,.orchg{grid-template-columns:1fr}.cwbar{flex-wrap:wrap}}
+@media(max-width:820px){.cwtree{display:none}.cwsugg{grid-template-columns:1fr}.cwbar{flex-wrap:wrap}}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>

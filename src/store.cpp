@@ -7,16 +7,6 @@
 
 std::wstring g_store_dir;  // set by main: the exe folder
 
-static std::string read_file(const std::wstring& p, bool& ok) {
-    ok = false;
-    FILE* f = _wfopen(p.c_str(), L"rb");
-    if (!f) return "";
-    std::string s; char b[65536]; size_t r;
-    while ((r = fread(b, 1, sizeof b, f)) > 0) s.append(b, r);
-    fclose(f);
-    ok = true;
-    return s;
-}
 static bool write_file(const std::wstring& p, const std::string& s) {
     std::wstring tmp = p + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
