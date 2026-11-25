@@ -423,7 +423,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .oph{display:flex;align-items:center;gap:10px;position:sticky;top:0;background:var(--panel);padding:10px 0;z-index:1}.oph .search{margin:0;flex:1;max-width:260px}.oph span{color:var(--dim);font-size:13px;margin-left:auto}
 .ogroup{margin-top:8px}.ogh{display:flex;align-items:baseline;gap:8px;margin:6px 0}.ogh span{color:var(--faint);font-size:12.5px}
 .linkbtn{margin-left:auto;color:var(--a1);font-size:12.5px;background:none;border:0;cursor:pointer}
-.omchk.on{border-color:var(--a1)}
+.omchk.on{border-color:var(--a1)}.omchk.dis{opacity:.45;cursor:default}
 .ointro{max-width:760px;margin:6vh auto 20px;text-align:center}.ointro .big{width:64px;height:64px;border-radius:18px;background:var(--grad);display:grid;place-items:center;margin:0 auto 16px;color:#fff}
 .ointro .big .icon{width:30px;height:30px}.ointro h1{margin:0 0 8px;font-size:24px}.ointro>p{color:var(--dim);line-height:1.6;margin:0 auto 22px;max-width:580px}
 .ometh{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:left}.ometh div{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel)}
@@ -1727,14 +1727,17 @@ function oSide(){const el=$('orchRuns');if(!el)return;
 // one model call; json: the reply is one JSON object (constrained after <json>)
 async function oAsk(system,user,{temp=0.7,max=1500,json=false}={}){
   if(orch.stop)throw new Error('stopped');
+  const until=orch.until||0;if(until&&Date.now()>until-3000)return json?null:'';   // this model's time is up
   const sys=system+(json?'\n\nReply with <json> followed by one JSON object and nothing else.':'');
   // Qwen3 thinks at length before every reply: only on Thorough
   if(orch.run&&orch.run.effort!='thorough'&&/qwen3/i.test((status.arch||'')+' '+(status.name||''))&&!/\/no_think/.test(user))user+=' /no_think';
   orch.live='';const r=await stream([{role:'system',content:sys},{role:'user',content:user}],
-    Object.assign({temperature:temp,max_tokens:max,purpose:'orchestration'},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint()});
-  orch.live='';if(orch.stop)throw new Error('stopped');if(r.error)throw new Error(r.error);
+    Object.assign({temperature:temp,max_tokens:max,purpose:'orchestration'},json?{json_after:'<json>|```json|```',stop:['</json>']}:{}),t=>{orch.live=t;oPaint();
+      if(until&&Date.now()>until&&!oAsk.cut){oAsk.cut=1;fetch('/api/stop',{method:'POST'})}});   // out of time: keep what it wrote so far
+  const cut=oAsk.cut;oAsk.cut=0;
+  orch.live='';if(orch.stop)throw new Error('stopped');if(r.error&&!cut)throw new Error(r.error);
   let body=stripTags(splitThink(r.text||'').body).trim();
-  if(!body&&!oAsk.retry){oAsk.retry=1;try{return await oAsk(system,user+' /no_think',{temp,max:max+1024,json})}finally{oAsk.retry=0}}   // all of it went into thinking
+  if(!body&&!oAsk.retry&&!cut){oAsk.retry=1;try{return await oAsk(system,user+' /no_think',{temp,max:max+1024,json})}finally{oAsk.retry=0}}   // all of it went into thinking
   // drop a chatty opener line ("Okay, here's the revised answer:")
   if(!json)return body.replace(/^(?:okay|ok|sure|certainly|alright)?[,.!]?\s*(?:here(?:'|’)s|here is|below is)[^\n]{0,140}:\s*\n+/i,'').replace(/^(?:okay|sure|certainly)[,.!][^\n]{0,100}\n+/i,'');
   const i=body.lastIndexOf('<json>'),s=(i>=0?body.slice(i+6):body).replace(/<\/json>[\s\S]*$/,'').replace(/```(?:json)?/g,'').trim();
@@ -1752,7 +1755,8 @@ async function oUse(path){
   orch.liveWho='Loading '+oShort(path)+'…';oPaint();
   const r=await api('/api/load',{path,ctx:Math.max(8192,(status.opts&&status.opts.ctx)||0)});await refreshStatus();
   return !r.error}
-const oNum=(list)=>list.map(c=>`### Answer ${c.n}\n${c.text}`).join('\n\n');
+const oClip=(t,n=2400)=>t.length>n?t.slice(0,n*0.7)+'\n[…]\n'+t.slice(-n*0.3):t;
+const oNum=(list)=>list.map(c=>`### Answer ${c.n}\n${oClip(c.text)}`).join('\n\n');
 const oFinal=t=>{const m=String(t).match(/final answer\s*[:：]\s*(.+)/i);return m?m[1].replace(/[*$`\\]/g,'').replace(/\s+/g,' ').trim().toLowerCase().replace(/\.$/,''):''};
 async function oRunCode(text){const m=String(text).match(/```(?:python|py)\s*\n([\s\S]*?)```/i);if(!m||!prefs.run_code)return '';
   try{const r=await api('/api/run',{code:m[1]});return String(r.output||'').slice(0,1500)}catch(e){return ''}}
@@ -1760,12 +1764,15 @@ async function oRunCode(text){const m=String(text).match(/```(?:python|py)\s*\n(
 // The rule set for one model: candidates, then critique/refine rounds, then its best answer.
 // How much work each model does. Balanced keeps each method's minimum number of rounds.
 const OEFFORT={
-  fast:{name:'Fast',cands:2,rounds:m=>Math.min(2,m.max),tok:600,mins:3,edits:1},
-  balanced:{name:'Balanced',cands:3,rounds:m=>m.min,tok:900,mins:8,edits:2},
-  thorough:{name:'Thorough',cands:3,rounds:m=>m.max,tok:1500,mins:20,edits:3}};
+  fast:{name:'Fast',cands:2,rounds:m=>Math.min(2,m.max),tok:600,mins:3,edits:1,total:10},
+  balanced:{name:'Balanced',cands:3,rounds:m=>m.min,tok:900,mins:8,edits:2,total:25},
+  thorough:{name:'Thorough',cands:3,rounds:m=>m.max,tok:1500,mins:20,edits:3,total:60}};
 async function oModel(run,M){
   const mode=OMODES[run.mode],q=run.prompt,P=M,E=OEFFORT[run.effort||'balanced']||OEFFORT.balanced;let n=0;
-  const t0=Date.now(),over=()=>Date.now()-t0>E.mins*60000;
+  // this model's share of the run's time: its own limit, or what is left of the run divided by the models still to go
+  const left=run.models.filter(x=>x.state=='waiting'||x===M).length,runLeft=(run.created+E.total*60000)-Date.now()-60000;   // a minute is kept for the judge
+  const lim=Math.max(45000,Math.min(E.mins*60000,runLeft/Math.max(1,left)));
+  const t0=Date.now(),over=()=>Date.now()-t0>lim;orch.until=t0+lim;M.limit=Math.round(lim/1000);
   P.state='working';P.started=t0;oPaint();
   const cands=Math.min(mode.cands,E.cands),rounds=mode.max?Math.max(1,E.rounds(mode)):0,tok=Math.min(E.tok,prefs.max_tokens||2048);
   const sysGen='You are one of several AI models working on the same request. '+mode.gen+' Be complete but concise.';
@@ -1821,7 +1828,7 @@ async function oModel(run,M){
       const text=await oAsk(sysGen+'\nTake a different approach from the earlier attempts'+(lost.length?', avoiding these mistakes: '+lost.join('; '):'')+'.',q,{temp:0.8,max:tok});
       if(text){P.cands.push({n:++n,text,status:'added',score:null,log:[`Round ${round}: added to replace a deleted answer`]});R.actions.push(`Added answer ${n}`)}}
     oPaint();await oSave()}
-  if(over()&&P.rounds.length<rounds){const R=P.rounds[P.rounds.length-1];if(R)R.done=(R.done?R.done+' ':'')+`Time limit (${E.mins} min) reached.`}
+  if(over()&&P.rounds.length<rounds){const R=P.rounds[P.rounds.length-1];if(R)R.done=(R.done?R.done+' ':'')+`Time limit (${Math.round(lim/60000*10)/10} min) reached.`}
   // the model's best: the highest review score (no extra call); ties go to the answer reviewed last
   const alive=P.cands.filter(c=>c.status!='deleted'&&c.text);
   if(!alive.length){P.state='failed';P.note='No usable answer';oPaint();await oSave();return}
@@ -1831,7 +1838,7 @@ async function oModel(run,M){
 
 // The judge: compares the models' best answers (and, for math, the vote) and writes the final answer.
 async function oJudge(run){
-  const mode=OMODES[run.mode],q=run.prompt;
+  const mode=OMODES[run.mode],q=run.prompt;orch.until=Date.now()+4*60000;
   const fin=run.models.filter(m=>m.best).map((m,i)=>({k:i+1,model:m.name,text:m.cands.find(c=>c.n==m.best.n).text}));
   if(!fin.length)return;
   run.judging=true;oPaint();
@@ -1871,7 +1878,7 @@ async function oStart(){
       orch.liveWho=M.name;await oModel(orch.run,M)}
     orch.liveWho='Judge: '+oShort(judge);if(await oUse(judge))await oJudge(orch.run);
   }catch(e){if(String(e.message)!='stopped')toast('Run stopped: '+e.message);orch.run.stopped=!orch.run.final}
-  orch.busy=false;orch.liveWho='';orch.live='';await oSave();drawOrch();oLoadRuns()}
+  orch.busy=false;orch.until=0;orch.liveWho='';orch.live='';await oSave();drawOrch();oLoadRuns()}
 function oStop(){orch.stop=true;stopGen()}
 setInterval(()=>{if(orch.busy&&view=='orch')oPaint()},1000);
 setTimeout(()=>{const b=$('oNewSide');if(b)b.onclick=()=>{if(orch.busy)return;orch.run=null;drawOrch();oSide()}},0);
@@ -1896,12 +1903,14 @@ const oParams=m=>{const x=String(m.params||'').match(/([\d.]+)\s*([BbMm])/);retu
 function oModelPanel(){
   const sel=new Set(prefs.orch_models||[]),q=(orch.mq||'').toLowerCase(),vram=sysinfo&&sysinfo.gpu?sysinfo.gpu.vram_mb:0;
   const list=(orch.models||[]).filter(m=>!q||m.name.toLowerCase().includes(q));
-  return OGROUPS.map(([g,range,lo,hi])=>{const ms=list.filter(m=>{const p=oParams(m);return p>=lo&&p<hi}).sort((a,b)=>oParams(b)-oParams(a)||a.name.localeCompare(b.name));
+  return (OGROUPS.map(([g,range,lo,hi])=>{const ms=list.filter(m=>{const p=oParams(m);return p>=lo&&p<hi}).sort((a,b)=>oParams(b)-oParams(a)||a.name.localeCompare(b.name));
     if(!ms.length)return '';const all=ms.every(m=>sel.has(m.path));
     return `<div class="ogroup"><div class="ogh"><b>${g}</b><span>${range} · ${ms.length}</span><button class="linkbtn" data-ogall="${g}">${all?'Clear':'Select all'}</button></div>
       <div class="omlist">${ms.map(m=>{const fits=vram?m.mb<vram*0.92:null;
         return `<label class="omchk${sel.has(m.path)?' on':''}"><input type="checkbox" value="${esc(m.path)}" data-g="${g}" ${sel.has(m.path)?'checked':''}><span>${esc(oShort(m.name))}<small>${esc(m.params||'?')} · ${(m.mb/1024).toFixed(1)} GB${fits==null?'':fits?' · fits in VRAM':' · partly in RAM'}</small></span></label>`}).join('')}</div></div>`}).join('')
-    ||'<div class="sidehint">No models match.</div>'}
+    ||'<div class="sidehint">No models match.</div>')
+    +((orch.unsupported||[]).length?`<div class="ogroup"><div class="ogh"><b>Not supported</b><span>${orch.unsupported.length} · Ithaca can't run these yet</span><button class="linkbtn" id="oUnsup">${orch.showUnsup?'Hide':'Show'}</button></div>
+      ${orch.showUnsup?`<div class="omlist">${orch.unsupported.filter(m=>!q||m.name.toLowerCase().includes(q)).map(m=>`<div class="omchk dis" title="This model family (${esc(m.arch||'unknown')}) isn't supported yet"><span>${esc(oShort(m.name))}<small>${esc(m.arch||'unknown')} · not supported</small></span></div>`).join('')}</div>`:''}</div>`:'')}
 function oComposer(){
   const sel=prefs.orch_models||[],n=sel.length;
   const judge=sel.includes(prefs.orch_judge)?prefs.orch_judge:sel[0]||'';
@@ -1937,9 +1946,11 @@ function oBindModels(){
     prefs.orch_models=[...s];i.closest('.omchk').classList.toggle('on',i.checked);save();const g=i.dataset.g,b=$('oMl').querySelector(`[data-ogall="${g}"]`);
     if(b)b.textContent=[...$('oMl').querySelectorAll(`input[data-g="${g}"]`)].every(x=>x.checked)?'Clear':'Select all'});
   $('oMl').querySelectorAll('[data-ogall]').forEach(b=>b.onclick=()=>{const boxes=[...$('oMl').querySelectorAll(`input[data-g="${b.dataset.ogall}"]`)],on=!boxes.every(x=>x.checked),s=new Set(prefs.orch_models||[]);
-    boxes.forEach(x=>{x.checked=on;on?s.add(x.value):s.delete(x.value);x.closest('.omchk').classList.toggle('on',on)});prefs.orch_models=[...s];b.textContent=on?'Clear':'Select all';save()})}
+    boxes.forEach(x=>{x.checked=on;on?s.add(x.value):s.delete(x.value);x.closest('.omchk').classList.toggle('on',on)});prefs.orch_models=[...s];b.textContent=on?'Clear':'Select all';save()});
+  const u=$('oUnsup');if(u)u.onclick=()=>{orch.showUnsup=!orch.showUnsup;$('oMl').innerHTML=oModelPanel();oBindModels()}}
 function oRedrawComposer(){const c=document.querySelector('#studio .ocomp');if(!c)return drawOrch();const keep=$('oq')?$('oq').value:'';c.outerHTML=oComposer();if($('oq'))$('oq').value=keep;oBindComposer()}
-async function oLoadModels(){try{orch.models=(await api('/api/models')).filter(m=>m.supported!==false&&!/mmproj|embed/i.test(m.name))}catch(e){orch.models=[]}}
+async function oLoadModels(){let all=[];try{all=(await api('/api/models')).filter(m=>!/mmproj|embed/i.test(m.name))}catch(e){}
+  orch.models=all.filter(m=>m.supported!==false);orch.unsupported=all.filter(m=>m.supported===false)}
 async function drawOrch(){
   const S=$('studio');
   if(!orch.models)await oLoadModels();
