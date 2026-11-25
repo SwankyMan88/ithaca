@@ -762,7 +762,8 @@ static void handle(SOCKET s) {
         else respond(s, 404, "application/json", "{\"error\":{\"message\":\"not found\"}}");
         shutdown(s, SD_SEND); closesocket(s); return;
     }
-    if (path == "/" || path == "/index.html") { respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
+    const std::string page = path.substr(0, path.find('?'));   // the page itself, whatever its query string
+    if (page == "/" || page == "/index.html") { respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
     else if (path == "/api/models") { respond(s, 200, "application/json", models_json()); }
     else if (path == "/api/status") {
         std::string st = g_model.tier_json();

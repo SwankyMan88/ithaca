@@ -119,6 +119,11 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .gact.busy{color:var(--text);border-color:var(--a1)}.gact.busy .gdot{background:#e3b341;animation:pulse 1s infinite}
 .gact.load .gdot{background:var(--a1);animation:pulse 1s infinite}
 .topbar .ring #ringText{font-size:12px;color:var(--dim);white-space:nowrap}
+.topbar{min-width:0}.topbar .modelpick{min-width:0;flex-shrink:1}.topbar .modelpick span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:1000px){.topbar #ringText{display:none}}
+@media(max-width:600px){.gact{max-width:150px;padding:5px 9px}.gstat{gap:8px}.topbar .modelpick{max-width:38vw}}
+@media(max-width:820px){aside:not(.hidden)+main::after{content:'';position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9}}
+@media(max-width:600px){.odesc{display:none}.obox .boxrow .toggle{padding:5px 9px;font-size:12px}#closeSettings{top:6px;right:6px;background:var(--raise)}.tabs{padding-right:44px}}
 .topbar .ringtip{top:34px;bottom:auto;left:auto;right:0}
 .ringtip{position:absolute;bottom:30px;left:0;background:var(--raise);border:1px solid var(--line);border-radius:12px;padding:12px;width:300px;color:var(--dim);display:none;box-shadow:var(--shadow);z-index:5;font-size:12.5px;line-height:1.5}
 .ring:hover .ringtip{display:block}.ringtip .bars{display:flex;flex-wrap:wrap;gap:2px;margin:8px 0}.ringtip .bars i{width:8px;height:14px;border-radius:2px}
