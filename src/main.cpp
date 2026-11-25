@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include <shellapi.h>
 #include "chat.h"
+#include "privacy.h"
 #include "json.h"
 #include <cstdio>
 #include <algorithm>
@@ -212,7 +213,7 @@ static std::string models_json() {
 static std::atomic<int> g_load_gen{0};
 static void set_draft_state(const std::string& s) { std::lock_guard<std::mutex> l(g_draft_m); g_draft_state = s; }
 static bool spec_enabled() {
-    std::wstring p = g_store_dir + L"\\prefs.json";
+    std::wstring p = g_store_dir + L"\\server.json";   // a server-wide setting (devices' own settings are private)
     FILE* f = _wfopen(p.c_str(), L"rb");
     if (!f) return true;
     std::string t; char b[4096]; size_t r;
@@ -380,9 +381,12 @@ static bool send_all(SOCKET s, const std::string& d) {
     }
     return true;
 }
+static thread_local std::string t_hdrs;   // extra headers for this request's response (Set-Cookie)
 static void respond(SOCKET s, int code, const std::string& type, const std::string& body) {
-    std::string h = "HTTP/1.1 " + std::to_string(code) + (code == 200 ? " OK" : " Error") + "\r\nContent-Type: " + type +
-                    "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+    std::string h = "HTTP/1.1 " + std::to_string(code) + (code == 200 ? " OK" : code == 302 ? " Found" : " Error") + "\r\nContent-Type: " + type +
+                    "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nCache-Control: no-store\r\n" +
+                    "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n" + t_hdrs + "Connection: close\r\n\r\n";
+    t_hdrs.clear();
     send_all(s, h + body);
 }
 
@@ -754,6 +758,12 @@ static void handle(SOCKET s) {
     std::string path = line.substr(method.size() + 1, line.find(' ', method.size() + 1) - method.size() - 1);
     if (size_t q = path.find('?'); q != std::string::npos && path.rfind("/v1", 0) == 0) path.resize(q);
 
+    // Which device is asking (privacy.h). API requests use the shared store and never see a device's data.
+    const bool api_req = path.rfind("/v1", 0) == 0 || path == "/health";
+    const int pstate = api_req ? 0 : privacy_begin(req.substr(0, hdr_end + 2));
+    struct PrivacyEnd { ~PrivacyEnd() { privacy_end(); t_hdrs.clear(); } } privacy_end_;
+    privacy_api_request(api_req);
+
     if (handle_v1(s, method, path, lower, body)) { shutdown(s, SD_SEND); closesocket(s); return; }
     if (g_server_mode) {   // API only: the app page and its internal endpoints (which include running code) are off
         int code; std::string type, out;
@@ -763,7 +773,23 @@ static void handle(SOCKET s) {
         shutdown(s, SD_SEND); closesocket(s); return;
     }
     const std::string page = path.substr(0, path.find('?'));   // the page itself, whatever its query string
-    if (page == "/" || page == "/index.html") { respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
+    const bool device_path = path.rfind("/api/", 0) == 0 || path.rfind("/outputs/", 0) == 0 || path.rfind("/voices/", 0) == 0;
+    if (page == "/" || page == "/index.html") {
+        bool redirect = false;
+        t_hdrs += privacy_page(path.size() > page.size() ? path.substr(page.size() + 1) : "", pstate, redirect);
+        if (redirect) { t_hdrs += "Location: /\r\n"; respond(s, 302, "text/plain", "moved"); }
+        else { t_hdrs += "X-Frame-Options: SAMEORIGIN\r\n"; respond(s, 200, "text/html; charset=utf-8", kIndexHtml); }
+    }
+    else if (page.rfind("/api/device", 0) == 0) {
+        int code = 200; std::string out, sc;
+        handle_device(method, page, body, code, out, sc);
+        t_hdrs += sc;
+        respond(s, code, "application/json", out);
+    }
+    // everything else of the app needs a device that is unlocked
+    else if (device_path && path != "/api/status" && pstate != 1)
+        respond(s, 423, "application/json", std::string("{\"error\":\"") + (pstate == 2 ? "This device is locked." : "No device key: allow cookies for this page.") +
+                                                "\",\"locked\":" + (pstate == 2 ? "true" : "false") + "}");
     else if (path == "/api/models") { respond(s, 200, "application/json", models_json()); }
     else if (path == "/api/status") {
         std::string st = g_model.tier_json();
@@ -790,6 +816,7 @@ static void handle(SOCKET s) {
     }
     else if (path == "/api/spec" && method == "POST") {   // {on}: speculative decoding on/off (the UI saves the pref)
         J j; json_parse(body, j);
+        { FILE* f = _wfopen((g_store_dir + L"\\server.json").c_str(), L"wb"); if (f) { fprintf(f, "{\"spec_decode\":%s}", j["on"].t == J::BOOL && j["on"].b ? "true" : "false"); fclose(f); } }
         if (j["on"].t == J::BOOL && j["on"].b) { if (g_model.loaded()) start_draft(true); }
         else { std::lock_guard<std::mutex> l(g_gen); stop_draft("off"); }
         respond(s, 200, "application/json", "{}");
@@ -922,7 +949,7 @@ static bool other_instance(int port, bool open_browser) {
     if (f) { if (fscanf(f, "%d", &p) != 1) p = 0; fclose(f); }
     std::string url = "http://127.0.0.1:" + std::to_string(p ? p : port) + "/";
     printf("\n  Ithaca is already running: %s\n", url.c_str());
-    if (open_browser) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (open_browser) ShellExecuteA(nullptr, "open", (url + "?k=" + privacy_launch_token()).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     return true;
 }
 
@@ -952,7 +979,7 @@ static int serve(int port, bool open_browser, bool explicit_port) {
         if (g_host != "127.0.0.1" && g_api_key.empty()) printf("  Note: other devices on your network can use this server. Add --api-key <key> to require a key.\n\n");
     } else
         printf("\n  Ithaca is running:  %s\n  (close this window, press Ctrl+C or use Quit in the app to stop it)\n\n", url.c_str());
-    if (open_browser) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (open_browser) ShellExecuteA(nullptr, "open", (url + "?k=" + privacy_launch_token()).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     g_model.cancel = &g_stop;   // Stop (or a closed page) also ends a long prompt step
     for (;;) {
         SOCKET c = accept(ls, nullptr, nullptr);
@@ -1180,6 +1207,7 @@ int main() {
     if (g_api_key.empty()) { char kb[256]; if (GetEnvironmentVariableA("ITHACA_API_KEY", kb, sizeof kb)) g_api_key = kb; }
     if (g_server_mode && !explicit_port) { port = 8080; explicit_port = true; }   // like llama.cpp's server; the app keeps 7860
     if (!explicit_port && other_instance(port, browser)) return 0;
+    privacy_init(g_server_mode);
     std::string m = model.empty() ? last : model;
     if (!m.empty()) {
         std::string err;

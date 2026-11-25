@@ -10,6 +10,8 @@
 #include <ctime>
 
 extern std::wstring g_store_dir;
+#include "privacy.h"   // outputs, voices and settings are the current device's, encrypted
+static std::string store_text(const std::wstring& rel) { std::string t; store_read(rel, t); return t; }
 
 static std::mutex g_media;                 // one media job at a time
 static std::mutex g_prog_m;
@@ -77,7 +79,7 @@ void media_release_engines() {
 // Returns JSON: {"url":..., "seed":..., "seconds":...} or {"error":...}
 std::string media_generate_image(const J& req) {
     J prefs;
-    json_parse(read_text(g_store_dir + L"\\prefs.json"), prefs);
+    json_parse(store_text(L"prefs.json"), prefs);
     std::string model = req["model"].str(prefs["media_image"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No image model is loaded or selected. Pick one in the Image studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
@@ -113,7 +115,7 @@ std::string media_generate_image(const J& req) {
     if (!req["init_image"].str().empty()) init_bytes = from_b64(req["init_image"].str());
     else if (req["init_url"].str().rfind("/outputs/", 0) == 0) {
         std::string nm = req["init_url"].str().substr(9);
-        if (nm.find_first_of("\\/:") == std::string::npos && nm.find("..") == std::string::npos) init_bytes = read_text(g_store_dir + L"\\outputs\\" + utf8_to_w(nm));
+        if (nm.find_first_of("\\/:") == std::string::npos && nm.find("..") == std::string::npos) init_bytes = store_text(L"outputs\\" + utf8_to_w(nm));
         if (init_bytes.empty()) return "{\"error\":" + json_esc("The picture to edit wasn't found.") + "}";
     }
     if (!req["mask"].str().empty()) mask_bytes = from_b64(req["mask"].str());
@@ -155,21 +157,16 @@ std::string media_generate_image(const J& req) {
         return !g_media_cancel.load();
     });
     if (!ok) return "{\"error\":" + json_esc(err == "cancelled" ? "Image generation was cancelled." : "Image generation failed: " + err) + "}";
-    std::wstring dir = g_store_dir + L"\\outputs";
-    CreateDirectoryW(dir.c_str(), nullptr);
     char name[64];
     time_t now = time(nullptr);
     tm lt; localtime_s(&lt, &now);
     snprintf(name, sizeof name, "img_%04d%02d%02d_%02d%02d%02d_%llu.png", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec,
              (unsigned long long)(j.seed % 100000));
-    if (!write_png(dir + L"\\" + utf8_to_w(name), rgb.data(), j.width / 8 * 8, j.height / 8 * 8)) return "{\"error\":\"could not save the image\"}";
+    const std::wstring tmp = store_temp_path(utf8_to_w(name));
+    if (!write_png(tmp, rgb.data(), j.width / 8 * 8, j.height / 8 * 8) || !store_put_file(L"outputs\\" + utf8_to_w(name), tmp)) return "{\"error\":\"could not save the image\"}";
     // remember the prompt next to the image for the gallery
-    FILE* f = _wfopen((dir + L"\\" + utf8_to_w(name) + L".json").c_str(), L"wb");
-    if (f) {
-        std::string meta = "{\"prompt\":" + json_esc(j.prompt) + ",\"negative\":" + json_esc(j.negative) + ",\"seed\":" + std::to_string(j.seed) +
-                           ",\"steps\":" + std::to_string(j.steps) + ",\"cfg\":" + std::to_string(j.cfg) + ",\"model\":" + json_esc(model) + "}";
-        fwrite(meta.data(), 1, meta.size(), f); fclose(f);
-    }
+    store_write(L"outputs\\" + utf8_to_w(name) + L".json", "{\"prompt\":" + json_esc(j.prompt) + ",\"negative\":" + json_esc(j.negative) + ",\"seed\":" + std::to_string(j.seed) +
+                ",\"steps\":" + std::to_string(j.steps) + ",\"cfg\":" + std::to_string(j.cfg) + ",\"model\":" + json_esc(model) + "}");
     char out[256];
     snprintf(out, sizeof out, ",\"seed\":%llu,\"seconds\":%.1f,\"width\":%d,\"height\":%d}", (unsigned long long)j.seed, now_sec() - t0, j.width, j.height);
     return std::string("{\"url\":\"/outputs/") + name + "\"" + out;
@@ -177,7 +174,7 @@ std::string media_generate_image(const J& req) {
 
 std::string media_generate_video(const J& req) {
     J prefs;
-    json_parse(read_text(g_store_dir + L"\\prefs.json"), prefs);
+    json_parse(store_text(L"prefs.json"), prefs);
     std::string model = req["model"].str(prefs["media_video"].str());
     if (model.empty()) return "{\"error\":" + json_esc("No video model is loaded or selected. Pick one in the Video studio (left sidebar).") + "}";
     std::lock_guard<std::mutex> lk(g_media);
@@ -214,25 +211,20 @@ std::string media_generate_video(const J& req) {
         return !g_media_cancel.load();
     });
     if (!ok) return "{\"error\":" + json_esc(err == "cancelled" ? "Video generation was cancelled." : "Video generation failed: " + err) + "}";
-    std::wstring dir = g_store_dir + L"\\outputs";
-    CreateDirectoryW(dir.c_str(), nullptr);
     char name[64];
     time_t now = time(nullptr);
     tm lt; localtime_s(&lt, &now);
     snprintf(name, sizeof name, "vid_%04d%02d%02d_%02d%02d%02d.mp4", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
-    if (!write_mp4(dir + L"\\" + utf8_to_w(name), rgb, W, H, F, j.fps, err)) return "{\"error\":" + json_esc("Could not save the video: " + err) + "}";
-    FILE* f = _wfopen((dir + L"\\" + utf8_to_w(name) + L".json").c_str(), L"wb");
-    if (f) {
-        std::string meta = "{\"prompt\":" + json_esc(j.prompt) + ",\"seed\":" + std::to_string(j.seed) + ",\"model\":" + json_esc(model) + "}";
-        fwrite(meta.data(), 1, meta.size(), f); fclose(f);
-    }
+    const std::wstring tmp = store_temp_path(utf8_to_w(name));
+    if (!write_mp4(tmp, rgb, W, H, F, j.fps, err)) { DeleteFileW(tmp.c_str()); return "{\"error\":" + json_esc("Could not save the video: " + err) + "}"; }
+    if (!store_put_file(L"outputs\\" + utf8_to_w(name), tmp)) return "{\"error\":\"could not save the video\"}";
+    store_write(L"outputs\\" + utf8_to_w(name) + L".json", "{\"prompt\":" + json_esc(j.prompt) + ",\"seed\":" + std::to_string(j.seed) + ",\"model\":" + json_esc(model) + "}");
     char out[256];
     snprintf(out, sizeof out, ",\"seed\":%llu,\"seconds\":%.1f,\"width\":%d,\"height\":%d,\"frames\":%d}", (unsigned long long)j.seed, now_sec() - t0, W, H, F);
     return std::string("{\"url\":\"/outputs/") + name + "\"" + out;
 }
 
 // ---- voices: voices\<name>.wav + voices\<name>.txt (the words spoken in the clip) ----
-static std::wstring voices_dir() { std::wstring d = g_store_dir + L"\\voices"; CreateDirectoryW(d.c_str(), nullptr); return d; }
 static bool safe_name(const std::string& n) {
     if (n.empty() || n.size() > 60) return false;
     for (char c : n) if (!(isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_')) return false;
@@ -240,16 +232,11 @@ static bool safe_name(const std::string& n) {
 }
 std::string media_voices_json() {
     std::string s = "[";
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((voices_dir() + L"\\*.wav").c_str(), &fd);
     int n = 0;
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring nm = fd.cFileName; nm.resize(nm.size() - 4);
-            std::string txt = read_text(voices_dir() + L"\\" + nm + L".txt");
-            s += (n++ ? "," : "") + std::string("{\"name\":") + json_esc(w_to_utf8(nm)) + ",\"text\":" + json_esc(txt) + ",\"url\":" + json_esc("/voices/" + w_to_utf8(fd.cFileName)) + "}";
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+    for (auto& f : store_list(L"voices", L".wav")) {
+        std::wstring nm = f; nm.resize(nm.size() - 4);
+        std::string txt = store_text(L"voices\\" + nm + L".txt");
+        s += (n++ ? "," : "") + std::string("{\"name\":") + json_esc(w_to_utf8(nm)) + ",\"text\":" + json_esc(txt) + ",\"url\":" + json_esc("/voices/" + w_to_utf8(f)) + "}";
     }
     return s + "]";
 }
@@ -262,28 +249,33 @@ std::string media_voice_add(const J& req) {
     std::string bin; int val = 0, bits = -8;
     for (char c : b64) { int d = b64v(c); if (d < 0) continue; val = (val << 6) | d; bits += 6; if (bits >= 0) { bin += (char)((val >> bits) & 0xFF); bits -= 8; } }
     if (bin.size() < 44 || bin.compare(0, 4, "RIFF")) return "{\"error\":\"The clip must be a WAV file\"}";
-    std::wstring base = voices_dir() + L"\\" + utf8_to_w(name);
-    FILE* f = _wfopen((base + L".wav").c_str(), L"wb"); if (!f) return "{\"error\":\"could not save\"}";
-    fwrite(bin.data(), 1, bin.size(), f); fclose(f);
-    f = _wfopen((base + L".txt").c_str(), L"wb"); if (f) { fwrite(text.data(), 1, text.size(), f); fclose(f); }
-    std::vector<float> w; int sr; std::string err;
-    if (!read_wav(base + L".wav", w, sr, err)) { DeleteFileW((base + L".wav").c_str()); DeleteFileW((base + L".txt").c_str()); return "{\"error\":" + json_esc(err) + "}"; }
+    {   // check the clip decodes before keeping it
+        const std::wstring tmp = store_temp_path(L"voice.wav");
+        FILE* f = _wfopen(tmp.c_str(), L"wb"); if (!f) return "{\"error\":\"could not save\"}";
+        fwrite(bin.data(), 1, bin.size(), f); fclose(f);
+        std::vector<float> w; int sr; std::string err;
+        bool ok = read_wav(tmp, w, sr, err);
+        DeleteFileW(tmp.c_str());
+        if (!ok) return "{\"error\":" + json_esc(err) + "}";
+    }
+    const std::wstring base = L"voices\\" + utf8_to_w(name);
+    if (!store_write(base + L".wav", bin) || !store_write(base + L".txt", text)) return "{\"error\":\"could not save\"}";
     return media_voices_json();
 }
 std::string media_voice_delete(const J& req) {
     std::string name = req["name"].str();
-    if (safe_name(name)) { std::wstring b = voices_dir() + L"\\" + utf8_to_w(name); DeleteFileW((b + L".wav").c_str()); DeleteFileW((b + L".txt").c_str()); }
+    if (safe_name(name)) { std::wstring b = L"voices\\" + utf8_to_w(name); store_delete(b + L".wav"); store_delete(b + L".txt"); }
     return media_voices_json();
 }
 bool media_read_voice(const std::string& name, std::string& data) {
     if (name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) return false;
-    data = read_text(voices_dir() + L"\\" + utf8_to_w(name));
+    data = store_text(L"voices\\" + utf8_to_w(name));
     return !data.empty();
 }
 
 std::string media_generate_audio(const J& req) {
     J prefs;
-    json_parse(read_text(g_store_dir + L"\\prefs.json"), prefs);
+    json_parse(store_text(L"prefs.json"), prefs);
     std::string mode = req["mode"].str(req["kind2"].str("speech"));
     for (auto& c : mode) c = (char)tolower(c);
     if (mode.find("music") != std::string::npos || mode.find("sfx") != std::string::npos || mode.find("sound") != std::string::npos)
@@ -295,8 +287,8 @@ std::string media_generate_audio(const J& req) {
     std::string voice = req["voice"].str(prefs["voice"].str());
     if (voice.empty()) return "{\"error\":" + json_esc("No voice is set up yet. Add a short voice clip in the Audio studio and pick it as the default voice.") + "}";
     if (!safe_name(voice)) return "{\"error\":\"bad voice name\"}";
-    std::wstring vb = voices_dir() + L"\\" + utf8_to_w(voice);
-    std::string vtext = read_text(vb + L".txt");
+    const std::wstring vb = L"voices\\" + utf8_to_w(voice);
+    std::string vtext = store_text(vb + L".txt");
     if (vtext.empty()) return "{\"error\":" + json_esc("The voice \"" + voice + "\" is missing its clip or transcript.") + "}";
     std::string text = req["prompt"].str(req["text"].str());
     if (text.empty()) return "{\"error\":\"nothing to say\"}";
@@ -312,7 +304,8 @@ std::string media_generate_audio(const J& req) {
         if (!e.load(utf8_to_w(model), err)) return "{\"error\":" + json_esc("Could not load the speech model: " + err) + "}";
     }
     TtsJob j;
-    j.text = text; j.voice_wav = vb + L".wav"; j.voice_text = vtext;
+    j.text = text; j.voice_wav = store_temp_copy(vb + L".wav");   // the engine reads a file: a plain copy, deleted below
+    struct DelTmp { std::wstring p; ~DelTmp() { if (!p.empty()) DeleteFileW(p.c_str()); } } del_voice{j.voice_wav}; j.voice_text = vtext;
     j.speed = (float)req["speed"].num(prefs["tts_speed"].num(1.0));
     j.steps = std::max(8, std::min(64, (int)req["steps"].num(32)));
     double t0 = now_sec();
@@ -323,37 +316,30 @@ std::string media_generate_audio(const J& req) {
         return !g_media_cancel.load();
     });
     if (!ok) return "{\"error\":" + json_esc(err == "cancelled" ? "Speech generation was cancelled." : "Speech generation failed: " + err) + "}";
-    std::wstring dir = g_store_dir + L"\\outputs";
-    CreateDirectoryW(dir.c_str(), nullptr);
     char name[64];
     time_t now = time(nullptr);
     tm lt; localtime_s(&lt, &now);
     snprintf(name, sizeof name, "speech_%04d%02d%02d_%02d%02d%02d.wav", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
-    write_wav(dir + L"\\" + utf8_to_w(name), wave, 24000);
-    FILE* f = _wfopen((dir + L"\\" + utf8_to_w(name) + L".json").c_str(), L"wb");
-    if (f) { std::string meta = "{\"prompt\":" + json_esc(text) + ",\"voice\":" + json_esc(voice) + "}"; fwrite(meta.data(), 1, meta.size(), f); fclose(f); }
+    const std::wstring tmp = store_temp_path(utf8_to_w(name));
+    write_wav(tmp, wave, 24000);
+    if (!store_put_file(L"outputs\\" + utf8_to_w(name), tmp)) return "{\"error\":\"could not save the clip\"}";
+    store_write(L"outputs\\" + utf8_to_w(name) + L".json", "{\"prompt\":" + json_esc(text) + ",\"voice\":" + json_esc(voice) + "}");
     char out[200];
     snprintf(out, sizeof out, ",\"seconds\":%.1f,\"duration\":%.1f,\"seed\":0}", now_sec() - t0, wave.size() / 24000.0);
     return std::string("{\"url\":\"/outputs/") + name + "\"" + out;
 }
 
 std::string media_gallery_json() {
-    std::vector<std::pair<std::wstring, FILETIME>> files;
-    WIN32_FIND_DATAW fd;
-    for (const wchar_t* pat : {L"*.png", L"*.mp4", L"*.wav"}) {
-        HANDLE h = FindFirstFileW((g_store_dir + L"\\outputs\\" + pat).c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do files.push_back({fd.cFileName, fd.ftLastWriteTime}); while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    std::sort(files.begin(), files.end(), [](auto& a, auto& b) { return CompareFileTime(&a.second, &b.second) > 0; });
     std::string s = "[";
-    for (size_t i = 0; i < files.size() && i < 300; i++) {
-        std::string meta = read_text(g_store_dir + L"\\outputs\\" + files[i].first + L".json");
-        J m; json_parse(meta, m);
-        std::wstring n = files[i].first;
-        const char* kind = n.find(L".mp4") != std::wstring::npos ? "video" : n.find(L".wav") != std::wstring::npos ? "audio" : "image";
-        s += (i ? "," : "") + std::string("{\"url\":\"/outputs/") + w_to_utf8(n) + "\",\"kind\":\"" + kind + "\",\"prompt\":" + json_esc(m["prompt"].str()) + "}";
+    int n = 0;
+    for (auto& f : store_list(L"outputs", L"")) {   // newest first
+        std::wstring lo = f; for (auto& c : lo) c = towlower(c);
+        auto ends = [&](const wchar_t* e) { size_t k = wcslen(e); return lo.size() > k && lo.compare(lo.size() - k, k, e) == 0; };
+        const char* kind = ends(L".mp4") ? "video" : ends(L".wav") ? "audio" : ends(L".png") ? "image" : nullptr;
+        if (!kind) continue;
+        J m; json_parse(store_text(L"outputs\\" + f + L".json"), m);
+        s += (n++ ? "," : "") + std::string("{\"url\":\"/outputs/") + w_to_utf8(f) + "\",\"kind\":\"" + kind + "\",\"prompt\":" + json_esc(m["prompt"].str()) + "}";
+        if (n >= 300) break;
     }
     return s + "]";
 }
@@ -364,16 +350,16 @@ bool media_delete_output(const std::string& name) {
     std::string lo = name; for (auto& c : lo) c = (char)tolower(c);
     auto ends = [&](const char* e) { size_t n = strlen(e); return lo.size() > n && lo.compare(lo.size() - n, n, e) == 0; };
     if (!ends(".png") && !ends(".mp4") && !ends(".wav")) return false;
-    const std::wstring f = g_store_dir + L"\\outputs\\" + utf8_to_w(name);
-    if (!DeleteFileW(f.c_str())) return false;
-    DeleteFileW((f + L".json").c_str());
+    const std::wstring f = L"outputs\\" + utf8_to_w(name);
+    if (!store_delete(f)) return false;
+    store_delete(f + L".json");
     return true;
 }
 
 // Serves /outputs/<file>. Returns false when the name is not a plain file name.
 bool media_read_output(const std::string& name, std::string& data, std::string& type) {
     if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) return false;
-    data = read_text(g_store_dir + L"\\outputs\\" + utf8_to_w(name));
+    data = store_text(L"outputs\\" + utf8_to_w(name));
     if (data.empty()) return false;
     std::string lo = name; for (auto& c : lo) c = (char)tolower(c);
     type = lo.size() > 4 && lo.compare(lo.size() - 4, 4, ".png") == 0 ? "image/png" : lo.find(".mp4") != std::string::npos ? "video/mp4" :

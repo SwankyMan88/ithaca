@@ -2,6 +2,7 @@
 // plus a user-triggered "run this Python block" helper.
 #include "common.h"
 #include "json.h"
+#include "privacy.h"
 #include <algorithm>
 
 std::wstring g_store_dir;  // set by main: the exe folder
@@ -28,11 +29,6 @@ static bool valid_id(const std::string& id) {
     if (id.empty() || id.size() > 64) return false;
     for (char c : id) if (!isalnum((unsigned char)c) && c != '-' && c != '_') return false;
     return true;
-}
-static std::wstring chats_dir() {
-    std::wstring d = g_store_dir + L"\\chats";
-    CreateDirectoryW(d.c_str(), nullptr);
-    return d;
 }
 
 static std::string run_python(const std::string& code) {
@@ -129,7 +125,7 @@ static std::string media_models_json() {
     int n = 0;
     scan_media(g_store_dir + L"\\models", 0, nullptr, out, n);
     {   // folders the user added in a studio
-        bool ok; std::string pr = read_file(g_store_dir + L"\\prefs.json", ok);
+        std::string pr; store_read(L"prefs.json", pr);
         J p; json_parse(pr, p);
         for (auto& d : p["media_dirs"].a) scan_media(utf8_to_w(d.str()), 0, nullptr, out, n);
     }
@@ -162,101 +158,53 @@ static std::string media_models_json() {
 // Returns true when the request was handled.
 bool handle_store(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out) {
     code = 200; type = "application/json";
+    // Everything below is the current device's own data (privacy.h): encrypted on disk under its key.
     auto simple = [&](const wchar_t* name, const char* def) {
-        std::wstring p = g_store_dir + L"\\" + name;
         if (method == "POST") {
             J j;
             if (!json_parse(body, j)) { code = 400; out = "{\"error\":\"bad json\"}"; return; }
-            out = write_file(p, body) ? "{}" : "{\"error\":\"write failed\"}";
-        } else {
-            bool ok; out = read_file(p, ok);
-            if (!ok || out.empty()) out = def;
+            out = store_write(name, body) ? "{}" : "{\"error\":\"write failed\"}";
+        } else if (!store_read(name, out) || out.empty()) out = def;
+    };
+    // a listing of one kind of saved item (chats, coding chats, runs), newest first, with a few fields of each
+    auto listing = [&](const wchar_t* dir, const char* title_def, bool mode) {
+        std::vector<std::pair<double, std::string>> rows;
+        for (auto& f : store_list(dir, L".json")) {
+            std::string s; J j;
+            if (!store_read(std::wstring(dir) + L"\\" + f, s) || !json_parse(s, j)) continue;
+            std::string id = w_to_utf8(f); id.resize(id.size() - 5);
+            double upd = j["updated"].num(0);
+            rows.push_back({upd, "{\"id\":" + json_esc(id) + ",\"title\":" + json_esc(j["title"].str(title_def)) +
+                                     (mode ? ",\"mode\":" + json_esc(j["mode"].str()) : std::string()) + ",\"updated\":" + std::to_string((long long)upd) + "}"});
         }
+        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        out = "[";
+        for (size_t i = 0; i < rows.size(); i++) out += (i ? "," : "") + rows[i].second;
+        out += "]";
+    };
+    // one saved item: GET reads it, POST saves it, .../delete removes it
+    auto item = [&](const wchar_t* dir, std::string id) {
+        bool del = false;
+        if (id.size() > 7 && id.compare(id.size() - 7, 7, "/delete") == 0) { del = true; id.resize(id.size() - 7); }
+        if (!valid_id(id)) { code = 400; out = "{\"error\":\"bad id\"}"; return; }
+        std::wstring rel = std::wstring(dir) + L"\\" + utf8_to_w(id) + L".json";
+        if (del) { store_delete(rel); out = "{}"; }
+        else if (method == "POST") {
+            J j;
+            if (!json_parse(body, j)) { code = 400; out = "{\"error\":\"bad json\"}"; }
+            else out = store_write(rel, body) ? "{}" : "{\"error\":\"write failed\"}";
+        } else if (!store_read(rel, out)) { code = 404; out = "{\"error\":\"not found\"}"; }
     };
     if (path == "/api/memories") { simple(L"memories.json", "[]"); return true; }
     if (path == "/api/prefs") { simple(L"prefs.json", "{}"); return true; }
     // Coding chats, one file per folder: <store>\code_chats\<id>.json (the page derives the id from the folder path).
     // Kept on disk in full, so they survive a browser change and can be read outside Ithaca.
     // Orchestration runs: <store>\orch_runs\<id>.json; GET /api/orchruns lists them, newest first
-    if (path == "/api/orchruns" && method == "GET") {
-        std::wstring dir = g_store_dir + L"\\orch_runs"; CreateDirectoryW(dir.c_str(), nullptr);
-        std::vector<std::pair<double, std::string>> rows;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW((dir + L"\\*.json").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                bool ok; std::string s = read_file(dir + L"\\" + fd.cFileName, ok);
-                J j; if (!ok || !json_parse(s, j)) continue;
-                std::string id = w_to_utf8(fd.cFileName); id.resize(id.size() - 5);
-                double upd = j["updated"].num(0);
-                rows.push_back({upd, "{\"id\":" + json_esc(id) + ",\"title\":" + json_esc(j["title"].str("Run")) + ",\"mode\":" +
-                                         json_esc(j["mode"].str()) + ",\"updated\":" + std::to_string((long long)upd) + "}"});
-            } while (FindNextFileW(h, &fd));
-            FindClose(h);
-        }
-        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
-        out = "[";
-        for (size_t i = 0; i < rows.size(); i++) out += (i ? "," : "") + rows[i].second;
-        out += "]";
-        return true;
-    }
-    if (path.rfind("/api/codechats/", 0) == 0 || path.rfind("/api/orchruns/", 0) == 0) {
-        const bool orch = path.rfind("/api/orchruns/", 0) == 0;
-        std::wstring dir = g_store_dir + (orch ? L"\\orch_runs" : L"\\code_chats"); CreateDirectoryW(dir.c_str(), nullptr);
-        std::string id = path.substr(orch ? 14 : 15);
-        bool del = false;
-        if (id.size() > 7 && id.compare(id.size() - 7, 7, "/delete") == 0) { del = true; id.resize(id.size() - 7); }
-        if (!valid_id(id)) { code = 400; out = "{\"error\":\"bad id\"}"; return true; }
-        std::wstring p = dir + L"\\" + utf8_to_w(id) + L".json";
-        if (del) { DeleteFileW(p.c_str()); out = "{}"; }
-        else if (method == "POST") {
-            J j;
-            if (!json_parse(body, j)) { code = 400; out = "{\"error\":\"bad json\"}"; }
-            else out = write_file(p, body) ? "{}" : "{\"error\":\"write failed\"}";
-        } else {
-            bool ok; out = read_file(p, ok);
-            if (!ok) { code = 404; out = "{\"error\":\"not found\"}"; }
-        }
-        return true;
-    }
-    if (path == "/api/chats" && method == "GET") {
-        std::vector<std::pair<double, std::string>> rows;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW((chats_dir() + L"\\*.json").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                bool ok; std::string s = read_file(chats_dir() + L"\\" + fd.cFileName, ok);
-                J j; if (!ok || !json_parse(s, j)) continue;
-                std::string id = w_to_utf8(fd.cFileName); id.resize(id.size() - 5);
-                double upd = j["updated"].num(0);
-                rows.push_back({upd, "{\"id\":" + json_esc(id) + ",\"title\":" + json_esc(j["title"].str("New chat")) +
-                                         ",\"updated\":" + std::to_string((long long)upd) + "}"});
-            } while (FindNextFileW(h, &fd));
-            FindClose(h);
-        }
-        std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
-        out = "[";
-        for (size_t i = 0; i < rows.size(); i++) out += (i ? "," : "") + rows[i].second;
-        out += "]";
-        return true;
-    }
-    if (path.rfind("/api/chats/", 0) == 0) {
-        std::string id = path.substr(11);
-        bool del = false;
-        if (id.size() > 7 && id.compare(id.size() - 7, 7, "/delete") == 0) { del = true; id.resize(id.size() - 7); }
-        if (!valid_id(id)) { code = 400; out = "{\"error\":\"bad id\"}"; return true; }
-        std::wstring p = chats_dir() + L"\\" + utf8_to_w(id) + L".json";
-        if (del) { DeleteFileW(p.c_str()); out = "{}"; }
-        else if (method == "POST") {
-            J j;
-            if (!json_parse(body, j)) { code = 400; out = "{\"error\":\"bad json\"}"; }
-            else out = write_file(p, body) ? "{}" : "{\"error\":\"write failed\"}";
-        } else {
-            bool ok; out = read_file(p, ok);
-            if (!ok) { code = 404; out = "{\"error\":\"not found\"}"; }
-        }
-        return true;
-    }
+    if (path == "/api/orchruns" && method == "GET") { listing(L"orch_runs", "Run", true); return true; }
+    if (path.rfind("/api/codechats/", 0) == 0) { item(L"code_chats", path.substr(15)); return true; }
+    if (path.rfind("/api/orchruns/", 0) == 0) { item(L"orch_runs", path.substr(14)); return true; }
+    if (path == "/api/chats" && method == "GET") { listing(L"chats", "New chat", false); return true; }
+    if (path.rfind("/api/chats/", 0) == 0) { item(L"chats", path.substr(11)); return true; }
     if (path == "/api/media/models") { out = media_models_json(); return true; }
     if (path == "/api/voices") { extern std::string media_voices_json(); out = media_voices_json(); return true; }
     if (path == "/api/voices/add" && method == "POST") { extern std::string media_voice_add(const J&); J j; json_parse(body, j); out = media_voice_add(j); return true; }
@@ -271,7 +219,7 @@ bool handle_store(const std::string& method, const std::string& path, const std:
         std::string d = j["dir"].str();
         while (!d.empty() && (d.back() == '\\' || d.back() == '/' || d.back() == '"')) d.pop_back();
         if (!d.empty() && d[0] == '"') d.erase(0, 1);
-        bool ok; std::string pr = read_file(g_store_dir + L"\\prefs.json", ok);
+        std::string pr; store_read(L"prefs.json", pr);
         J p; json_parse(pr.empty() ? "{}" : pr, p);
         std::string dirs = "[";
         int n = 0;
@@ -291,7 +239,7 @@ bool handle_store(const std::string& method, const std::string& path, const std:
             outp += (k++ ? "," : "") + json_esc(kv.first) + ":" + v;
         }
         outp += std::string(k ? "," : "") + "\"media_dirs\":" + dirs + "}";
-        write_file(g_store_dir + L"\\prefs.json", outp);
+        store_write(L"prefs.json", outp);
         out = media_models_json();
         return true;
     }
@@ -338,7 +286,7 @@ bool handle_store(const std::string& method, const std::string& path, const std:
             out = media_generate_audio(j);
             return true;
         }
-        bool ok; std::string pr = read_file(g_store_dir + L"\\prefs.json", ok);
+        std::string pr; store_read(L"prefs.json", pr);
         J p; json_parse(pr, p);
         std::string sel = p[("media_" + kind).c_str()].str();
         if (sel.empty()) out = "{\"error\":" + json_esc("No " + kind + " model is loaded or selected. Pick one in the " + std::string(1, (char)toupper(kind[0])) + kind.substr(1) + " studio (left sidebar).") + "}";

@@ -434,6 +434,14 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 .ometh{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:left}.ometh div{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel)}
 .ometh b{display:flex;align-items:center;gap:7px;margin-bottom:4px;font-size:14px}.ometh b .icon{width:15px;height:15px;color:var(--a1)}.ometh p{margin:0;color:var(--dim);font-size:12.5px;line-height:1.45}
 @media(max-width:820px){.ometh{grid-template-columns:1fr}}
+#lock{position:fixed;inset:0;z-index:100;background:var(--bg);display:grid;place-items:center;padding:20px}
+.lockbox{max-width:360px;width:100%;text-align:center;display:flex;flex-direction:column;gap:12px;align-items:center}.lockbox h2{margin:4px 0 0}.lockbox p{color:var(--dim);margin:0;line-height:1.5}
+.lockbox .big{width:64px;height:64px;border-radius:18px;background:var(--grad);display:grid;place-items:center;color:#fff}.lockbox .big .icon{width:28px;height:28px}
+.lockbox input{width:100%;box-sizing:border-box;text-align:center;font-size:18px;letter-spacing:4px}.lockerr{color:#f85149;min-height:18px;font-size:13px}
+.privcard{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--panel)}
+.privcard small{display:block;color:var(--faint);font-size:12px;margin-top:3px}.privcard input{flex:1;min-width:180px;max-width:280px}
+#privPane h3{margin:22px 0 4px;font-size:15px;color:var(--text)}#privPane p{margin:0 0 8px;line-height:1.5}#privPane .row{display:flex;gap:8px;align-items:center}
+.reccode{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}.reccode code{font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;word-break:break-all;color:var(--text)}
 .omchk{display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--panel);font-size:13.5px}
 .omchk input{width:auto;margin:0;flex:none;accent-color:var(--a1)}
 .omchk span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.omchk small{display:block;color:var(--faint);font-size:11.5px}
@@ -489,6 +497,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
 <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
 <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
 <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
 <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5M9 3h6l-1 6 4 4H6l4-4z"/></symbol>
 <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
 <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4z"/></symbol>
@@ -575,6 +584,7 @@ input[type=range]::-webkit-slider-thumb{transform:scale(1.5)}
     <button data-tab="hub"><svg class="icon"><use href="#i-dl"/></svg>Download models</button>
     <button data-tab="system"><svg class="icon"><use href="#i-gauge"/></svg>System &amp; benchmark</button>
     <button data-tab="memory"><svg class="icon"><use href="#i-mem"/></svg>Memory</button>
+    <button data-tab="privacy"><svg class="icon"><use href="#i-lock"/></svg>Privacy</button>
     <button data-tab="code"><svg class="icon"><use href="#i-code"/></svg>Coding</button>
     <button data-tab="about"><svg class="icon"><use href="#i-info"/></svg>About &amp; compare</button>
   </div>
@@ -588,7 +598,19 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ico=n=>`<svg class="icon"><use href="#i-${n}"/></svg>`;
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
-async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',body:JSON.stringify(b)});return r.json()}
+async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',body:JSON.stringify(b)});
+  if(r.status==423){const j=await r.json().catch(()=>({}));showLock(j);return Object.assign({error:j.error||'locked'},j)}return r.json()}
+// The PIN screen (privacy.h): shown when this device has a PIN and isn't unlocked yet in this browser session.
+function showLock(j){if(document.getElementById('lock'))return;const d=document.createElement('div');d.id='lock';
+  d.innerHTML=j&&j.locked?`<div class="lockbox"><div class="big">${ico('lock')}</div><h2>This device is locked</h2><p>Enter its PIN to open your chats and files.</p>
+    <input id="lockPin" type="password" autocomplete="current-password" placeholder="PIN" maxlength="64"><div class="lockerr" id="lockErr"></div>
+    <button class="btn pri" id="lockGo">Unlock</button><button class="linkbtn" id="lockNew">Forgot it? Use this device as a new, empty one</button></div>`
+   :`<div class="lockbox"><div class="big">${ico('lock')}</div><h2>Cookies are off</h2><p>Ithaca keeps each device's data separate and encrypted with a key stored as a cookie. Allow cookies for this page, then reload.</p><button class="btn pri" onclick="location.reload()">Reload</button></div>`;
+  document.body.appendChild(d);
+  if(j&&j.locked){const go=async()=>{const r=await fetch('/api/device/unlock',{method:'POST',body:JSON.stringify({pin:$('lockPin').value})});
+      if(r.ok)location.reload();else{const e=await r.json().catch(()=>({}));$('lockErr').textContent=e.error||'Wrong PIN.';$('lockPin').select()}};
+    $('lockGo').onclick=go;$('lockPin').onkeydown=e=>{if(e.key=='Enter')go()};setTimeout(()=>$('lockPin').focus(),50);
+    $('lockNew').onclick=async()=>{if(!confirm('Start over as a new, empty device on this browser? Your locked data stays on the PC and comes back with its recovery code.'))return;await fetch('/api/device/new',{method:'POST',body:'{}'});location.reload()}}}
 function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
 
 let prefs={name:'',about:'',style:'',instructions:'',temperature:0.7,max_tokens:2048,memory:true,run_code:true,theme:'dark',spec_decode:true,compact_chat:true,compact_code:true};
@@ -1173,6 +1195,7 @@ model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Itha
  <button class="btn pri" id="mLoad">Load model</button> <span id="mMsg" style="margin-left:10px;color:var(--dim);font-size:13px"></span>
  <div style="margin-top:18px">${sw('spec_decode','Faster replies (speculative decoding)','A small model with the same vocabulary drafts a few words at a time and the main model checks them in one pass. Answers stay the same; code and structured text often come out 30–60% faster. Ithaca picks the small model by itself and pauses it when it doesn\'t help.')}
  <p class="sub" id="specState" style="margin-top:8px"></p></div>`,
+privacy:()=>`<h2>Privacy</h2><p class="sub">Everything you make here (chats, coding chats, runs, memories, settings, voices, images, videos and clips) stays on the PC running Ithaca, encrypted with this device's own key. Other devices can't read it, and neither can anyone who copies the files.</p><div id="privPane" class="sub">Reading…</div>`,
 memory:()=>`<h2>Memory</h2><p class="sub">What Ithaca remembers across all chats. The model saves, updates, searches and forgets memories by itself while memory is on. Pinned memories are always shown to the model; with more than 40 memories, it sees the pinned ones plus those relevant to your message and can search the rest.</p>
  ${sw('memory','Use memory','Let the model read, write, search and edit memories while chatting.')}
  <div style="display:flex;gap:8px;margin:16px 0;flex-wrap:wrap"><input id="memFind" class="search" style="margin:0;flex:1;min-width:160px" placeholder="Search memories">
@@ -1358,6 +1381,31 @@ async function openHubTab(){
   $('hfGo').onclick=go;$('hfQ').onkeydown=e=>{if(e.key=='Enter')go()};
   if(!bench.results||!Object.keys(bench.results).length){bench=await api('/api/bench');if(bench.state=='idle'&&prefs.bench)bench={state:'done',results:prefs.bench}}
   await drawHub();pollDl()}
+async function drawPrivacy(){const el=$('privPane');if(!el)return;const d=await (await fetch('/api/device')).json();
+  const others=d.pc?await api('/api/device/others'):null;
+  el.innerHTML=`<div class="privcard"><div><b>${d.pc?'This PC':'This device'}</b>${d.pc?'<span class="soon" style="margin-left:8px">the PC running Ithaca</span>':''}<small>Device ${esc(d.id)}${d.pin?' · PIN on':''}</small></div>
+      <input id="pvName" placeholder="Name this device (e.g. Phone)" value="${esc(d.name||'')}"></div>
+    <h3>PIN</h3><p>${d.pin?'This device asks for its PIN once per browser session. Its data is encrypted with a key that needs the PIN.':'Add a PIN so someone using this browser can\'t open your data. Wrong guesses are slowed down.'}</p>
+    <div class="row" style="flex-wrap:wrap">${d.pin?'<input id="pvCur" type="password" placeholder="Current PIN">':''}<input id="pvNew" type="password" placeholder="${d.pin?'New PIN (empty: remove)':'New PIN (4+ characters)'}"><input id="pvNew2" type="password" placeholder="Repeat it">
+      <button class="btn" id="pvPin">${d.pin?'Change PIN':'Set PIN'}</button></div>
+    <h3>Recovery code</h3><p>The key to this device's data. Clearing this browser's cookies loses access, unless you keep this code. Use it to open the same data in another browser or the app window. Keep it private: whoever has it can read this device's data.</p>
+    <div class="row">${d.pin?'<input id="pvRecPin" type="password" placeholder="PIN">':''}<button class="btn" id="pvRec">Show recovery code</button></div><div id="pvCode"></div>
+    <h3>Use another device's data here</h3><p>Paste a recovery code to switch this browser to that device's data. This browser's current data stays on the PC.</p>
+    <div class="row"><input id="pvLink" placeholder="Recovery code" style="flex:1"><button class="btn" id="pvLinkGo">Switch</button></div>
+    ${others?`<h3>Other devices</h3><p>Devices that opened Ithaca from elsewhere (phones, other browsers). Their data is encrypted with their own keys, so This PC can see only their size. You can delete one to free space.</p>
+      ${others.length?others.map(o=>`<div class="memrow"><span><b>Device ${esc(o.id.slice(0,6))}</b><small>${o.files} files · ${o.mb.toFixed(1)} MB · last used ${o.updated?new Date(o.updated).toLocaleDateString():'never'}${o.pin?' · PIN on':''}</small></span><button class="btn" data-odev="${esc(o.id)}">Delete</button></div>`).join(''):'<p class="sub">None yet.</p>'}`:''}`;
+  $('pvName').onchange=()=>api('/api/device/name',{name:$('pvName').value});
+  $('pvPin').onclick=async()=>{const n=$('pvNew').value;if(n!=$('pvNew2').value){toast('The two PINs differ');return}
+    if(!n&&!d.pin){toast('Type a PIN first');return}if(!n&&!confirm('Remove the PIN from this device?'))return;
+    const r=await fetch('/api/device/pin',{method:'POST',body:JSON.stringify({pin:n,current:$('pvCur')?$('pvCur').value:''})}),j=await r.json();
+    if(!r.ok){toast(j.error||'Could not change the PIN');return}toast(n?'PIN saved':'PIN removed');drawPrivacy()};
+  $('pvRec').onclick=async()=>{const r=await fetch('/api/device/recovery',{method:'POST',body:JSON.stringify({pin:$('pvRecPin')?$('pvRecPin').value:''})}),j=await r.json();
+    if(!r.ok){toast(j.error||'Could not read the code');return}
+    $('pvCode').innerHTML=`<div class="reccode"><code>${esc(j.code.match(/.{1,11}/g).join(' '))}</code><button class="btn" id="pvCopy">Copy</button></div>`;
+    $('pvCopy').onclick=()=>{navigator.clipboard.writeText(j.code);toast('Copied')}};
+  $('pvLinkGo').onclick=async()=>{const c=$('pvLink').value.trim();if(!c)return;if(!confirm('Switch this browser to that device\'s data?'))return;
+    const r=await fetch('/api/device/link',{method:'POST',body:JSON.stringify({code:c})});if(!r.ok){toast((await r.json()).error||'Invalid code');return}location.reload()};
+  el.querySelectorAll('[data-odev]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this device\'s data for good? This can\'t be undone.'))return;await api('/api/device/others/delete',{id:b.dataset.odev});drawPrivacy()})}
 async function openSysTab(){
   $('benchGo').onclick=async()=>{const r=await api('/api/bench',{});if(r.error){toast(r.error);return}sysinfo=null;pollBench()};
   await pollBench();
@@ -1366,6 +1414,7 @@ async function openSettings(tab){
   $('settings').classList.add('open');tab=tab||'general';
   $('tabs').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.tab==tab));
   $('pane').innerHTML=TABS[tab]();bindPane();
+  if(tab=='privacy')drawPrivacy();
   if(tab=='memory'){drawMem();$('memFind').oninput=drawMem;$('memCat').onchange=drawMem;
     $('memAdd').onclick=()=>{const t=prompt('New memory');if(t&&t.trim()){memories.push({id:memNextId(),text:t.trim(),category:$('memCat').value||'other',pinned:false,created:Date.now(),updated:Date.now()});api('/api/memories',memories);drawMem()}};
     $('memClear').onclick=()=>{if(confirm('Delete all memories?')){memories=[];api('/api/memories',memories);drawMem()}};
