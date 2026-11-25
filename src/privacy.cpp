@@ -310,6 +310,15 @@ void privacy_init(bool server_mode) {
         if (CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) { key.assign((char*)out.pbData, out.cbData); SecureZeroMemory(out.pbData, out.cbData); LocalFree(out.pbData); }
     }
     bool fresh = false;
+    if (key.size() != 32 && !blob.empty()) {
+        // a key file this Windows account can't unlock (the folder came from another PC or account): never overwrite
+        // it, so moving the folder back still opens the old data (its recovery code works anywhere)
+        SYSTEMTIME t; GetLocalTime(&t);
+        wchar_t nm[64]; swprintf(nm, 64, L"\\pc.key.unreadable-%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        MoveFileW(kf.c_str(), (devices_dir() + nm).c_str());
+        printf("  Privacy: this PC's key file was made on another PC or Windows account. It was set aside and a new\n"
+               "  \"This PC\" was started; open the old data with its recovery code (Settings > Privacy).\n");
+    }
     if (key.size() != 32) {
         char b[32]; rnd(b, 32); key.assign(b, 32); SecureZeroMemory(b, 32);
         DATA_BLOB in{32, (BYTE*)key.data()}, out{};
