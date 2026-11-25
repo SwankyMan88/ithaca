@@ -121,6 +121,9 @@ details.think .tb{padding:2px 14px 10px;color:var(--dim);font-size:14px;border-t
 .topbar .ring #ringText{font-size:12px;color:var(--dim);white-space:nowrap}
 .topbar{min-width:0}.topbar .modelpick{min-width:0;flex-shrink:1}.topbar .modelpick span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:1000px){.topbar #ringText{display:none}}
+.gact{flex-shrink:0}#ctxText{white-space:nowrap}
+@media(max-width:1100px){#ctxText{display:none}}
+@media(max-width:860px){#compact{font-size:0;gap:0;padding:6px 8px}}
 @media(max-width:600px){.gact{max-width:150px;padding:5px 9px}.gstat{gap:8px}.topbar .modelpick{max-width:38vw}}
 @media(max-width:820px){aside:not(.hidden)+main::after{content:'';position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9}}
 @media(max-width:600px){.odesc{display:none}.obox .boxrow .toggle{padding:5px 9px;font-size:12px}#closeSettings{top:6px;right:6px;background:var(--raise)}.tabs{padding-right:44px}}
@@ -1903,6 +1906,7 @@ async function oJudge(run){
 async function oStart(){
   if(orch.busy)return;
   const q=$('oq').value.trim();if(!q){toast('Write a request first');return}
+  if(!orch.models)await oLoadModels();
   const picked=(prefs.orch_models||[]).filter(p=>(orch.models||[]).some(m=>m.path==p));
   if(!picked.length){toast('Pick at least one model');orch.mopen=true;oRedrawComposer();return}
   let judge=$('oJudge').value||picked[0];if(!picked.includes(judge))judge=picked[0];
@@ -1945,6 +1949,7 @@ const OGROUPS=[['Large','over 16B',16,1e9],['Medium','6–16B',6,16],['Small','2
 const oParams=m=>{const x=String(m.params||'').match(/([\d.]+)\s*([BbMm])/);return x?(+x[1])*(/m/i.test(x[2])?0.001:1):(m.mb||0)/600};
 function oModelPanel(){
   const sel=new Set(prefs.orch_models||[]),q=(orch.mq||'').toLowerCase(),vram=sysinfo&&sysinfo.gpu?sysinfo.gpu.vram_mb:0;
+  if(!orch.models)return '<div class="sidehint">Reading your models…</div>';
   const list=(orch.models||[]).filter(m=>!q||m.name.toLowerCase().includes(q));
   return (OGROUPS.map(([g,range,lo,hi])=>{const ms=list.filter(m=>{const p=oParams(m);return p>=lo&&p<hi}).sort((a,b)=>oParams(b)-oParams(a)||a.name.localeCompare(b.name));
     if(!ms.length)return '';const all=ms.every(m=>sel.has(m.path));
@@ -1996,8 +2001,8 @@ async function oLoadModels(){let all=[];try{all=(await api('/api/models')).filte
   orch.models=all.filter(m=>m.supported!==false);orch.unsupported=all.filter(m=>m.supported===false)}
 async function drawOrch(){
   const S=$('studio');
-  if(!orch.models)await oLoadModels();
-  if(!prefs.orch_models)prefs.orch_models=status.model?(orch.models.filter(m=>oShort(m.path).toLowerCase()==oShort(status.model).toLowerCase()).map(m=>m.path)):[];
+  if(!orch.models&&!orch.mload)orch.mload=oLoadModels().then(()=>{orch.mload=null;if(view=='orch'&&!orch.run)oRedrawComposer()});   // don't wait: draw now
+  if(!prefs.orch_models&&orch.models)prefs.orch_models=status.model?(orch.models.filter(m=>oShort(m.path).toLowerCase()==oShort(status.model).toLowerCase()).map(m=>m.path)):[];
   const intro=`<div class="ointro"><div class="big">${ico('orch')}</div><h1>Orchestration</h1><p>Several models work on one request. Each one writes answers, criticizes and refines them by the rules of the method, then a judge picks the best. Models run one after another, so a run takes a while.</p>
     <div class="ometh">${Object.values(OMODES).map(m=>`<div><b>${ico(m.icon)}${m.name}</b><p>${m.desc}</p></div>`).join('')}</div></div>`;
   S.innerHTML=`<div class="owrap"><div class="col ocol">${orch.run?`<div id="oRun"></div>`:intro}</div>${oComposer()}</div>`;
@@ -2023,7 +2028,8 @@ async function polish(kind,text,out){
   const r=await stream([{role:'system',content:'You write prompts for generative media models. '+guide+' Reply with the prompt only.'},{role:'user',content:text}],{max_tokens:300,temperature:0.6});
   out.textContent=stripTags(splitThink(r.text).body).trim()}
 async function drawStudio(){
-  if(!mediaModels)mediaModels=await api('/api/media/models');
+  if(!mediaModels){const v0=view;$('studio').innerHTML='<div class="col"><p class="sub" style="margin-top:40px">Reading your models…</p></div>';
+    mediaModels=await api('/api/media/models');if(view!=v0)return}
   const kind=view,st=$('studio');
   const banner=kind=='image'
     ?`<div class="banner" style="border-left-color:var(--ok)"><b>Built-in engine:</b> runs single-file <b>SD 1.5, SD 2.x and SDXL</b> checkpoints (including fine-tunes like Pony, Illustrious, Juggernaut) and all-in-one <b>Flux.1</b> checkpoints (schnell and dev). Layout is read from the file, so any checkpoint of these families works. Weights that don't fit in free VRAM are streamed from RAM. You can also just ask for an image in a normal chat. SD3 support is coming.</div>`
@@ -2166,8 +2172,8 @@ function galBtns(x){return `<div class="gbtns">${x.kind=='image'?`<button onclic
 window.delMedia=async url=>{if(!confirm('Delete this for good?'))return;const r=await api('/api/media/delete',{url});if(r&&r.error)toast(r.error);else toast('Deleted');drawGallery()};
 async function drawGallery(){const g=$('gal');if(!g)return;const list=(await api('/api/media/gallery')).filter(x=>(x.kind||'image')==view);
   const st='width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px';
-  g.innerHTML=list.length?list.map(x=>x.kind=='video'?`<div class="galimg"><video src="${esc(x.url)}" title="${esc(x.prompt)}" muted loop onmouseover="this.play()" onmouseout="this.pause()" controls style="${st}"></video>${galBtns(x)}</div>`
-    :x.kind=='audio'?`<div class="galaudio" title="${esc(x.prompt)}"><audio controls src="${esc(x.url)}" style="width:100%"></audio><small>${esc((x.prompt||'').slice(0,60))}</small>${galBtns(x)}</div>`
+  g.innerHTML=list.length?list.map(x=>x.kind=='video'?`<div class="galimg"><video src="${esc(x.url)}" preload="none" title="${esc(x.prompt)}" muted loop onmouseover="this.play()" onmouseout="this.pause()" controls style="${st}"></video>${galBtns(x)}</div>`
+    :x.kind=='audio'?`<div class="galaudio" title="${esc(x.prompt)}"><audio controls preload="none" src="${esc(x.url)}" style="width:100%"></audio><small>${esc((x.prompt||'').slice(0,60))}</small>${galBtns(x)}</div>`
     :`<div class="galimg"><img src="${esc(x.url)}" title="${esc(x.prompt)}" alt="${esc(x.prompt)}" loading="lazy" style="${st}" onclick="viewImg(this.src)">${galBtns(x)}</div>`).join(''):`<div class="ph">Nothing yet</div>`}
 // Shows a live progress bar in `el` while a media job runs; returns a stop function.
 // Live render card: the picture sharpens step by step (latent previews), with progress and cancel.

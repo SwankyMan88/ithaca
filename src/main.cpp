@@ -171,9 +171,36 @@ static std::string fmt_params(double n) {
     if (n >= 1e9) snprintf(b, sizeof b, n >= 1e10 ? "%.0fB" : "%.1fB", n / 1e9); else snprintf(b, sizeof b, "%.0fM", n / 1e6);
     return b;
 }
+// What each model file is (architecture, size, supported?) costs a read of its header, and a fresh start with dozens
+// of models took ~20 s of disk reads before the model list showed. The answers are kept in memory and on disk
+// (store\model_info.cache: path, size, info per line) and only files that are new or changed size are read again.
+static std::mutex g_mi_m;
+static std::map<std::wstring, std::pair<uint64_t, std::string>> g_mi_cache;
+static bool g_mi_loaded = false;
+static std::wstring mi_file() { return g_store_dir + L"\\model_info.cache"; }
+static void mi_load() {
+    if (g_mi_loaded) return;
+    g_mi_loaded = true;
+    FILE* f = _wfopen(mi_file().c_str(), L"rb"); if (!f) return;
+    std::string all; char b[65536]; size_t r; while ((r = fread(b, 1, sizeof b, f)) > 0) all.append(b, r); fclose(f);
+    for (size_t p = 0; p < all.size();) {
+        size_t e = all.find('\n', p); if (e == std::string::npos) e = all.size();
+        std::string line = all.substr(p, e - p); p = e + 1;
+        size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        g_mi_cache[utf8_to_w(line.substr(0, t1))] = {strtoull(line.c_str() + t1 + 1, nullptr, 10), line.substr(t2 + 1)};
+    }
+}
+static void mi_save() {
+    std::string s;
+    for (auto& kv : g_mi_cache) s += w_to_utf8(kv.first) + "\t" + std::to_string(kv.second.first) + "\t" + kv.second.second + "\n";
+    std::wstring tmp = mi_file() + L".tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb"); if (!f) return;
+    bool ok = fwrite(s.data(), 1, s.size(), f) == s.size(); fclose(f);
+    if (ok) MoveFileExW(tmp.c_str(), mi_file().c_str(), MOVEFILE_REPLACE_EXISTING);
+}
 static std::string model_info_json(const std::wstring& path, uint64_t size) {
-    static std::mutex m; static std::map<std::wstring, std::pair<uint64_t, std::string>> cache;
-    { std::lock_guard<std::mutex> l(m); auto it = cache.find(path); if (it != cache.end() && it->second.first == size) return it->second.second; }
+    { std::lock_guard<std::mutex> l(g_mi_m); mi_load(); auto it = g_mi_cache.find(path); if (it != g_mi_cache.end() && it->second.first == size) return it->second.second; }
     GGUF g; std::string err, out;
     if (!g.open(path, err)) out = ",\"supported\":false,\"why\":" + json_esc("Can't read this file: " + err);
     else {
@@ -202,7 +229,7 @@ static std::string model_info_json(const std::wstring& path, uint64_t size) {
         if (E > 1 && K > 0 && exps > 0) out += ",\"active\":" + json_esc(fmt_params(total - exps + exps * K / E));
         out += std::string(",\"supported\":") + (why.empty() ? "true" : "false") + (why.empty() ? "" : ",\"why\":" + json_esc(why));
     }
-    std::lock_guard<std::mutex> l(m); cache[path] = {size, out};
+    std::lock_guard<std::mutex> l(g_mi_m); g_mi_cache[path] = {size, out}; mi_save();
     return out;
 }
 static std::string models_json() {
@@ -1026,8 +1053,12 @@ static int serve(int port, bool open_browser, bool explicit_port) {
         printf("\n  Ithaca is running:  %s\n  (close this window, press Ctrl+C or use Quit in the app to stop it)\n\n", url.c_str());
     if (open_browser) ShellExecuteA(nullptr, "open", (url + "?k=" + privacy_launch_token()).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     g_model.cancel = &g_stop;   // Stop (or a closed page) also ends a long prompt step
+    // read the model lists now, in the background, so the pages that show them open at once
+    std::thread([] { models_json(); extern void store_warm(); store_warm(); }).detach();
     for (;;) {
         SOCKET c = accept(ls, nullptr, nullptr);
+        // send replies at once: with Nagle's algorithm every small reply waited ~200 ms for the browser's ACK
+        if (c != INVALID_SOCKET) { BOOL nd = TRUE; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&nd, sizeof nd); }
         if (c == INVALID_SOCKET) continue;
         std::thread(handle, c).detach();
     }

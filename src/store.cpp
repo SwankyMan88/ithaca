@@ -145,6 +145,9 @@ static std::string media_models_json() {
     return out + "]";
 }
 
+// Called once in the background at start: the first media-model scan reads many folders from a cold disk.
+void store_warm() { media_models_json(); }
+
 // Returns true when the request was handled.
 bool handle_store(const std::string& method, const std::string& path, const std::string& body, int& code, std::string& type, std::string& out) {
     code = 200; type = "application/json";

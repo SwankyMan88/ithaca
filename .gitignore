@@ -19,3 +19,4 @@ devices/
 server.json
 build/
 webview/
+model_info.cache
