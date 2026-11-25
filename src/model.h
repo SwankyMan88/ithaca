@@ -85,6 +85,7 @@ public:
     // Feed tokens after the current n_past; returns logits for the last one.
     // A negative id -1-k means "row k of ext_embd" (image embeddings); a run of them attends bidirectionally.
     const float* eval(const int* toks, int n);
+    const std::atomic<bool>* cancel = nullptr;   // checked between prompt chunks: a long prompt can be stopped
     bool recurrent() const { return recurrent_; }   // state layers: rewinding restarts from zero
     // Same, but returns logits for every one of the n positions (n * n_vocab floats). Used to verify drafts.
     const float* eval_all(const int* toks, int n) { all_logits_ = true; const float* r = eval(toks, n); all_logits_ = false; return r; }

@@ -347,6 +347,22 @@ static std::string ithaca_status_json(double ms = -1) {
 }
 
 // ---------- HTTP ----------
+// Watches a streaming client while a reply is generated. The long-prompt step sends nothing, so a failed send
+// can't reveal a closed page; a closed connection sets g_stop, which also ends the prompt step (Model::cancel).
+struct ClientWatch {
+    std::atomic<bool> done{false}; std::thread t;
+    explicit ClientWatch(SOCKET s) {
+        t = std::thread([this, s] {
+            while (!done) {
+                fd_set f; FD_ZERO(&f); FD_SET(s, &f); timeval tv{0, 200000};
+                int r = select(0, &f, nullptr, nullptr, &tv);
+                if (r < 0) break;
+                if (r > 0) { char c; int n = recv(s, &c, 1, MSG_PEEK); if (n <= 0) { g_stop = true; break; } Sleep(200); }
+            }
+        });
+    }
+    ~ClientWatch() { done = true; t.join(); }
+};
 static bool send_all(SOCKET s, const std::string& d) {
     size_t off = 0;
     while (off < d.size()) {
@@ -501,6 +517,7 @@ static void v1_chat(SOCKET s, const J& j, bool text_completion = false) {
     std::string text, sent;   // sent: what a stream has delivered (held back while it could be the start of a stop string)
     bool stopped_by_stop = false;
     g_stop = false; g_busy = true;
+    ClientWatch watch(s);
     GenStats st = g_chat.generate(msgs, o, [&](const std::string& t) {
         if (g_stop) return false;
         text += t;
@@ -818,6 +835,7 @@ static void handle(SOCKET s) {
         for (auto& x : j["stop"].a) if (x.t == J::STR && !x.s.empty()) { stops.push_back(x.s); hold = std::max(hold, x.s.size() - 1); }
         std::string pend; bool hit = false;
         g_stop = false; g_busy = true;
+        ClientWatch watch(s);
         GenStats st = g_chat.generate(msgs, o, [&](const std::string& t) {
             if (g_stop) return false;
             if (stops.empty()) return send_all(s, "data: {\"t\":" + json_esc(t) + "}\n\n");
@@ -920,6 +938,7 @@ static int serve(int port, bool open_browser, bool explicit_port) {
     } else
         printf("\n  Ithaca is running:  %s\n  (close this window, press Ctrl+C or use Quit in the app to stop it)\n\n", url.c_str());
     if (open_browser) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    g_model.cancel = &g_stop;   // Stop (or a closed page) also ends a long prompt step
     for (;;) {
         SOCKET c = accept(ls, nullptr, nullptr);
         if (c == INVALID_SOCKET) continue;

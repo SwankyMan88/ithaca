@@ -1318,7 +1318,8 @@ const float* Model::eval(const int* toks, int n_all) {
     if (!parked_.empty() && !wake()) return nullptr;
     // A long prompt right after a (re)load reads far faster once the layers are in VRAM than on the CPU, and the
     // placement is fixed per request below, so give the background placement a moment to finish first.
-    if (n_all > 64 && migrating_) for (double t0 = now_sec(); migrating_ && now_sec() - t0 < 30;) Sleep(20);
+    if (n_all > 64 && migrating_) for (double t0 = now_sec(); migrating_ && now_sec() - t0 < 30 && !(cancel && cancel->load());) Sleep(20);
+    if (cancel && cancel->load()) return nullptr;
     if (!ensure_kv(n_past + n_all)) return nullptr;
     if (n_all == 1 && toks[0] >= 0 && dev_ok_ && !migrating_ && all_gpu()) {
         // Fully VRAM-resident decode: replay one CUDA graph for the whole forward pass.
@@ -1362,6 +1363,7 @@ const float* Model::eval(const int* toks, int n_all) {
     for (int i = 0; i < hp.n_layer; i++) on_gpu[i] = dev_ok_ && layers_[i].state == TIER_GPU;
     const bool head_gpu = dev_ok_ && out_state_ == TIER_GPU;
     for (int c0 = 0, n = 0; c0 < n_all; c0 += n) {
+        if (cancel && cancel->load()) return nullptr;   // Stop, or the client went away, during a long prompt
         // batches never mix text and image tokens: an image run is one non-causal block
         const bool img = toks[c0] < 0;
         n = 1;
@@ -1387,6 +1389,9 @@ const float* Model::eval(const int* toks, int n_all) {
         const size_t kvdz = (size_t)kvd;
         bool on_dev = false, cs_up = false;
         for (int li = 0; li < hp.n_layer; li++) {
+            // a big model can spend minutes on one prompt chunk: Stop is honoured between layers too.
+            // n_past only advances when the chunk completes, so the cache stays consistent.
+            if (n > 1 && cancel && cancel->load()) { if (on_dev) cuda().sync(); return nullptr; }
             Layer& L = layers_[li];
             { std::lock_guard<std::mutex> l(pre_m_); pre_want_ = li + 1; }
             pre_cv_.notify_one();
