@@ -24,73 +24,73 @@
 <text x="36" y="168" font-size="16" fill="#e6edf3" font-weight="600">Granite 3.1 MoE 3B</text>
 <text x="36" y="190" font-size="13" fill="#8b949e">Q4_K_M · 2.0 GB</text>
 <rect class="bar" style="animation-delay:0.15s" x="290" y="150" width="600.0" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:0.90s" x="898.0" y="164" font-size="13" fill="#e6edf3">225 <tspan font-weight="600" fill="#3fb950">104%</tspan></text>
-<rect class="bar" style="animation-delay:0.20s" x="290" y="174" width="574.7" height="18" rx="4" fill="#6e7681"/>
-<text x="872.7" y="188" font-size="13" fill="#8b949e" class="num" style="animation-delay:0.95s">215</text>
+<text class="num" style="animation-delay:0.90s" x="898.0" y="164" font-size="13" fill="#e6edf3">304 <tspan font-weight="600" fill="#3fb950">128%</tspan></text>
+<rect class="bar" style="animation-delay:0.20s" x="290" y="174" width="469.6" height="18" rx="4" fill="#6e7681"/>
+<text x="767.6" y="188" font-size="13" fill="#8b949e" class="num" style="animation-delay:0.95s">238</text>
 <line x1="36" y1="208" x2="1064" y2="208" stroke="#21262d"/>
 <text x="36" y="242" font-size="16" fill="#e6edf3" font-weight="600">Gemma 3 4B</text>
 <text x="36" y="264" font-size="13" fill="#8b949e">Q4_K_M · 2.5 GB</text>
-<rect class="bar" style="animation-delay:0.25s" x="290" y="224" width="205.4" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.00s" x="503.4" y="238" font-size="13" fill="#e6edf3">77 <tspan font-weight="600" fill="#8b949e">99%</tspan></text>
-<rect class="bar" style="animation-delay:0.30s" x="290" y="248" width="207.3" height="18" rx="4" fill="#6e7681"/>
-<text x="505.3" y="262" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.05s">78</text>
+<rect class="bar" style="animation-delay:0.25s" x="290" y="224" width="208.9" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.00s" x="506.9" y="238" font-size="13" fill="#e6edf3">106 <tspan font-weight="600" fill="#3fb950">113%</tspan></text>
+<rect class="bar" style="animation-delay:0.30s" x="290" y="248" width="184.2" height="18" rx="4" fill="#6e7681"/>
+<text x="482.2" y="262" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.05s">93</text>
 <line x1="36" y1="282" x2="1064" y2="282" stroke="#21262d"/>
 <text x="36" y="316" font-size="16" fill="#e6edf3" font-weight="600">Qwen2.5 Coder 7B</text>
 <text x="36" y="338" font-size="13" fill="#8b949e">Q4_0 · 4.4 GB</text>
-<rect class="bar" style="animation-delay:0.35s" x="290" y="298" width="148.1" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.10s" x="446.1" y="312" font-size="13" fill="#e6edf3">56 <tspan font-weight="600" fill="#8b949e">99%</tspan></text>
-<rect class="bar" style="animation-delay:0.40s" x="290" y="322" width="150.0" height="18" rx="4" fill="#6e7681"/>
-<text x="448.0" y="336" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.15s">56</text>
+<rect class="bar" style="animation-delay:0.35s" x="290" y="298" width="141.0" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.10s" x="439.0" y="312" font-size="13" fill="#e6edf3">71 <tspan font-weight="600" fill="#3fb950">101%</tspan></text>
+<rect class="bar" style="animation-delay:0.40s" x="290" y="322" width="140.1" height="18" rx="4" fill="#6e7681"/>
+<text x="438.1" y="336" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.15s">71</text>
 <line x1="36" y1="356" x2="1064" y2="356" stroke="#21262d"/>
 <text x="36" y="390" font-size="16" fill="#e6edf3" font-weight="600">Granite 4.1 8B</text>
 <text x="36" y="412" font-size="13" fill="#8b949e">Q4_0 · 5.1 GB</text>
-<rect class="bar" style="animation-delay:0.45s" x="290" y="372" width="124.7" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.20s" x="422.7" y="386" font-size="13" fill="#e6edf3">47 <tspan font-weight="600" fill="#8b949e">99%</tspan></text>
-<rect class="bar" style="animation-delay:0.50s" x="290" y="396" width="126.2" height="18" rx="4" fill="#6e7681"/>
-<text x="424.2" y="410" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.25s">47</text>
+<rect class="bar" style="animation-delay:0.45s" x="290" y="372" width="119.2" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.20s" x="417.2" y="386" font-size="13" fill="#e6edf3">60 <tspan font-weight="600" fill="#3fb950">102%</tspan></text>
+<rect class="bar" style="animation-delay:0.50s" x="290" y="396" width="117.0" height="18" rx="4" fill="#6e7681"/>
+<text x="415.0" y="410" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.25s">59</text>
 <line x1="36" y1="430" x2="1064" y2="430" stroke="#21262d"/>
 <text x="36" y="464" font-size="16" fill="#e6edf3" font-weight="600">Qwen3 14B</text>
 <text x="36" y="486" font-size="13" fill="#8b949e">Q4_0 · 8.5 GB</text>
-<rect class="bar" style="animation-delay:0.55s" x="290" y="446" width="98.3" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.30s" x="396.3" y="460" font-size="13" fill="#e6edf3">37 <tspan font-weight="600" fill="#8b949e">96%</tspan></text>
-<rect class="bar" style="animation-delay:0.60s" x="290" y="470" width="102.2" height="18" rx="4" fill="#6e7681"/>
-<text x="400.2" y="484" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.35s">38</text>
+<rect class="bar" style="animation-delay:0.55s" x="290" y="446" width="73.5" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.30s" x="371.5" y="460" font-size="13" fill="#e6edf3">37 <tspan font-weight="600" fill="#3fb950">101%</tspan></text>
+<rect class="bar" style="animation-delay:0.60s" x="290" y="470" width="73.1" height="18" rx="4" fill="#6e7681"/>
+<text x="371.1" y="484" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.35s">37</text>
 <line x1="36" y1="504" x2="1064" y2="504" stroke="#21262d"/>
 <text x="290" y="556" font-size="14" fill="#8b949e" font-weight="600">READING A 512-TOKEN PROMPT (tokens per second)</text>
 <text x="36" y="598" font-size="16" fill="#e6edf3" font-weight="600">Granite 3.1 MoE 3B</text>
 <text x="36" y="620" font-size="13" fill="#8b949e">Q4_K_M · 2.0 GB</text>
-<rect class="bar" style="animation-delay:0.65s" x="290" y="580" width="508.8" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.40s" x="806.8" y="594" font-size="13" fill="#e6edf3">5,254 <tspan font-weight="600" fill="#8b949e">85%</tspan></text>
+<rect class="bar" style="animation-delay:0.65s" x="290" y="580" width="564.4" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.40s" x="862.4" y="594" font-size="13" fill="#e6edf3">6,669 <tspan font-weight="600" fill="#8b949e">94%</tspan></text>
 <rect class="bar" style="animation-delay:0.70s" x="290" y="604" width="600.0" height="18" rx="4" fill="#6e7681"/>
-<text x="898.0" y="618" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.45s">6,196</text>
+<text x="898.0" y="618" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.45s">7,090</text>
 <line x1="36" y1="638" x2="1064" y2="638" stroke="#21262d"/>
 <text x="36" y="672" font-size="16" fill="#e6edf3" font-weight="600">Gemma 3 4B</text>
 <text x="36" y="694" font-size="13" fill="#8b949e">Q4_K_M · 2.5 GB</text>
-<rect class="bar" style="animation-delay:0.75s" x="290" y="654" width="285.5" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.50s" x="583.5" y="668" font-size="13" fill="#e6edf3">2,948 <tspan font-weight="600" fill="#8b949e">90%</tspan></text>
-<rect class="bar" style="animation-delay:0.80s" x="290" y="678" width="315.5" height="18" rx="4" fill="#6e7681"/>
-<text x="613.5" y="692" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.55s">3,258</text>
+<rect class="bar" style="animation-delay:0.75s" x="290" y="654" width="293.6" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.50s" x="591.6" y="668" font-size="13" fill="#e6edf3">3,469 <tspan font-weight="600" fill="#8b949e">90%</tspan></text>
+<rect class="bar" style="animation-delay:0.80s" x="290" y="678" width="326.3" height="18" rx="4" fill="#6e7681"/>
+<text x="624.3" y="692" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.55s">3,856</text>
 <line x1="36" y1="712" x2="1064" y2="712" stroke="#21262d"/>
 <text x="36" y="746" font-size="16" fill="#e6edf3" font-weight="600">Qwen2.5 Coder 7B</text>
 <text x="36" y="768" font-size="13" fill="#8b949e">Q4_0 · 4.4 GB</text>
-<rect class="bar" style="animation-delay:0.85s" x="290" y="728" width="194.7" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.60s" x="492.7" y="742" font-size="13" fill="#e6edf3">2,010 <tspan font-weight="600" fill="#3fb950">112%</tspan></text>
-<rect class="bar" style="animation-delay:0.90s" x="290" y="752" width="174.4" height="18" rx="4" fill="#6e7681"/>
-<text x="472.4" y="766" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.65s">1,801</text>
+<rect class="bar" style="animation-delay:0.85s" x="290" y="728" width="204.7" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.60s" x="502.7" y="742" font-size="13" fill="#e6edf3">2,419 <tspan font-weight="600" fill="#3fb950">107%</tspan></text>
+<rect class="bar" style="animation-delay:0.90s" x="290" y="752" width="190.7" height="18" rx="4" fill="#6e7681"/>
+<text x="488.7" y="766" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.65s">2,254</text>
 <line x1="36" y1="786" x2="1064" y2="786" stroke="#21262d"/>
 <text x="36" y="820" font-size="16" fill="#e6edf3" font-weight="600">Granite 4.1 8B</text>
 <text x="36" y="842" font-size="13" fill="#8b949e">Q4_0 · 5.1 GB</text>
-<rect class="bar" style="animation-delay:0.95s" x="290" y="802" width="160.5" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.70s" x="458.5" y="816" font-size="13" fill="#e6edf3">1,658 <tspan font-weight="600" fill="#3fb950">116%</tspan></text>
-<rect class="bar" style="animation-delay:1.00s" x="290" y="826" width="138.8" height="18" rx="4" fill="#6e7681"/>
-<text x="436.8" y="840" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.75s">1,433</text>
+<rect class="bar" style="animation-delay:0.95s" x="290" y="802" width="163.7" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.70s" x="461.7" y="816" font-size="13" fill="#e6edf3">1,934 <tspan font-weight="600" fill="#3fb950">123%</tspan></text>
+<rect class="bar" style="animation-delay:1.00s" x="290" y="826" width="133.2" height="18" rx="4" fill="#6e7681"/>
+<text x="431.2" y="840" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.75s">1,574</text>
 <line x1="36" y1="860" x2="1064" y2="860" stroke="#21262d"/>
 <text x="36" y="894" font-size="16" fill="#e6edf3" font-weight="600">Qwen3 14B</text>
 <text x="36" y="916" font-size="13" fill="#8b949e">Q4_0 · 8.5 GB</text>
-<rect class="bar" style="animation-delay:1.05s" x="290" y="876" width="120.8" height="18" rx="4" fill="#8b7dff"/>
-<text class="num" style="animation-delay:1.80s" x="418.8" y="890" font-size="13" fill="#e6edf3">1,248 <tspan font-weight="600" fill="#8b949e">97%</tspan></text>
-<rect class="bar" style="animation-delay:1.10s" x="290" y="900" width="124.9" height="18" rx="4" fill="#6e7681"/>
-<text x="422.9" y="914" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.85s">1,289</text>
+<rect class="bar" style="animation-delay:1.05s" x="290" y="876" width="105.7" height="18" rx="4" fill="#8b7dff"/>
+<text class="num" style="animation-delay:1.80s" x="403.7" y="890" font-size="13" fill="#e6edf3">1,249 <tspan font-weight="600" fill="#3fb950">118%</tspan></text>
+<rect class="bar" style="animation-delay:1.10s" x="290" y="900" width="89.9" height="18" rx="4" fill="#6e7681"/>
+<text x="387.9" y="914" font-size="13" fill="#8b949e" class="num" style="animation-delay:1.85s">1,063</text>
 <line x1="36" y1="934" x2="1064" y2="934" stroke="#21262d"/>
 <text x="36" y="988" font-size="13" fill="#8b949e">Percent: Ithaca as a share of llama.cpp (green: faster). Raw numbers: docs/bench-results.json.</text>
 </svg>

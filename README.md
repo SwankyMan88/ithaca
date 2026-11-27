@@ -130,7 +130,7 @@ What's shared by everyone using the PC: the models, the model settings and the G
   <img src="docs/bench-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on five models">
 </picture>
 
-Ithaca generates at 96–104% of llama.cpp's speed and reads prompts at 85–116% of it, on the same files and the same GPU.
+Ithaca generates at 101–128% of llama.cpp's speed and reads prompts at 90–123% of it, on the same files and the same GPU. The mid-size models are at the card's memory bandwidth, so from there on speed comes from drafting (below).
 
 ### Newer model families
 
@@ -139,11 +139,26 @@ Ithaca generates at 96–104% of llama.cpp's speed and reads prompts at 85–116
   <img src="docs/bench-new-light.svg" alt="Generation and prompt speed of Ithaca and llama.cpp on gpt-oss, DeepSeek-V2-Lite, Qwen1.5-MoE and Granite 4.0 H">
 </picture>
 
-On mixture-of-experts, latent-attention and Mamba-hybrid models Ithaca generates faster than llama.cpp (101–125%); prompts are at 75–87% of it.
+On mixture-of-experts, latent-attention and Mamba-hybrid models Ithaca generates faster than llama.cpp (109–128%); prompts are at 73–98% of it.
+
+### In real replies, with drafting
+
+The charts above are plain token-by-token generation. In the app, **Faster replies** (on by default) also guesses a few tokens ahead and has the model check them all in one pass. The guesses come from a small model of the same family when you have one (Qwen3 0.6B for Qwen models), and otherwise from text already in the conversation (code being edited, quotes, lists, names). Checking 4 guesses costs about 1.2× a single step, and each step picks the guess length that pays off, or none. Greedy answers are word for word the same with it on or off.
+
+Tokens per second through the chat API, the same prompts with it off and on:
+
+| | Story (prose) | Edit a file and return it | Explain 3,000 tokens of code | Rewrite a file in a tool call |
+|---|---|---|---|---|
+| Gemma 3 4B (no draft model) | 105 → 110 | 102 → **186** | 104 → **116** | |
+| Qwen2.5 Coder 7B (+ Qwen3 0.6B) | 74 → 78 | 73 → **279** | 68 → 72 | 72 → **203** |
+| Granite 4.1 8B (no draft model) | 57 → 57 | 55 → **103** | 52 → **79** | |
+| Qwen3 14B (+ Qwen3 0.6B) | 36 → **48** | 32 → **44** | 32 → 36 | |
+
+It's off for mixture-of-experts models: every guessed token needs its own experts, so checking costs more than it saves.
 
 ### Every quant type
 
-Low-bit files fit bigger models in less VRAM. Ithaca runs all of them on the GPU at their compact size.
+Low-bit files fit bigger models in less VRAM. (This chart is from version 0.9.1; generation is faster now, as above.) Ithaca runs all of them on the GPU at their compact size.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/quants-dark.svg">
@@ -180,7 +195,7 @@ Not supported yet: DeepSeek V3/R1 (full size), Llama 4, SD3, LoRAs, image-to-vid
 - One 3 MB file: no install, no service, no runtime downloads.
 - Images, video and speech out, and pictures and documents in, all in the same chat.
 - Models bigger than your VRAM still run, and you can type before loading finishes.
-- **Speculative decoding** is automatic: with a small model of the same family installed (Qwen3 0.6B next to Qwen3 14B), it drafts tokens for the big one. Qwen3 14B writes code at about 44 tok/s this way.
+- **Speculative decoding** is automatic: a small model of the same family (Qwen3 0.6B next to Qwen3 14B) drafts tokens for the big one, and without one Ithaca drafts from text already in the conversation. Edits that copy most of a file come out 2–4× faster, and the answers don't change.
 - If you need Linux, Mac or AMD support, llama.cpp is the better choice today.
 
 </details>
@@ -269,9 +284,11 @@ Options: `--port 8080`, `--host 0.0.0.0` to serve other devices on your network,
 <summary><b>How was the speed measured?</b></summary>
 <br>
 
-RTX 3060 12 GB, 16 GB RAM, the same GGUF files, all layers on the GPU, 3 runs each, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test. Raw numbers: [docs/bench-results.json](docs/bench-results.json).
+RTX 3060 12 GB, 16 GB RAM, the same GGUF files, all layers on the GPU, 3 runs each, the two programs run back to back per model. llama.cpp is build 11146 with CUDA, run as `llama-bench -p 512 -n 128 -ngl 99 -r 3`; Ithaca as `Ithaca.exe --bench --model file.gguf`, which runs the same test (DeepSeek-V2-Lite with `--ctx 2048`, so its cache fits next to the weights as it does in llama-bench's short context). Raw numbers: [docs/bench-results.json](docs/bench-results.json). `ITHACA_BENCH_DEPTH=4096` measures generation after a longer chat, and `ITHACA_BENCH_VERIFY=1` what checking 2 to 8 drafted tokens costs.
 
 Prompts are read with int8 tensor cores (the same idea as llama.cpp's "mmq"), and the norm, residual add and int8 conversion around each matmul run as one fused step.
+
+Generating one token is limited by how fast the weights stream from VRAM, so the rest of each step has to stay out of the way. Each layer runs as about 11 kernels inside one CUDA graph (26 before 0.9.2): the residual add, norm and int8 conversion are one kernel; q, k and v are one matmul launch; gate, up, the activation and the down projection's int8 input are another; bias, q/k norm, RoPE and the KV-cache write are one; so are the attention combine and the int8 conversion after it. The big matrices read at about 330 GB/s on a 360 GB/s card. `ITHACA_KPROF=1` prints the time of every kernel, and `ITHACA_NO_FUSE=1` turns the fused kernels off; the output is the same either way.
 
 </details>
 
@@ -310,6 +327,7 @@ You need MinGW-w64 g++. Run `build.bat`; the result is a single static `Ithaca.e
 ```
 src/model.*        transformer, MoE, tier planner, CPU and GPU forward passes
 src/cuda_tier.*    NVIDIA driver wrapper, quantized matmul kernels, weight loader
+src/fuse_kernels.cpp   fused decode kernels (norm + quantize, q/k post-processing, attention combine)
 src/gx*.cpp/h      GPU runtime for the media engines and prompt processing
 src/sd.*, wan.*, tts.*   image, video and speech engines
 src/vision.*       image input (SigLIP encoder for Gemma 3)
@@ -325,6 +343,7 @@ src/main.cpp       HTTP server and CLI;  src/ui.cpp  the web UI
 
 - Close the rest of the prompt-speed gap on Gemma 3 and mixture-of-experts models.
 - Faster gpt-oss prompts; DeepSeek V3 routing.
+- Drafting for mixture-of-experts models, and sliding-window layers that keep only their window in the cache (gpt-oss at 8K context sits right at the edge of 12 GB).
 - SD3, LoRAs, image-to-video; faster Flux and Wan 14B on 12 GB cards.
 - AMD and Intel GPUs (Vulkan).
 - Orchestration: run small models at the same time when they fit in VRAM together.
