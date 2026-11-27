@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <immintrin.h>
 
 static bool has(const std::string& s, const char* x) { return s.find(x) != std::string::npos; }
 
@@ -121,19 +122,61 @@ bool Chat::token_text(int id, std::string& out) {
     return false;
 }
 
+// The best M logits (value high to low, then id low to high) after the repetition penalty, in one pass over the
+// vocabulary. The penalty only ever lowers a logit, so the penalized top M are among the raw top M + R, R = the
+// number of distinct recent tokens: only those few get penalized and re-sorted. Same picks as building, penalizing
+// and sorting the whole vocabulary, without touching 2 MB of memory per token.
+static void top_logits(const float* lg, int n, int M, float pen, const std::vector<int>& recent, std::vector<std::pair<float, int>>& out) {
+    std::vector<int> ids;   // distinct recent tokens
+    if (pen != 1.f) for (int id : recent) if (id >= 0 && id < n && std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+    const int W = std::min(n, M + (int)ids.size());
+    auto better = [](const std::pair<float, int>& a, const std::pair<float, int>& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); };
+    std::vector<std::pair<float, int>>& h = out;   // heap with the worst kept candidate on top
+    h.clear(); h.reserve(W + 1);
+    int i = 0;
+    for (; i < n && (int)h.size() < W; i++) { h.push_back({lg[i], i}); std::push_heap(h.begin(), h.end(), better); }
+    float thr = h.empty() ? 0.f : h.front().first;
+    auto take = [&](int j) {   // ids arrive in increasing order, so an equal value is never better than the kept one
+        if (!(lg[j] > thr)) return;
+        std::pop_heap(h.begin(), h.end(), better); h.back() = {lg[j], j}; std::push_heap(h.begin(), h.end(), better);
+        thr = h.front().first;
+    };
+    for (; i < n && (i & 7); i++) take(i);
+    for (; i + 8 <= n; i += 8) {
+        int m = _mm256_movemask_ps(_mm256_cmp_ps(_mm256_loadu_ps(lg + i), _mm256_set1_ps(thr), _CMP_GT_OQ));
+        while (m) { const int b = __builtin_ctz(m); m &= m - 1; take(i + b); }
+    }
+    for (; i < n; i++) take(i);
+    for (auto& c : h)   // the penalty once per appearance, in order, as before
+        if (std::find(ids.begin(), ids.end(), c.second) != ids.end())
+            for (int id : recent) if (id == c.second) c.first = c.first > 0 ? c.first / pen : c.first * pen;
+    std::sort(h.begin(), h.end(), better);
+    if ((int)h.size() > M) h.resize(M);
+}
+
+// Prompt lookup: when the last few tokens already appeared earlier in the conversation, guess that what followed
+// them then follows again (code being edited, quoted text, lists, repeated names). Longest match, most recent first.
+static int lookup_draft(const std::vector<int>& h, int K, std::vector<int>& d) {   // returns the match length (0: none)
+    d.clear();
+    const int n = (int)h.size();
+    for (int N = 4; N >= 2; N--) {
+        if (n < N + 1) continue;
+        const int* tail = h.data() + n - N;
+        for (int p = n - N - 1; p >= 0; p--)
+            if (h[p] == tail[0] && std::equal(tail, tail + N, h.data() + p)) {
+                for (int k = 0; k < K && p + N + k < n; k++) d.push_back(h[p + N + k]);
+                return N;
+            }
+    }
+    return 0;
+}
+
 int Chat::sample(const float* logits, const GenOpts& o, const std::vector<int>& recent) {
-    int n = m_.hp.n_vocab;
-    std::vector<std::pair<float, int>> c(n);
-    for (int i = 0; i < n; i++) c[i] = {logits[i], i};
-    if (o.rep_pen != 1.f)
-        for (int id : recent) if (id >= 0 && id < n) {
-            float& v = c[id].first;
-            v = v > 0 ? v / o.rep_pen : v * o.rep_pen;
-        }
-    if (o.temp <= 0.f) return std::max_element(c.begin(), c.end())->second;
-    int k = std::min(n, std::max(1, o.top_k));
-    std::partial_sort(c.begin(), c.begin() + k, c.end(), [](auto& a, auto& b) { return a.first > b.first; });
-    c.resize(k);
+    const int n = m_.hp.n_vocab;
+    std::vector<std::pair<float, int>> c;
+    if (o.temp <= 0.f) { top_logits(logits, n, 1, o.rep_pen, recent, c); return c.empty() ? 0 : c[0].second; }
+    top_logits(logits, n, std::min(n, std::max(1, o.top_k)), o.rep_pen, recent, c);
+    if (c.empty()) return 0;
     float mx = c[0].first, sum = 0;
     for (auto& p : c) { p.first = std::exp((p.first - mx) / o.temp); sum += p.first; }
     float cum = 0; size_t cut = c.size();
@@ -210,16 +253,13 @@ bool JsonCheck::feed(char c) {
 
 int Chat::sample_json(const float* logits, const GenOpts& o, const std::vector<int>& recent, const JsonCheck& jc) {
     const int n = m_.hp.n_vocab;
-    std::vector<std::pair<float, int>> c(n);
-    for (int i = 0; i < n; i++) c[i] = {logits[i], i};
-    if (o.rep_pen != 1.f)
-        for (int id : recent) if (id >= 0 && id < n) { float& v = c[id].first; v = v > 0 ? v / o.rep_pen : v * o.rep_pen; }
     // look at the most likely tokens first; keep the ones whose text keeps the JSON valid
     const int scan = std::min(n, 4096);
-    std::partial_sort(c.begin(), c.begin() + scan, c.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    std::vector<std::pair<float, int>> c;
+    top_logits(logits, n, scan, o.rep_pen, recent, c);
     std::vector<std::pair<float, int>> ok;
     const int want = o.temp <= 0.f ? 1 : std::max(1, o.top_k);
-    for (int i = 0; i < scan && (int)ok.size() < want; i++) {
+    for (int i = 0; i < (int)c.size() && (int)ok.size() < want; i++) {
         const int id = c[i].second;
         if (m_.tok.is_stop(id)) continue;
         const std::string p = m_.tok.piece(id);
@@ -337,7 +377,8 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     hs_ = {};
     std::string pc;
     auto emit = [&](int id) -> bool {
-        if (token_text(id, pc) || st.gen_tokens >= budget) { pending += pc; done = true; return false; }
+        if (st.gen_tokens >= budget) { done = true; return false; }   // the budget is spent: this token isn't shown (as without drafting)
+        if (token_text(id, pc)) { pending += pc; done = true; return false; }
         pending += pc;
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {
@@ -357,57 +398,100 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     };
     // JSON-constrained stretches (tool calls) need token-by-token control: no drafting then
     JsonCheck jc; bool json_on = false; std::string tail;
-    if (draft_ && draft_->loaded() && o.json_after.empty()) {
-        const int V = m_.hp.n_vocab, DV = draft_->hp.n_vocab;
+    const bool use_draft = draft_ && draft_->loaded(), use_lookup = lookup && !m_.recurrent();   // both may run: each step takes the better guess
+    if ((use_draft || use_lookup) && o.json_after.empty()) {
+        const int V = m_.hp.n_vocab, DV = use_draft ? draft_->hp.n_vocab : V;
         int next = sample(logits, o, recent);   // emitted, not yet in the main model's cache
         if (emit(next)) {
-            // Self-tuning: K follows the recent acceptance rate, and drafting pauses whenever it measures
-            // slower than plain decoding (prose often is; code and repetitive text usually aren't).
-            double acc = 0.6, spec_tps = 0, plain_tps = 0;
-            int plain_left = 0;
+            // Guessing pays when the tokens a check gains outweigh what drafting and the bigger check cost, so all of it is
+            // measured as it goes: a plain step, one drafted token (none for lookup), what each extra token adds to a check,
+            // and how often guesses are right (per source: the draft model, or lookup by match length). Each step takes the
+            // guess length with the best expected tokens per second, or a plain step when none beats it; plain stretches
+            // keep probing now and then, so a change from prose to code (or back) is noticed.
+            double tp = 0, td = 0, beta = 0.1;               // plain step (s), drafted token (s), check cost per extra token (x tp)
+            double an[5] = {1, 1, 1, 1, 1}, ad[5] = {2, 2, 2, 2, 2};   // accepted / drafted, decaying: [0] draft model, [N] lookup match length N
+            int probe = 0;                                    // plain steps since the last check
+            const int Kmax = std::max(1, std::min(7, draft_k + 2));
+            auto rate = [&](double a, int K, double tdk) {   // expected tokens per second of a check of K guesses
+                const double tok = a > 0.999 ? K + 1 : (1 - std::pow(a, K + 1)) / (1 - a);
+                return tok / (K * tdk + tp * (1 + beta * K));
+            };
+            auto best_k = [&](double a, int kmax, double tdk, double& br) {   // 0: a plain step is faster
+                int best = 0; br = 1.02 / std::max(tp, 1e-6);
+                for (int k = 1; k <= kmax; k++) { const double r = rate(a, k, tdk); if (r > br) { br = r; best = k; } }
+                return best;
+            };
             while (!done) {
-                if (plain_left > 0) {   // plain decoding stretch, also measures the baseline speed
-                    double tp = now_sec();
+                if (m_.n_past + Kmax + 2 >= m_.ctx) break;
+                const double ts = now_sec();
+                std::vector<int> hist = cache_; hist.push_back(next);
+                std::vector<int> d;
+                int src = 0, kl = 0, km = 0;
+                double rl = 0, rm = 0;
+                if (tp > 0 && use_lookup) {
+                    const int N = lookup_draft(hist, Kmax, d);
+                    for (size_t k = 0; k < d.size(); k++)   // never guess image slots or stop tokens
+                        if (d[k] < 0 || d[k] >= V || m_.tok.is_stop(d[k])) { d.resize(k); break; }
+                    if (!d.empty()) { src = N; kl = best_k(an[N] / ad[N], (int)d.size(), 0, rl); }
+                }
+                if (tp > 0 && use_draft) {
+                    if (td == 0) td = 0.25 * tp;   // a first guess until it is measured
+                    km = best_k(an[0] / ad[0], Kmax, td, rm);
+                }
+                if (!kl && !km && probe >= 12) { if (!d.empty()) kl = 1; else if (use_draft) km = 1; }   // probe now and then
+                if (kl && (!km || rl >= rm)) d.resize(kl);   // the lookup guess (free)
+                else {
+                    d.clear(); src = 0;
+                    const int K = km;
+                    if (K > 0) {
+                        // bring the draft up to the same history (dcache_ mirrors hist from doff_ on), then let it guess
+                        // K tokens greedily. Far behind (a long new prompt) or out of room, it restarts on the last 512
+                        // tokens: guessing the next few words needs little context, and reading it all would cost more.
+                        if (doff_ >= hist.size()) { doff_ = 0; dcache_.clear(); }   // a shorter conversation than the last one
+                        size_t c = 0;
+                        while (c < dcache_.size() && doff_ + c < hist.size() && dcache_[c] == hist[doff_ + c]) c++;
+                        if (doff_ + c >= hist.size()) c = hist.size() - doff_ - 1;
+                        if (hist.size() - (doff_ + c) > 512 || hist.size() - doff_ + Kmax + 2 >= (size_t)draft_->ctx) {
+                            doff_ = hist.size() > 512 ? hist.size() - 512 : 0; c = 0;
+                        }
+                        draft_->rewind((int)c); dcache_.assign(hist.begin() + doff_, hist.begin() + doff_ + c);
+                        const size_t catchup = hist.size() - doff_ - c;
+                        const float* dl = draft_->eval(hist.data() + doff_ + c, (int)catchup);
+                        if (!dl) break;
+                        dcache_.assign(hist.begin() + doff_, hist.end());
+                        const double tg = now_sec();   // a long catch-up (the draft reading the prompt) is a one-off, not a per-token cost
+                        for (int k = 0; k < K; k++) {
+                            int t = (int)(std::max_element(dl, dl + DV) - dl);
+                            if (t >= V || m_.tok.is_stop(t)) break;
+                            d.push_back(t);
+                            if (k + 1 < K) { dl = draft_->eval(&t, 1); if (!dl) break; dcache_.push_back(t); }
+                        }
+                        td = 0.7 * td + 0.3 * (now_sec() - (catchup <= 8 ? ts : tg)) / K;
+                    }
+                }
+                const double tb = now_sec();
+                if (d.empty()) {   // a plain step (and the measure of one)
                     cache_.push_back(next);
                     const float* lg = m_.eval(&next, 1);
                     if (!lg) { done = true; break; }
                     int id = sample(lg, o, recent);
                     if (!emit(id)) break;
                     next = id;
-                    double r = 1.0 / std::max(1e-4, now_sec() - tp);
-                    plain_tps = plain_tps ? 0.8 * plain_tps + 0.2 * r : r;
-                    plain_left--;
-                    if (m_.n_past + 10 >= m_.ctx) break;
+                    const double t = now_sec() - tb;
+                    tp = tp ? 0.8 * tp + 0.2 * t : t;
+                    probe++;
                     continue;
                 }
-                double ts = now_sec();
-                std::vector<int> hist = cache_; hist.push_back(next);
-                const int K = std::max(2, std::min(draft_k + 2, (int)std::lround(1 + 6 * acc)));
-                if (m_.n_past + K + 2 >= m_.ctx || draft_->n_past + K + 2 >= draft_->ctx) break;
-                // bring the draft up to the same history, then let it guess K tokens greedily
-                size_t c = 0;
-                while (c < dcache_.size() && c < hist.size() && dcache_[c] == hist[c]) c++;
-                if (c == hist.size()) c--;
-                draft_->rewind((int)c); dcache_.assign(hist.begin(), hist.begin() + c);
-                double ta = now_sec();
-                const float* dl = draft_->eval(hist.data() + c, (int)(hist.size() - c));
-                if (!dl) break;
-                dcache_ = hist;
-                std::vector<int> d;
-                for (int k = 0; k < K; k++) {
-                    int t = (int)(std::max_element(dl, dl + DV) - dl);
-                    if (t >= V || m_.tok.is_stop(t)) break;
-                    d.push_back(t);
-                    if (k + 1 < K) { dl = draft_->eval(&t, 1); if (!dl) break; dcache_.push_back(t); }
-                }
+                probe = 0;
                 // the main model scores [next, d...] in one pass
                 std::vector<int> batch(1, next); batch.insert(batch.end(), d.begin(), d.end());
                 const int base = m_.n_past;
-                double tb = now_sec();
                 const float* L = m_.eval_all(batch.data(), (int)batch.size());
                 static double sd = 0, sv = 0; static int steps = 0;
-                sd += tb - ta; sv += now_sec() - tb;
-                if (getenv("ITHACA_SPECPROF") && ++steps % 20 == 0) fprintf(stderr, "[spec] draft %.1f ms, verify %.1f ms per step\n", sd / steps * 1e3, sv / steps * 1e3);
+                sd += tb - ts; sv += now_sec() - tb;
+                if (getenv("ITHACA_SPECPROF") && ++steps % 20 == 0)
+                    fprintf(stderr, "[spec] draft %.1f ms, check %.1f ms per step; plain %.1f ms, drafted token %.1f ms, extra token +%.0f%%, accepted %.0f%% (model) %.0f/%.0f/%.0f%% (lookup 2/3/4)\n",
+                            sd / steps * 1e3, sv / steps * 1e3, tp * 1e3, td * 1e3, beta * 100, 100 * an[0] / ad[0], 100 * an[2] / ad[2], 100 * an[3] / ad[3], 100 * an[4] / ad[4]);
                 if (!L) { done = true; break; }
                 st.drafted += (int)d.size();
                 size_t j = 0; int s = -1;
@@ -422,11 +506,10 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
                 if (done) break;
                 if (!emit(s)) break;
                 next = s;
-                acc = 0.7 * acc + 0.3 * (d.empty() ? 0.0 : (double)std::min(j, d.size()) / d.size());
-                double r = (1 + std::min(j, d.size())) / std::max(1e-4, now_sec() - ts);
-                spec_tps = spec_tps ? 0.7 * spec_tps + 0.3 * r : r;
-                if (plain_tps && spec_tps < plain_tps * 0.97) { plain_left = 24; spec_tps = 0; }   // retry drafting later
-                else if (!plain_tps && st.gen_tokens > 12) plain_left = 8;                         // measure the baseline once
+                an[src] = 0.85 * an[src] + (double)std::min(j, d.size());
+                ad[src] = 0.85 * ad[src] + (double)d.size();
+                const double tv = now_sec() - tb;   // the first check of each size also records its CUDA graph: not a fair sample
+                if (tv < 3 * tp * (1 + d.size())) beta = 0.8 * beta + 0.2 * std::min(1.0, std::max(0.0, (tv / tp - 1) / d.size()));
             }
             if (!done && !(m_.n_past >= m_.ctx)) {   // context nearly full: finish without drafting
                 cache_.push_back(next);

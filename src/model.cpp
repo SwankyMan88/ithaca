@@ -494,6 +494,8 @@ void Model::unload() {
     if (!loaded_ && !g_.base) return;
     for (auto& p : parked_) cuda().host_free(p.host);
     parked_.clear(); parked_bytes_ = 0;
+    if (plog_) { cuda().host_free(plog_); plog_ = nullptr; }
+    if (plogA_) { cuda().host_free(plogA_); plogA_ = nullptr; }
     stop_ = true;
     pre_cv_.notify_all();
     if (tier_th_.joinable()) tier_th_.join();
@@ -670,7 +672,7 @@ bool Model::alloc_dev_buffers() {
         {&dF1_, B * ff}, {&dF2_, B * ff}, {&dT_, B * tmax}, {&dLOG_, (size_t)hp.n_vocab},
         {&dSC_, (size_t)sc_rows_ * hp.n_head * (size_t)ctx}, {&dCS_, B * (size_t)hp.n_rot}, {&dCS2_, B * (size_t)hp.n_rot}, {&dPOS_, 4},
         {&dR_, B * (size_t)std::max(1, hp.n_expert)}, {&dG_, B * d}, {&dIdx_, B * (size_t)std::max(1, hp.n_expert_used)}, {&dWt_, B * (size_t)std::max(1, hp.n_expert_used)},
-        {&dPM_, (size_t)hp.n_head * 16}, {&dPL_, (size_t)hp.n_head * 16}, {&dPO_, (size_t)hp.n_head * 16 * hp.hd}};
+        {&dPM_, (size_t)hp.n_head * 16 * 8}, {&dPL_, (size_t)hp.n_head * 16 * 8}, {&dPO_, (size_t)hp.n_head * 16 * 8 * hp.hd}};   // up to 8 tokens (draft checks)
     if (hp.mla_rank) {
         const size_t nh = hp.n_head;
         struct { uint64_t* p; size_t n; } mb[] = {{&dML1_, B * nh * std::max(hp.mla_nope + hp.n_rot, hp.mla_v)}, {&dML2_, B * (hp.mla_rank + hp.n_rot)}, {&dML3_, B * std::max(hp.mla_rank, hp.mla_qlora)}};
@@ -683,9 +685,9 @@ bool Model::alloc_dev_buffers() {
     }
     if (hp.n_expert > 0) {   // grouped expert matmuls for prompts: every (token, expert) row at once
         const size_t R = B * (size_t)std::max(1, hp.n_expert_used), fe = hp.n_ff_exp;
-        struct { uint64_t* p; size_t n; } moe[] = {{&dMG_, R * d}, {&dMF1_, R * fe}, {&dMF2_, R * fe}, {&dMT_, R * d}, {&dOff_, (size_t)hp.n_expert + 1}, {&dSI_, R}, {&dSW_, R}};
+        struct { uint64_t* p; size_t n; } moe[] = {{&dMG_, R * d}, {&dMF1_, R * fe}, {&dMF2_, R * fe}, {&dMT_, R * d}, {&dOff_, (size_t)hp.n_expert + 1}, {&dSI_, R}, {&dSW_, R}, {&dInv_, R}};
         for (auto& b : moe) { *b.p = cuda().alloc(b.n * 4); if (*b.p) dev_allocs_.push_back(*b.p); }
-        if (!dMG_ || !dMF1_ || !dMF2_ || !dMT_ || !dOff_ || !dSI_ || !dSW_) dMG_ = 0;   // the per-expert loop still works
+        if (!dMG_ || !dMF1_ || !dMF2_ || !dMT_ || !dOff_ || !dSI_ || !dSW_ || !dInv_) dMG_ = 0;   // the per-expert loop still works
     }
     for (auto& b : bufs) {
         *b.p = cuda().alloc(b.n * 4);
@@ -905,19 +907,19 @@ static void expert_slice(const Lin& l, int e, int ne, uint64_t& W, uint64_t& qof
 
 // Mixture-of-experts FFN on the GPU. Routing is read back to the host (one small sync per layer),
 // then each used expert runs on its gathered tokens and scatters the weighted result into x.
-void Model::moe_gpu(Layer& L, int n) {
+void Model::moe_gpu(Layer& L, int n, bool same_x) {
     CudaTier& cu = cuda();
     const int E = hp.n_expert;
     unsigned d = hp.n_embd, ff = hp.n_ff_exp;
-    cu.matmul_dev(L.gate_inp.dptr.load(), L.gate_inp.gqoff, L.gate_inp.gkind, dXN_, n, L.gate_inp.cols, L.gate_inp.rows, dR_);
+    cu.matmul_dev(L.gate_inp.dptr.load(), L.gate_inp.gqoff, L.gate_inp.gkind, dXN_, n, L.gate_inp.cols, L.gate_inp.rows, dR_, same_x && n < 16);
     if (L.d_binp) { unsigned ue = E; cu.ew(CudaTier::BIAS, (unsigned)n * E, {&dR_, &L.d_binp, &ue}); }
     auto act = [&](uint64_t a, uint64_t b, unsigned cnt) { cu.ew(hp.oai ? CudaTier::OAI : hp.gelu ? CudaTier::GELU : CudaTier::SILU, cnt, {&a, &b}); };
     if (n == 1) {
         // Decode: route on the device and run the K experts as slots of one launch each (graph-capturable).
         const int K = std::min(hp.n_expert_used, E);
         cu.topk(dR_, E, K, hp.expert_norm, hp.res_scale * hp.exp_scale, dIdx_, dWt_);
-        cu.matmul_experts(L.gate_exps.dptr.load(), L.gate_exps.gqoff, L.gate_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF1_);
-        cu.matmul_experts(L.up_exps.dptr.load(), L.up_exps.gqoff, L.up_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF2_);
+        cu.matmul_experts(L.gate_exps.dptr.load(), L.gate_exps.gqoff, L.gate_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF1_, true);
+        cu.matmul_experts(L.up_exps.dptr.load(), L.up_exps.gqoff, L.up_exps.gkind, dIdx_, K, dXN_, 1, 0, d, ff, dF2_, true);
         if (L.d_bgate) { cu.ew(CudaTier::XBIAS, K * ff, {&dF1_, &L.d_bgate, &dIdx_, &ff}); cu.ew(CudaTier::XBIAS, K * ff, {&dF2_, &L.d_bup, &dIdx_, &ff}); }
         act(dF1_, dF2_, K * ff);
         cu.matmul_experts(L.down_exps.dptr.load(), L.down_exps.gqoff, L.down_exps.gkind, dIdx_, K, dF1_, K, 1, ff, d, dT_);
@@ -972,7 +974,7 @@ bool Model::moe_grouped(Layer& L, int n) {
             if (need > w16_cap_) { cu.sync(); if (dW16_) cu.free(dW16_); dW16_ = cu.alloc(need); w16_cap_ = dW16_ ? need : 0; }
             if (!dW16_) return false;
         }
-    if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale * hp.exp_scale, dIdx_, dWt_, dOff_, dSI_, dSW_)) return false;
+    if (!cu.moe_route(dR_, n, E, K, hp.expert_norm, hp.res_scale * hp.exp_scale, dIdx_, dWt_, dOff_, dSI_, dSW_, dInv_)) return false;
     auto grouped = [&](const Lin& l, uint64_t x, unsigned K_, unsigned N, uint64_t y, bool same_x) {
         const size_t nb = l.cols / 32, R = l.rows / E;
         if (l.gkind >= CudaTier::K_IQ) {   // a few experts at a time through the Q8_0 scratch (rows come from the absolute offsets)
@@ -998,7 +1000,7 @@ bool Model::moe_grouped(Layer& L, int n) {
     if (!fused) cu.ew(hp.oai ? CudaTier::OAI : hp.gelu ? CudaTier::GELU : CudaTier::SILU, tot * ff, {&dMF1_, &dMF2_});
     if (!grouped(L.down_exps, dMF1_, ff, d, dMT_, fused)) return false;
     if (L.d_bdown) cu.ew(CudaTier::XBIAS, tot * d, {&dMT_, &L.d_bdown, &dIdx_, &d});
-    cu.ew(CudaTier::SCATTER, tot * d, {&dX_, &dMT_, &dSI_, &dSW_, &d});
+    if (!cu.moe_combine(dX_, dMT_, dInv_, dWt_, n, K, d)) cu.ew(CudaTier::SCATTER, tot * d, {&dX_, &dMT_, &dSI_, &dSW_, &d});
     return true;
 }
 
@@ -1154,21 +1156,30 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     static double t_attn = 0, t_all = 0; static int calls = 0;
     const bool fa = (xn_ready_ == &L && xn_n_ == n && xn_past_ == n_past) || (attn8(L) && gx().add_norm_quant(dX_, 0, 0, 0.f, L.d_an, dXN_, n, d, eps));   // xn_ready_: the last layer already did it
     xn_ready_ = nullptr;
+    // Small batches (decode, draft checks) use the dp4a matmuls, whose int8 input CudaTier makes: fused kernels can
+    // make it on the way (norm + quantize, residual add + norm + quantize, ...), and the matmuls then skip their own pass.
+    const bool small = !(n >= 16 && tc_prefill_);
+    bool fq = small && cu_ready_ == &L && cu_n_ == n && cu_past_ == n_past;
+    cu_ready_ = nullptr;
     if (hp.no_prenorm) cu.dtod(dXN_, dX_, (size_t)n * d * 4);
-    else if (!fa) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
-    if (L.dnet) dnet_gpu(L, n, fa);
+    else if (!fa && !fq) {
+        if (small && cu.norm_quant(dX_, 0, 0, 0.f, L.d_an, dXN_, n, d, eps)) fq = true;
+        else cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_an, &dXN_, &d, &eps});
+    }
+    const bool fx = fa || fq;   // dXN_'s int8 copy is ready for the first matmul
+    if (L.dnet) dnet_gpu(L, n, fx);
     else if (L.sconv) {
         unsigned d3 = 3 * d;
-        mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, fa);
+        mmq(L.ssm_in.dptr.load(), L.ssm_in.gqoff, L.ssm_in.gkind, dXN_, n, L.ssm_in.cols, L.ssm_in.rows, dZX_, fx);
         cu.launch(CudaTier::SCONV, (d + 255) / 256, 1, 256, {&dZX_, &L.d_convw, &L.d_convst, &dSY_, &un, &d});
         mmq(L.ssm_out.dptr.load(), L.ssm_out.gqoff, L.ssm_out.gkind, dSY_, n, L.ssm_out.cols, L.ssm_out.rows, dT_);
         (void)d3;
     }
-    else if (L.ssm_in.t) mamba_gpu(L, n, fa);
+    else if (L.ssm_in.t) mamba_gpu(L, n, fx);
     else {
-    if (L.kva.t) mla_gpu(L, n, fa);
+    if (L.kva.t) mla_gpu(L, n, fx);
     else if (L.qkv.t) {
-        mm(L.qkv, dXN_, dT_, fa);
+        mm(L.qkv, dXN_, dT_, fx);
         unsigned W = qd + 2 * kvd;
         uint64_t sk = dT_ + qd * 4ull, sv = dT_ + (qd + kvd) * 4ull;
         cu.ew(CudaTier::COPY2D, un * qd, {&dT_, &W, &dQ_, &qd, &qd});
@@ -1177,41 +1188,62 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     } else {
         if (L.qgate) {   // per head [q | gate]: q to dQ_, the gate stays in dT_ for the output
             unsigned W2 = 2 * hd, nhq = un * nh;
-            mm(L.q, dXN_, dT_, fa); cu.ew(CudaTier::COPY2D, nhq * hd, {&dT_, &W2, &dQ_, &hd, &hd});
-        } else mm(L.q, dXN_, dQ_, fa);
-        mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
+            mm(L.q, dXN_, dT_, fx); cu.ew(CudaTier::COPY2D, nhq * hd, {&dT_, &W2, &dQ_, &hd, &hd});
+            mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true);
+        } else {
+            // decode: q, k and v (or q and k when v is another quant type) in one launch
+            bool done = false;
+            if (n == 1 && small && L.q.gkind == L.k.gkind && L.q.gkind < CudaTier::N_KINDS) {
+                const uint64_t W[3] = {L.q.dptr.load(), L.k.dptr.load(), L.v.dptr.load()}, qo[3] = {L.q.gqoff, L.k.gqoff, L.v.gqoff}, Y[3] = {dQ_, dK_, dV_};
+                const int rows[3] = {L.q.rows, L.k.rows, L.v.rows};
+                if (L.v.gkind == L.q.gkind) done = cu.matmul_multi(L.q.gkind, 3, W, qo, rows, Y, dXN_, L.q.cols, fx);
+                else if (cu.matmul_multi(L.q.gkind, 2, W, qo, rows, Y, dXN_, L.q.cols, fx)) { mm(L.v, dXN_, dV_, true); done = true; }
+            }
+            if (!done) { mm(L.q, dXN_, dQ_, fx); mm(L.k, dXN_, dK_, true); mm(L.v, dXN_, dV_, true); }
+        }
     }
-    if (L.d_bq) cu.ew(CudaTier::BIAS, un * qd, {&dQ_, &L.d_bq, &qd});
-    if (L.d_bk) cu.ew(CudaTier::BIAS, un * kvd, {&dK_, &L.d_bk, &kvd});
-    if (L.d_bv) cu.ew(CudaTier::BIAS, un * kvd, {&dV_, &L.d_bv, &kvd});
-    if (L.d_qn) { const bool w = (int)L.q_norm.size() == (int)qd; cu.launch(CudaTier::RMSNORM, w ? un : un * nh, 1, 256, {&dQ_, &L.d_qn, &dQ_, w ? &qd : &hd, &eps}); }
-    if (L.d_kn) { const bool w = (int)L.k_norm.size() == (int)kvd; cu.launch(CudaTier::RMSNORM, w ? un : un * nkv, 1, 256, {&dK_, &L.d_kn, &dK_, w ? &kvd : &hd, &eps}); }
     uint64_t cs = L.swa ? dCS2_ : dCS_;
     unsigned win = L.swa ? (unsigned)hp.swa_window : 0;
-    if (!L.nope) {
-        cu.launch(CudaTier::ROPE, un, 1, 256, {&dQ_, &cs, &nh, &hd, &half, &neox, &qd});
-        cu.launch(CudaTier::ROPE, un, 1, 256, {&dK_, &cs, &nkv, &hd, &half, &neox, &kvd});
+    const bool qn_head = !L.d_qn || (int)L.q_norm.size() == (int)hd, kn_head = !L.d_kn || (int)L.k_norm.size() == (int)hd;
+    if (!(!L.kva.t && qn_head && kn_head &&
+          cu.qk_post(dQ_, dK_, dV_, L.d_bq, L.d_bk, L.d_bv, L.d_qn, L.d_kn, cs, L.d_kc, L.d_vc, kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0, dPOS_,
+                     n, nh, nkv, hd, half, neox != 0, !L.nope, eps))) {
+        if (L.d_bq) cu.ew(CudaTier::BIAS, un * qd, {&dQ_, &L.d_bq, &qd});
+        if (L.d_bk) cu.ew(CudaTier::BIAS, un * kvd, {&dK_, &L.d_bk, &kvd});
+        if (L.d_bv) cu.ew(CudaTier::BIAS, un * kvd, {&dV_, &L.d_bv, &kvd});
+        if (L.d_qn) { const bool w = (int)L.q_norm.size() == (int)qd; cu.launch(CudaTier::RMSNORM, w ? un : un * nh, 1, 256, {&dQ_, &L.d_qn, &dQ_, w ? &qd : &hd, &eps}); }
+        if (L.d_kn) { const bool w = (int)L.k_norm.size() == (int)kvd; cu.launch(CudaTier::RMSNORM, w ? un : un * nkv, 1, 256, {&dK_, &L.d_kn, &dK_, w ? &kvd : &hd, &eps}); }
+        if (!L.nope) {
+            cu.launch(CudaTier::ROPE, un, 1, 256, {&dQ_, &cs, &nh, &hd, &half, &neox, &qd});
+            cu.launch(CudaTier::ROPE, un, 1, 256, {&dK_, &cs, &nkv, &hd, &half, &neox, &kvd});
+        }
+        if (kvq8_) {
+            cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dK_, &L.d_kc, &L.d_ks, &dPOS_, &hd, &nkv});
+            cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dV_, &L.d_vc, &L.d_vs, &dPOS_, &hd, &nkv});
+        } else {
+            cu.ew(CudaTier::KVSTORE, un * kvd, {&dK_, &L.d_kc, &dPOS_, &kvd});
+            cu.ew(CudaTier::KVSTORE, un * kvd, {&dV_, &L.d_vc, &dPOS_, &kvd});
+        }
     }
-    if (kvq8_) {
-        cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dK_, &L.d_kc, &L.d_ks, &dPOS_, &hd, &nkv});
-        cu.launch(CudaTier::KVSTORE_Q8, un * nkv, 1, 32, {&dV_, &L.d_vc, &L.d_vs, &dPOS_, &hd, &nkv});
-    } else {
-        cu.ew(CudaTier::KVSTORE, un * kvd, {&dK_, &L.d_kc, &dPOS_, &kvd});
-        cu.ew(CudaTier::KVSTORE, un * kvd, {&dV_, &L.d_vc, &dPOS_, &kvd});
-    }
-    // Decode splits each head's keys over 16 CTAs (flash-decoding) so long chats keep the GPU busy.
-    unsigned spl = n == 1 ? 16 : 1;
+    // Decode and draft checks (up to 8 tokens) split each head's keys over 16 CTAs (flash-decoding), so long chats
+    // keep the GPU busy; one CTA reads a kv head's cache once for all its query heads.
+    const bool gq = n <= 8 && f_gqa_ && !nc && !(n > 1 && tc_prefill_ && n >= 16);
+    unsigned spl = gq ? 16 : 1;
     double Ta = ppn ? (cu.sync(), now_sec()) : 0;
     // Prompts: tensor-core flash attention straight from the KV cache. Decode: one CTA per kv head reads the
     // cache once for all query heads sharing it (GQA), split over 16 key ranges; else the per-head kernel.
-    if (n == 1 && f_gqa_) {
+    if (gq) {
         void* a[] = {&dQ_, &L.d_kc, &L.d_vc, &dPM_, &dPL_, &dPO_, &hd, &kvd, &grp, &dPOS_, &scale, &spl, &win, &L.d_ks, &L.d_vs, &nkv, &L.d_sinks, &hp.attn_softcap};
-        cu.launch_raw(f_gqa_, nkv, spl, 1, 256, 0, a);
+        cu.launch_raw(f_gqa_, nkv, spl, un, 256, 0, a);
     }
     else if (!(n > 1 && tc_prefill_ && gx().attn_prefill(dQ_, L.d_kc, L.d_vc, dATT_, n, n_past, qd, kvd, nh, grp, hd, scale, win, nc,
                                                         kvq8_ ? L.d_ks : 0, kvq8_ ? L.d_vs : 0, L.d_sinks, hp.attn_softcap)))
         cu.launch(CudaTier::ATTN, nh, un * spl, 256, {&dQ_, &L.d_kc, &L.d_vc, &dATT_, &dSC_, &nh, &hd, &kvd, &grp, &dPOS_, &ctxu, &scale, &spl, &dPM_, &dPL_, &dPO_, &win, &nc});
-    if (spl > 1) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
+    bool cq = false;   // dATT_'s int8 copy made by the combine step
+    if (spl > 1) {
+        cq = small && !L.qgate && !L.kva.t && cu.attn_comb_q(dPM_, dPL_, dPO_, dATT_, nh, hd, spl, n);
+        if (!cq) cu.launch(CudaTier::ATTN_COMB, nh, un, std::max(32u, (hd + 31) / 32 * 32), {&dPM_, &dPL_, &dPO_, &dATT_, &nh, &hd, &spl});
+    }
     if (ppn) { cu.sync(); t_attn += now_sec() - Ta; }
     if (L.qgate) { unsigned W2 = 2 * hd; uint64_t g = dT_ + (uint64_t)hd * 4; cu.ew(CudaTier::SIGMUL, un * qd, {&dATT_, &g, &hd, &W2}); }
     if (L.kva.t) {   // MLA: the first value_length of each padded head
@@ -1219,7 +1251,7 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
         cu.ew(CudaTier::COPY2D, nhv * vd, {&dATT_, &hd, &dML1_, &vd, &vd});
         mm(L.o, dML1_, dT_);
     } else
-    mm(L.o, dATT_, dT_);
+    mm(L.o, dATT_, dT_, cq);
     if (L.d_bo) cu.ew(CudaTier::BIAS, un * d, {&dT_, &L.d_bo, &d});
     }
     if (ppn && ++calls % 64 == 0) fprintf(stderr, "[prefill] attention %.0f ms, matmuls %.0f ms of %.0f ms layer time\n", t_attn * 1e3, t_mm * 1e3, t_all * 1e3);
@@ -1227,28 +1259,36 @@ void Model::gpu_layer(Layer& L, int n, unsigned nc) {
     // MoE: the experts gather their own tokens, so only the add + norm are saved (the int8 copy goes unused)
     const bool ff8 = !hp.no_prenorm && (L.gate_exps.t ? n >= 16 && tc_prefill_ : L.gateup.t ? int8(L.gateup) : int8(L.gate) && int8(L.up));
     const bool fb = ff8 && gx().add_norm_quant(dX_, dT_, L.d_pan, res, L.d_fn, dXN_, n, d, eps);
-    if (!fb) {
+    bool fbq = false;   // decode: residual add + ffn norm + int8 copy in one kernel
+    if (!fb && !hp.no_prenorm && small) fbq = cu.norm_quant(dX_, dT_, L.d_pan, res, L.d_fn, dXN_, n, d, eps);
+    if (!fb && !fbq) {
         if (L.d_pan) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pan, &dT_, &d, &eps});
         cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
         if (hp.no_prenorm) cu.dtod(dXN_, dX_, (size_t)n * d * 4);
         else cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &L.d_fn, &dXN_, &d, &eps});
     }
+    const bool fy = fb || fbq;
     if (L.gate.t) ff = L.gate.rows; else if (L.gateup.t) ff = L.gateup.rows / 2;
     if (L.gate_exps.t) {
         if (L.shexp) {   // shared experts: dense SwiGLU on every token, (gated and) added, then the routed experts
-            mm(L.gate, dXN_, dF1_, fb); mm(L.up, dXN_, dF2_, true);
+            mm(L.gate, dXN_, dF1_, fy); mm(L.up, dXN_, dF2_, true);
             if (n >= 16 && tc_prefill_ && gx().can_mmq(L.down.gkind) && gx().act_quantize(dF1_, dF2_, n, ff, false)) mm(L.down, dF1_, dT_, true);
             else { cu.ew(CudaTier::SILU, un * ff, {&dF1_, &dF2_}); mm(L.down, dF1_, dT_); }
             if (L.d_shg) cu.launch(CudaTier::GADD, un, 1, 256, {&dX_, &dT_, &dXN_, &L.d_shg, &d, &res});
             else cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
         }
-        moe_gpu(L, n); return;
+        moe_gpu(L, n, fy); return;
     }
     if (L.gateup.t) {
-        mm(L.gateup, dXN_, dT_, fb);
+        mm(L.gateup, dXN_, dT_, fy);
         cu.ew(CudaTier::SILU_SPLIT, un * ff, {&dT_, &dF1_, &ff});
     } else {
-        mm(L.gate, dXN_, dF1_, fb); mm(L.up, dXN_, dF2_, true);
+        // decode: gate, up, the activation and the down projection's int8 input in one launch
+        if (n == 1 && small && L.gate.gkind == L.up.gkind && L.gate.gkind < CudaTier::N_KINDS && L.gate.cols == L.up.cols &&
+            cu.matmul_glu(L.gate.gkind, L.gate.dptr.load(), L.gate.gqoff, L.up.dptr.load(), L.up.gqoff, dXN_, L.gate.cols, (int)ff, dF1_, hp.gelu, fy)) {
+            mm(L.down, dF1_, dT_, true); goto ffn_done;
+        }
+        mm(L.gate, dXN_, dF1_, fy); mm(L.up, dXN_, dF2_, true);
         // prompts: the activation goes straight into the down projection's int8 input (dF1_ itself is not written)
         if (n >= 16 && tc_prefill_ && gx().can_mmq(L.down.gkind) && gx().act_quantize(dF1_, dF2_, n, ff, hp.gelu)) { mm(L.down, dF1_, dT_, true); goto ffn_done; }
         cu.ew(hp.gelu ? CudaTier::GELU : CudaTier::SILU, un * ff, {&dF1_, &dF2_});
@@ -1259,6 +1299,10 @@ ffn_done:
         const size_t li = &L - layers_.data();
         Layer* nx = li + 1 < layers_.size() ? &layers_[li + 1] : nullptr;
         if (nx && nx->state == TIER_GPU && nx->d_an && attn8(*nx) && gx().add_norm_quant(dX_, dT_, L.d_pfn, res, nx->d_an, dXN_, n, d, eps)) { xn_ready_ = nx; xn_n_ = n; xn_past_ = n_past; return; }
+        if (small && !hp.no_prenorm) {
+            if (nx && nx->state == TIER_GPU && nx->d_an && cu.norm_quant(dX_, dT_, L.d_pfn, res, nx->d_an, dXN_, n, d, eps)) { cu_ready_ = nx; cu_n_ = n; cu_past_ = n_past; return; }
+            if (!nx && head_fuse_ && d_onorm_ && cu.norm_quant(dX_, dT_, L.d_pfn, res, d_onorm_, dXN_, n, d, eps)) { head_done_ = true; return; }
+        }
     }
     if (L.d_pfn) cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dT_, &L.d_pfn, &dT_, &d, &eps});
     cu.ew(CudaTier::ADD, un * d, {&dX_, &dT_, &res});
@@ -1346,20 +1390,26 @@ const float* Model::eval(const int* toks, int n_all) {
             if (!cs2_.empty()) cu.htod_async(dCS2_, cs2_.data(), cs2_.size() * 4);
             cu.htod_async(dPOS_, &p, 4);
             if (!graph_ && cu.begin_capture()) {
+                head_fuse_ = true; head_done_ = false;
                 for (auto& L : layers_) gpu_layer(L, 1);
+                head_fuse_ = false;
                 unsigned ud = d; float eps = hp.eps;
-                cu.launch(CudaTier::RMSNORM, 1, 1, 256, {&dX_, &d_onorm_, &dXN_, &ud, &eps});
-                cu.matmul_dev(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, 1, out_.cols, out_.rows, dLOG_);
+                if (!head_done_ && !cu.norm_quant(dX_, 0, 0, 0.f, d_onorm_, dXN_, 1, d, eps)) cu.launch(CudaTier::RMSNORM, 1, 1, 256, {&dX_, &d_onorm_, &dXN_, &ud, &eps});
+                head_done_ = false;
+                cu.matmul_dev(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, 1, out_.cols, out_.rows, dLOG_, true);
                 graph_ = cu.end_capture();
                 if (!graph_) fprintf(stderr, "[gpu] graph capture failed, using direct launches\n");
             }
             if (graph_) {
                 cu.graph_launch(graph_);
-                cu.dtoh(logits_.data(), dLOG_, (size_t)hp.n_vocab * 4);
-                post_logits(logits_.data(), logits_.size());
+                // page-locked logits: the copy runs at full PCIe speed, with no staging copy in the driver
+                if (!plog_) plog_ = (float*)cu.host_alloc((size_t)hp.n_vocab * 4);
+                float* lo = plog_ ? plog_ : logits_.data();
+                cu.dtoh(lo, dLOG_, (size_t)hp.n_vocab * 4);
+                post_logits(lo, (size_t)hp.n_vocab);
                 for (auto& L : layers_) L.kv_dev = n_past + 1;
                 n_past += 1;
-                return logits_.data();
+                return lo;
             }
         }
     }
@@ -1445,17 +1495,18 @@ const float* Model::eval(const int* toks, int n_all) {
                         cu.htod_async(M.d_vc + (uint64_t)M.kv_dev * kvdz * 2, &vc_[off], cnt);
                     }
                 };
-                if (n == 1 && !nc && !migrating_) {
-                    // Decode: replay a cached CUDA graph for this whole run of VRAM layers.
+                // Decode and draft checks (2-8 tokens, dense models: no host round trips inside a layer): replay a cached
+                // CUDA graph for this whole run of VRAM layers, one per batch size.
+                if ((n == 1 || (n <= 8 && hp.n_expert == 0 && !recurrent_)) && !nc && !migrating_) {
                     int e = li;
                     while (e < hp.n_layer && on_gpu[e]) kv_sync(e++);
-                    void*& g = seg_graphs_[li * 4096 + e];
+                    void*& g = seg_graphs_[(n << 24) + li * 4096 + e];
                     if (!g && cu.begin_capture()) {
-                        for (int k = li; k < e; k++) gpu_layer(layers_[k], 1);
+                        for (int k = li; k < e; k++) gpu_layer(layers_[k], n);
                         g = cu.end_capture();
                     }
                     if (g && cu.graph_launch(g)) {
-                        for (int k = li; k < e; k++) layers_[k].kv_dev = n_past + 1;
+                        for (int k = li; k < e; k++) layers_[k].kv_dev = n_past + n;
                         li = e - 1;
                         continue;
                     }
@@ -1589,11 +1640,15 @@ const float* Model::eval(const int* toks, int n_all) {
                 unsigned un = n;
                 cu.launch(CudaTier::RMSNORM, un, 1, 256, {&dX_, &d_onorm_, &dXN_, &ud, &eps});
                 mmq(out_.dptr.load(), out_.gqoff, out_.gkind, dXN_, n, out_.cols, out_.rows, dLOGA_);
-                logits_.resize((size_t)n * hp.n_vocab);
-                cu.dtoh(logits_.data(), dLOGA_, logits_.size() * 4);
-                post_logits(logits_.data(), logits_.size());
+                // page-locked rows for draft checks (up to 8): the copy runs at full PCIe speed
+                const size_t cnt = (size_t)n * hp.n_vocab;
+                if (n <= 8 && !plogA_) plogA_ = (float*)cu.host_alloc((size_t)8 * hp.n_vocab * 4);
+                float* lo = n <= 8 && plogA_ ? plogA_ : (logits_.resize(cnt), logits_.data());
+                cu.dtoh(lo, dLOGA_, cnt * 4);
+                post_logits(lo, cnt);
                 n_past += n;
                 if (evp) { g_ev[1] += now_sec() - evh; g_ev[2] += now_sec() - ev0; }
+                if (c0 + n >= n_all) return lo;
                 continue;
             }
             uint64_t last = dX_ + (uint64_t)(n - 1) * d * 4;

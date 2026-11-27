@@ -1127,8 +1127,7 @@ async function compactChat(auto){
 
 /* ---------- status / tier ring ---------- */
 function drawSpec(){const e=$('specState');if(!e)return;const d=status.draft||'off';
-  e.textContent=d.startsWith('on: ')?'Draft model in use: '+d.slice(4):d=='off'?'Off.':d.charAt(0).toUpperCase()+d.slice(1)+'.';
-  if(d.startsWith('no matching'))e.textContent+=' Download a small model from the same family (for example Qwen3 0.6B for Qwen3 models) to enable it.'}
+  e.textContent=d.startsWith('on: ')?'Draft model in use: '+d.slice(4):d=='off'?'Off.':d=='lookup'?'On: guessing from text already in the conversation (no small model from this family found). A small model from the same family, like Qwen3 0.6B for Qwen3 models, can speed up more kinds of replies.':d.charAt(0).toUpperCase()+d.slice(1)+'.'}
 // The pill in the top bar: what the GPU is doing right now, on every page. Click: go to that job.
 function drawActivity(){const b=$('gact'),t=$('gactText');if(!b)return;const m=status.media||{},task=status.task||'';let txt='Idle',cls='',go=null;
   if(task.startsWith('load:')){txt='Loading '+task.slice(5).replace(/\.gguf$/i,'')+'…';cls='load'}
@@ -1186,7 +1185,7 @@ model:()=>`<h2>Model &amp; hardware</h2><p class="sub">Pick a model and how Itha
  <div class="field"><label>VRAM budget (MB)</label><input id="mVram" type="number" value="${status.opts?status.opts.vram_mb:-1}"><small>-1 = auto (leaves ~768 MB free), 0 = CPU only</small></div>
  <div class="field"><label>RAM budget (MB)</label><input id="mRam" type="number" value="${status.opts?status.opts.ram_mb:-1}"><small>-1 = auto (leaves ~2.5 GB free)</small></div></div>
  <button class="btn pri" id="mLoad">Load model</button> <span id="mMsg" style="margin-left:10px;color:var(--dim);font-size:13px"></span>
- <div style="margin-top:18px">${sw('spec_decode','Faster replies (speculative decoding)','A small model with the same vocabulary drafts a few words at a time and the main model checks them in one pass. Answers stay the same; code and structured text often come out 30–60% faster. Ithaca picks the small model by itself and pauses it when it doesn\'t help.')}
+ <div style="margin-top:18px">${sw('spec_decode','Faster replies (speculative decoding)','A small model with the same vocabulary drafts a few words at a time and the main model checks them in one pass. Without one, Ithaca guesses from text already in the conversation (code being edited, quotes, lists). Answers stay the same; code and structured text often come out 30–60% faster. Ithaca picks the small model by itself and pauses drafting when it doesn\'t help.')}
  <p class="sub" id="specState" style="margin-top:8px"></p></div>`,
 privacy:()=>`<h2>Privacy</h2><p class="sub">Everything you make here (chats, coding chats, runs, memories, settings, voices, images, videos and clips) stays on the PC running Ithaca, encrypted with this device's own key. Other devices can't read it, and neither can anyone who copies the files.</p><div id="privPane" class="sub">Reading…</div>`,
 memory:()=>`<h2>Memory</h2><p class="sub">What Ithaca remembers across all chats. The model saves, updates, searches and forgets memories by itself while memory is on. Pinned memories are always shown to the model; with more than 40 memories, it sees the pinned ones plus those relevant to your message and can search the rest.</p>

@@ -38,9 +38,10 @@ public:
     double image_ms = 0;
     // Speculative decoding: a small model with the same tokenizer drafts tokens, the main model checks them
     // in one batch. Every emitted token is still sampled from the main model, so output quality is unchanged.
-    void set_draft(Model* d) { draft_ = d; dcache_.clear(); }
+    void set_draft(Model* d) { draft_ = d; dcache_.clear(); doff_ = 0; }
     Model* draft() const { return draft_; }
     int draft_k = 5;
+    bool lookup = false;   // without a draft model: guess from text already in the conversation (same switch)
 private:
     int sample(const float* logits, const GenOpts& o, const std::vector<int>& recent);
     // sample() limited to tokens whose text keeps jc valid (-1: none of the likely tokens does)
@@ -53,7 +54,8 @@ private:
     Model& m_;
     Vision* vis_;
     Model* draft_ = nullptr;
-    std::vector<int> dcache_;   // tokens in the draft model's KV cache
+    std::vector<int> dcache_;   // tokens in the draft model's KV cache: the conversation from token doff_ on
+    size_t doff_ = 0;
     std::unordered_map<size_t, int> img_rows_;   // image hash -> first row in m_.ext_embd
     std::vector<int> cache_;  // tokens currently in the KV cache
     std::mt19937 rng_;

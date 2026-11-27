@@ -172,7 +172,9 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
          " ld.param.u32 %r1,[pHD]; ld.param.u32 %r2,[pKVD]; ld.param.u64 %rd7,[pPOS]; ld.param.f32 %f1,[pSCALE];\n"
          " ld.param.u32 %r4,[pSPL]; ld.param.u32 %r5,[pWIN]; ld.param.u64 %rd24,[pKs]; ld.param.u64 %rd25,[pVs]; ld.param.u32 %r50,[pNKV];\n"
          " mov.u32 %r6,%ctaid.x; mov.u32 %r7,%ctaid.y; mov.u32 %r8,%tid.x; shr.u32 %r9,%r8,5; and.b32 %r10,%r8,31;\n"
-         " ld.global.u32 %r11,[%rd7]; add.u32 %r11,%r11,1;\n"
+         " mov.u32 %r54,%ctaid.z; ld.global.u32 %r11,[%rd7]; add.u32 %r11,%r11,%r54; add.u32 %r11,%r11,1;\n";   // z: token of a small batch (draft checks)
+    L(" mul.lo.u32 %%r55,%%r50,%d; mul.lo.u32 %%r55,%%r55,%%r1; mul.lo.u32 %%r55,%%r55,%%r54; mul.wide.u32 %%rd31,%%r55,4; add.u64 %%rd1,%%rd1,%%rd31;", G);   // its q row
+    s += ""
          " mov.u32 %r12,0; setp.ne.u32 %p1,%r5,0; @%p1 setp.gt.u32 %p1,%r11,%r5; @%p1 sub.u32 %r12,%r11,%r5;\n"
          " sub.u32 %r13,%r11,%r12; add.u32 %r13,%r13,%r4; sub.u32 %r13,%r13,1; div.u32 %r13,%r13,%r4;\n"
          " mad.lo.u32 %r14,%r7,%r13,%r12; add.u32 %r15,%r14,%r13; min.u32 %r15,%r15,%r11;\n"
@@ -235,7 +237,8 @@ std::string gen_attn_gqa(int G, int NT, bool q8) {
         s += " sub.f32 %f11,%f8,%f7; ex2.approx.f32 %f11,%f11; add.u64 %rd21,%rd14,%rd19; ld.shared.f32 %f12,[%rd21]; fma.rn.f32 %f9,%f12,%f11,%f9;\n";
         L(" mov.u32 %%r41,%d; add.u32 %%r41,%%r41,%%r38; mad.lo.u32 %%r41,%%r41,%%r1,%%r39; mul.wide.u32 %%rd22,%%r41,4; add.u64 %%rd22,%%rd12,%%rd22; ld.shared.f32 %%f13,[%%rd22]; fma.rn.f32 %%f10,%%f13,%%f11,%%f10;", w * G);
     }
-    s += " add.u32 %r42,%r16,%r38; mad.lo.u32 %r43,%r42,%r4,%r7;\n"
+    L(" add.u32 %%r42,%%r16,%%r38; mul.lo.u32 %%r55,%%r50,%d; mad.lo.u32 %%r42,%%r54,%%r55,%%r42;", G);   // (token, head)
+    s += " mad.lo.u32 %r43,%r42,%r4,%r7;\n"
          " mad.lo.u32 %r44,%r43,%r1,%r39; mul.wide.u32 %rd23,%r44,4; add.u64 %rd23,%rd6,%rd23; st.global.f32 [%rd23],%f10;\n"
          " setp.ne.u32 %p6,%r39,0; @%p6 bra NX;\n"
          " mul.f32 %f14,%f7,0f3F317218; mul.wide.u32 %rd23,%r43,4; add.u64 %rd8,%rd4,%rd23; st.global.f32 [%rd8],%f14; add.u64 %rd9,%rd5,%rd23; st.global.f32 [%rd9],%f9;\n"
@@ -1213,8 +1216,8 @@ std::string gpu_ops_ptx() {
          " mad.lo.u32 %r17,%r6,%r3,%r10; mul.wide.u32 %rd5,%r17,8; add.u64 %rd5,%rd2,%rd5;\n"
          " ld.global.f32 %f1,[%rd5]; ld.global.f32 %f2,[%rd5+4];\n"
          " ld.global.f32 %f3,[%rd3]; ld.global.f32 %f4,[%rd4];\n"
-         " mul.f32 %f5,%f3,%f1; mul.f32 %f6,%f4,%f2; sub.f32 %f5,%f5,%f6;\n"
-         " mul.f32 %f7,%f3,%f2; fma.rn.f32 %f7,%f4,%f1,%f7;\n"
+         " mul.rn.f32 %f5,%f3,%f1; mul.rn.f32 %f6,%f4,%f2; sub.rn.f32 %f5,%f5,%f6;\n"
+         " mul.rn.f32 %f7,%f3,%f2; fma.rn.f32 %f7,%f4,%f1,%f7;\n"
          " st.global.f32 [%rd3],%f5; st.global.f32 [%rd4],%f7;\n"
          " mov.u32 %r18,%ntid.x; add.u32 %r7,%r7,%r18; bra L1;\n"
          "DONE:\n ret;\n}\n";

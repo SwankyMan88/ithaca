@@ -122,7 +122,7 @@ private:
     void rope(float* x, int nheads, int pos, bool swa = false);
     void matmul_raw(int type, const uint8_t* base, int rows, int cols, const float* X, int n, float* Y);
     void moe_cpu(Layer& L, int n);
-    void moe_gpu(Layer& L, int n);
+    void moe_gpu(Layer& L, int n, bool same_x = false);
     void route(const float* logits, int n, std::vector<std::vector<std::pair<int, float>>>& per_expert);
     void ensure_buffers(int n);
     bool alloc_dev_buffers();
@@ -133,6 +133,8 @@ private:
     void dnet_gpu(Layer& L, int n, bool same_x);   // LFM2 short convolution: xn_ -> tmp_
     void post_logits(float* v, size_t n) const;   // logit scale and final soft-cap
     bool recurrent_ = false;   // has state layers: the cache can only grow, a rewind restarts from zero
+    Layer* cu_ready_ = nullptr; int cu_n_ = 0, cu_past_ = -1;   // decode: this layer's input norm + int8 copy were made by the layer before
+    bool head_fuse_ = false, head_done_ = false;               // the last layer's tail also makes the output norm + its int8 copy
     Layer* xn_ready_ = nullptr; int xn_n_ = 0, xn_past_ = -1;   // prompts: this layer's input norm + int8 input were made by the layer before
     bool ensure_kv(int need);
     void* f_gqa_ = nullptr;
@@ -187,6 +189,7 @@ private:
 
     int bufn_ = 0;
     std::vector<float> x_, xn_, q_, k_, v_, att_, ff1_, ff2_, tmp_, logits_, qg_;
+    float* plog_ = nullptr, * plogA_ = nullptr;   // page-locked logits: graph decodes, draft checks
     std::vector<BQ8> qbuf_;
     std::vector<std::vector<float>> scratch_;
 
@@ -206,7 +209,7 @@ private:
     uint64_t dZX_ = 0, dXC_ = 0, dSY_ = 0;   // Mamba-2 prompts: in-projection, conv output, scan output
     void mamba_gpu(Layer& L, int n, bool same_x);
     bool ssm_gpu_ok() const { return hp.ssm_conv == 4 && hp.ssm_state >= 32 && 256 % hp.ssm_state == 0 && hp.ssm_heads && hp.ssm_inner % (256 / hp.ssm_state) == 0; }
-    uint64_t dMG_ = 0, dMF1_ = 0, dMF2_ = 0, dMT_ = 0, dOff_ = 0, dSI_ = 0, dSW_ = 0;   // MoE prompts: all routed rows, grouped by expert
+    uint64_t dMG_ = 0, dMF1_ = 0, dMF2_ = 0, dMT_ = 0, dOff_ = 0, dSI_ = 0, dSW_ = 0, dInv_ = 0;   // MoE prompts: all routed rows, grouped by expert
     uint64_t dPM_ = 0, dPL_ = 0, dPO_ = 0, dPOS_ = 0, dX_ = 0, dXN_ = 0, dQ_ = 0, dK_ = 0, dV_ = 0, dATT_ = 0, dF1_ = 0, dF2_ = 0, dT_ = 0, dLOG_ = 0, dSC_ = 0, dCS_ = 0, d_onorm_ = 0;
     std::vector<uint64_t> dev_allocs_;
     std::vector<float> cs_, cs2_;

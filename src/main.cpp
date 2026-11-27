@@ -294,15 +294,16 @@ static std::vector<std::wstring> find_drafts() {
 }
 static void start_draft(bool force = false) {   // force: the user just switched it on
     const int gen = ++g_load_gen;
-    if (!force && !spec_enabled()) { set_draft_state("off"); return; }
-    if (g_model.recurrent()) { set_draft_state("not available: this model's state layers can't undo rejected guesses"); return; }
+    if (!force && !spec_enabled()) { g_chat.lookup = false; set_draft_state("off"); return; }
+    if (g_model.recurrent()) { g_chat.lookup = false; set_draft_state("not available: this model's state layers can't undo rejected guesses"); return; }
+    g_chat.lookup = true;   // until a draft model is attached: guesses from the conversation itself
     set_draft_state("looking for a draft model");
     std::thread([gen] {
         while (g_model.migrating() && gen == g_load_gen) Sleep(50);
         std::lock_guard<std::mutex> l(g_gen);
         if (gen != g_load_gen || !g_model.loaded()) return;
         std::vector<std::wstring> ds = find_drafts();
-        if (ds.empty()) { set_draft_state("no matching small model found"); return; }
+        if (ds.empty()) { set_draft_state("lookup"); return; }
         std::string why;
         for (auto& d : ds) {   // when the best draft doesn't fit next to the main model, a smaller one may
             why = attach_draft(d);
@@ -868,7 +869,7 @@ static void handle(SOCKET s) {
         J j; json_parse(body, j);
         { FILE* f = _wfopen((g_store_dir + L"\\server.json").c_str(), L"wb"); if (f) { fprintf(f, "{\"spec_decode\":%s}", j["on"].t == J::BOOL && j["on"].b ? "true" : "false"); fclose(f); } }
         if (j["on"].t == J::BOOL && j["on"].b) { if (g_model.loaded()) start_draft(true); }
-        else { std::lock_guard<std::mutex> l(g_gen); stop_draft("off"); }
+        else { std::lock_guard<std::mutex> l(g_gen); g_chat.lookup = false; stop_draft("off"); }
         respond(s, 200, "application/json", "{}");
     }
     else if (path == "/api/doc/extract" && method == "POST") {   // {name, data: base64} -> extracted text
@@ -1192,18 +1193,53 @@ int main() {
             t.resize(512);
             g_model.rewind(0); g_model.eval(t.data(), 64);   // warm-up (JIT, graphs)
             double pp = 0, tg = 0;
+            const int depth = getenv("ITHACA_BENCH_DEPTH") ? std::min(atoi(getenv("ITHACA_BENCH_DEPTH")), g_model.ctx - 160) : 0;   // tg after this many tokens
             for (int run = 0; run < 3; run++) {
                 g_model.rewind(0);
                 double t0 = now_sec();
                 g_model.eval(t.data(), 512);
                 double t1 = now_sec();
+                for (int dd = 512; dd < depth; dd += 512) g_model.eval(t.data(), std::min(512, depth - dd));   // longer chats
+                const double t1b = now_sec();
                 int id = t[100];
                 for (int i = 0; i < 128; i++) g_model.eval(&id, 1);
                 double t2 = now_sec();
-                pp += 512 / (t1 - t0); tg += 128 / (t2 - t1);
+                pp += 512 / (t1 - t0); tg += 128 / (t2 - t1b);
             }
             if (getenv("ITHACA_GXPROF")) gx().print_profile();
-            printf("BENCH model=%s load_s=%.2f pp512=%.1f tg128=%.2f vram_mb=%lld\n", g_model.hp.name.c_str(), load_s, pp / 3, tg / 3, (long long)(g_model.gpu_bytes() >> 20));
+            if (getenv("ITHACA_VERIFY_CHECK")) {   // a draft check must give the same logits as plain steps
+                const int V = g_model.hp.n_vocab;
+                for (int n : {2, 4, 8}) {
+                    std::vector<float> one((size_t)n * V);
+                    g_model.rewind(600);
+                    for (int i = 0; i < n; i++) { const float* l = g_model.eval(&t[100 + i], 1); memcpy(&one[(size_t)i * V], l, V * 4); }
+                    g_model.rewind(600);
+                    const float* all = g_model.eval_all(t.data() + 100, n);
+                    for (int i = 0; i < n; i++) {
+                        double md = 0; int am1 = 0, am2 = 0;
+                        for (int v = 0; v < V; v++) {
+                            md = std::max(md, (double)std::fabs(one[(size_t)i * V + v] - all[(size_t)i * V + v]));
+                            if (one[(size_t)i * V + v] > one[(size_t)i * V + am1]) am1 = v;
+                            if (all[(size_t)i * V + v] > all[(size_t)i * V + am2]) am2 = v;
+                        }
+                        printf("VCHECK n=%d row %d max|diff| %.3g argmax %d %d\n", n, i, md, am1, am2);
+                    }
+                }
+            }
+            if (getenv("ITHACA_BENCH_VERIFY")) {   // what checking n drafted tokens costs, against one plain step
+                for (int n : {1, 2, 3, 4, 6, 8}) {
+                    if (getenv("ITHACA_BENCH_VERIFY_N") && n != atoi(getenv("ITHACA_BENCH_VERIFY_N"))) continue;
+                    double tv = 0;
+                    for (int r = 0; r < (getenv("ITHACA_BENCH_VERIFY_N") ? 200 : 24); r++) {
+                        g_model.rewind(600);
+                        const double a0 = now_sec();
+                        if (n == 1) g_model.eval(&t[100], 1); else g_model.eval_all(t.data() + 100, n);
+                        if (r >= 4) tv += now_sec() - a0;
+                    }
+                    printf("VERIFY n=%d %.2f ms\n", n, tv / 20 * 1e3);
+                }
+            }
+            printf("BENCH model=%s load_s=%.2f pp512=%.1f tg128=%.2f vram_mb=%lld depth=%d\n", g_model.hp.name.c_str(), load_s, pp / 3, tg / 3, (long long)(g_model.gpu_bytes() >> 20), std::max(depth, 512));
             g_model.unload();
             return 0;
         }

@@ -2,10 +2,12 @@
 #include "common.h"
 #include "gguf.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <future>
 
 std::string gpu_ops_ptx();
+std::string fuse_ops_ptx();
 std::string iq_ptx();
 std::vector<uint8_t> iq_tables_blob();
 int iq_index(int gtype);
@@ -185,25 +187,42 @@ static std::string gen_kernel(const char* name, int mode, int tt = kTokTile) {  
 // Single-token matvec (decode). Memory-bound, so each lane issues the loads for U blocks of all R rows
 // before using any of them; R rows per warp share each activation block.
 static const int kMv1Unroll = 2;
-static std::string gen_mv1(const char* name, int mode, int R) {   // R: rows per warp (1 for small matrices, so there are enough CTAs)
+// var 0: y = W x. var 1: up to three matrices of one kind in one launch (q, k, v): CTAs [0, B1) do the first,
+// [B1, B2) the second, [B2, ..) the third. var 2 (R = 8): gate and up together, 4 rows of each per warp, so a CTA
+// makes 32 outputs act(gate) * up, stored as floats and quantized straight into the int8 input of the down projection.
+// Every row is summed in the same order in all variants.
+static std::string gen_mv1(const char* name, int mode, int R, int var = 0) {   // R: rows per warp (1 for small matrices, so there are enough CTAs)
     const bool qk = mode == 4, q4 = mode == 1 || mode == 2 || qk, qm = mode == 2 || qk, q6 = mode == 3, pair = mode == 2 || q6;
-    const int U = kMv1Unroll;
+    const bool glu = var == 2;
+    const int U = glu ? 1 : kMv1Unroll, RW = glu ? R / 2 : R;   // RW: output rows per warp
     std::string k;
     char b[400];
     auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
     L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
-      " .param .u32 pC, .param .u32 pR, .param .u32 pN)", name);
+      " .param .u32 pC, .param .u32 pR, .param .u32 pN%s)", name,
+      var == 1 ? ", .param .u64 pS1, .param .u64 pQ1, .param .u64 pY1, .param .u32 pR1, .param .u64 pS2, .param .u64 pQ2, .param .u64 pY2, .param .u32 pR2, .param .u32 pB1, .param .u32 pB2"
+      : glu ? ", .param .u64 pS2, .param .u64 pQ2, .param .u64 pYQ, .param .u64 pYD, .param .u64 pYS, .param .u32 pAct" : "");
     L("{\n .reg .pred %%p<8>; .reg .pred %%pu<%d>; .reg .pred %%pr<%d>; .reg .pred %%pw<%d>; .reg .b32 %%r<32>; .reg .b32 %%ro<%d>; .reg .b32 %%w<%d>; .reg .b32 %%x<%d>;",
       U, R, U * R, R, U * R * 8, U * 8);
-    L(" .reg .b32 %%xs<%d>; .reg .f32 %%xd<%d>; .reg .f32 %%xf<%d>; .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .f32 %%f<8>; .reg .b64 %%rd<16>; .reg .b16 %%hs<2>; .reg .b32 %%hw; .reg .b32 %%qh<%d>;",
+    L(" .reg .b32 %%xs<%d>; .reg .f32 %%xd<%d>; .reg .f32 %%xf<%d>; .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .f32 %%f<8>; .reg .b64 %%rd<24>; .reg .b16 %%hs<2>; .reg .b32 %%hw; .reg .b32 %%qh<%d>;",
       U, U, U, U * R, U * R, R, U * R * 2);
     k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
     k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR];\n";
     k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";   // warp, lane
-    L(" mov.u32 %%r7,%%ctaid.x; mul.lo.u32 %%r7,%%r7,%d; mad.lo.u32 %%r7,%%r5,%d,%%r7;", 8 * R, R);   // first row of this warp
-    k += " setp.ge.u32 %p1,%r7,%r2; @%p1 bra DONE;\n shr.u32 %r9,%r1,5;\n";   // nb
+    k += " mov.u32 %r7,%ctaid.x;\n";
+    if (var == 1) {   // pick this CTA's matrix
+        k += " mov.u32 %r29,%r7; ld.param.u32 %r26,[pB1]; ld.param.u32 %r27,[pB2]; setp.ge.u32 %p4,%r29,%r26; setp.ge.u32 %p5,%r29,%r27;\n"
+             " ld.param.u64 %rd15,[pS1]; ld.param.u64 %rd16,[pQ1]; ld.param.u64 %rd17,[pY1]; ld.param.u32 %r28,[pR1];\n"
+             " @%p4 mov.u64 %rd1,%rd15; @%p4 mov.u64 %rd2,%rd16; @%p4 mov.u64 %rd6,%rd17; @%p4 mov.u32 %r2,%r28; @%p4 sub.u32 %r7,%r29,%r26;\n"
+             " ld.param.u64 %rd15,[pS2]; ld.param.u64 %rd16,[pQ2]; ld.param.u64 %rd17,[pY2]; ld.param.u32 %r28,[pR2];\n"
+             " @%p5 mov.u64 %rd1,%rd15; @%p5 mov.u64 %rd2,%rd16; @%p5 mov.u64 %rd6,%rd17; @%p5 mov.u32 %r2,%r28; @%p5 sub.u32 %r7,%r29,%r27;\n";
+    }
+    if (glu) k += " ld.param.u64 %rd15,[pS2]; ld.param.u64 %rd16,[pQ2];\n";
+    L(" mul.lo.u32 %%r7,%%r7,%d; mad.lo.u32 %%r7,%%r5,%d,%%r7;", 8 * RW, RW);   // first row of this warp
+    if (!glu) k += " setp.ge.u32 %p1,%r7,%r2; @%p1 bra DONE;\n";
+    k += " shr.u32 %r9,%r1,5;\n";   // nb
     for (int j = 0; j < R; j++)
-        L(" add.u32 %%r10,%%r7,%d; setp.lt.u32 %%pr%d,%%r10,%%r2; mul.lo.u32 %%ro%d,%%r10,%%r9; mov.f32 %%a%d,0f00000000;", j, j, j, j);
+        L(" add.u32 %%r10,%%r7,%d; setp.lt.u32 %%pr%d,%%r10,%%r2; mul.lo.u32 %%ro%d,%%r10,%%r9; mov.f32 %%a%d,0f00000000;", j % RW, j, j, j);
     k += " mov.u32 %r11,%r6;\nLOOP:\n setp.ge.u32 %p2,%r11,%r9; @%p2 bra END;\n";
     for (int u = 0; u < U; u++) {   // issue every load of this step
         L(" add.u32 %%r12,%%r11,%d; setp.lt.u32 %%pu%d,%%r12,%%r9;", u * 32, u);
@@ -214,15 +233,17 @@ static std::string gen_mv1(const char* name, int mode, int R) {   // R: rows per
         L(" mul.wide.u32 %%rd8,%%r12,4; add.u64 %%rd9,%%rd4,%%rd8; @%%pu%d ld.global.nc.f32 %%xd%d,[%%rd9]; add.u64 %%rd9,%%rd5,%%rd8; @%%pu%d ld.global.nc.s32 %%xs%d,[%%rd9];", u, u, u, u);
         for (int j = 0; j < R; j++) {
             const int s = u * R + j, w0 = s * 8;
+            const char* SB = glu && j >= RW ? "rd15" : "rd1";
+            const char* QB = glu && j >= RW ? "rd16" : "rd2";
             L(" and.pred %%pw%d,%%pu%d,%%pr%d; add.u32 %%r13,%%ro%d,%%r12; mov.f32 %%sc%d,0f00000000; mov.f32 %%mn%d,0f00000000;", s, u, j, j, s, s);
             for (int i = 0; i < 8; i++) L(" mov.b32 %%w%d,0;", w0 + i);
-            if (qk) { char pr[16], sc[8], mn[8]; snprintf(pr, sizeof pr, "@%%pw%d", s); snprintf(sc, sizeof sc, "sc%d", s); snprintf(mn, sizeof mn, "mn%d", s); k += qk_load("rd1", "r13", pr, sc, mn, "hs0", "hs1", "r23", "r24", "r25", "rd13", "rd14", "f7"); }
-            else if (pair) L(" mul.wide.u32 %%rd10,%%r13,4; add.u64 %%rd10,%%rd1,%%rd10; mov.b32 %%hw,0; @%%pw%d ld.global.nc.b32 %%hw,[%%rd10]; mov.b32 {%%hs0,%%hs1},%%hw; cvt.f32.f16 %%sc%d,%%hs0; cvt.f32.f16 %%mn%d,%%hs1;", s, s, s);
-            else L(" mul.wide.u32 %%rd10,%%r13,2; add.u64 %%rd10,%%rd1,%%rd10; mov.b16 %%hs0,0; @%%pw%d ld.global.nc.b16 %%hs0,[%%rd10]; cvt.f32.f16 %%sc%d,%%hs0;", s, s);
-            if (q6) { char pr[16]; snprintf(pr, sizeof pr, "@%%pw%d", s); k += q6_load("rd2", "r13", pr, "w", w0, "qh", s * 2, "r20", "rd13", "rd14"); }
-            else if (q4) L(" mul.wide.u32 %%rd11,%%r13,16; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11];", s, w0, w0 + 1, w0 + 2, w0 + 3);
-            else L(" mul.wide.u32 %%rd11,%%r13,32; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11]; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11+16];",
-                   s, w0, w0 + 1, w0 + 2, w0 + 3, s, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
+            if (qk) { char pr[16], sc[8], mn[8]; snprintf(pr, sizeof pr, "@%%pw%d", s); snprintf(sc, sizeof sc, "sc%d", s); snprintf(mn, sizeof mn, "mn%d", s); k += qk_load(SB, "r13", pr, sc, mn, "hs0", "hs1", "r23", "r24", "r25", "rd13", "rd14", "f7"); }
+            else if (pair) L(" mul.wide.u32 %%rd10,%%r13,4; add.u64 %%rd10,%%%s,%%rd10; mov.b32 %%hw,0; @%%pw%d ld.global.nc.b32 %%hw,[%%rd10]; mov.b32 {%%hs0,%%hs1},%%hw; cvt.f32.f16 %%sc%d,%%hs0; cvt.f32.f16 %%mn%d,%%hs1;", SB, s, s, s);
+            else L(" mul.wide.u32 %%rd10,%%r13,2; add.u64 %%rd10,%%%s,%%rd10; mov.b16 %%hs0,0; @%%pw%d ld.global.nc.b16 %%hs0,[%%rd10]; cvt.f32.f16 %%sc%d,%%hs0;", SB, s, s);
+            if (q6) { char pr[16]; snprintf(pr, sizeof pr, "@%%pw%d", s); k += q6_load(QB, "r13", pr, "w", w0, "qh", s * 2, "r20", "rd13", "rd14"); }
+            else if (q4) L(" mul.wide.u32 %%rd11,%%r13,16; add.u64 %%rd11,%%%s,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11];", QB, s, w0, w0 + 1, w0 + 2, w0 + 3);
+            else L(" mul.wide.u32 %%rd11,%%r13,32; add.u64 %%rd11,%%%s,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11]; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11+16];",
+                   QB, s, w0, w0 + 1, w0 + 2, w0 + 3, s, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
         }
     }
     for (int u = 0; u < U; u++) {   // then use them
@@ -250,9 +271,129 @@ static std::string gen_mv1(const char* name, int mode, int R) {   // R: rows per
     L(" add.u32 %%r11,%%r11,%d; bra LOOP;\nEND:", 32 * U);
     for (int j = 0; j < R; j++)
         for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f5,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f5;", j, o, j, j);
+    if (!glu) {
+        k += " setp.ne.u32 %p3,%r6,0; @%p3 bra DONE;\n";
+        for (int j = 0; j < R; j++)
+            L(" add.u32 %%r16,%%r7,%d; mul.wide.u32 %%rd12,%%r16,4; add.u64 %%rd12,%%rd6,%%rd12; @%%pr%d st.global.f32 [%%rd12],%%a%d;", j, j, j);
+        k += "DONE:\n ret;\n}\n";
+        return k;
+    }
+    // glu epilogue: act(gate) * up exactly as k_silu / k_gelu compute it, then k_quant over the CTA's 32 rows
+    k += " .reg .f32 %qa,%qt,%qd,%qr,%qv; .reg .pred %qp; .reg .b32 %qi,%qs,%qu; .reg .f32 %g<8>;\n"
+         " .shared .align 4 .f32 gsh[32];\n"
+         " ld.param.u32 %r26,[pAct]; setp.ne.u32 %p4,%r26,0; setp.eq.u32 %p3,%r6,0;\n";
+    for (int j = 0; j < RW; j++) {
+        L(" mov.f32 %%g2,%%a%d; mov.f32 %%g3,%%a%d; @%%p4 bra GE%d;", j, j + RW, j);
+        L(" mul.f32 %%g4,%%g2,0fBFB8AA3B; ex2.approx.f32 %%g4,%%g4; add.f32 %%g4,%%g4,0f3F800000; div.approx.f32 %%g5,%%g2,%%g4; mul.f32 %%g5,%%g5,%%g3; bra GD%d;\nGE%d:", j, j);
+        L(" mul.f32 %%g6,%%g2,%%g2; mul.f32 %%g6,%%g6,%%g2; fma.rn.f32 %%g6,%%g6,0f3D372713,%%g2; mul.f32 %%g6,%%g6,0f3F4C422A;");
+        L(" mul.f32 %%g7,%%g6,0fC038AA3B; ex2.approx.f32 %%g7,%%g7; add.f32 %%g7,%%g7,0f3F800000; div.approx.f32 %%g7,%%g2,%%g7; mul.f32 %%g5,%%g7,%%g3;\nGD%d:", j);
+        L(" mov.u64 %%rd18,gsh; mul.wide.u32 %%rd19,%%r5,%d; add.u64 %%rd18,%%rd18,%%rd19; @%%p3 st.shared.f32 [%%rd18+%d],%%g5;", RW * 4, j * 4);
+    }
+    k += " bar.sync 0;\n setp.ne.u32 %p5,%r5,0; @%p5 bra DONE;\n"
+         " mov.u64 %rd18,gsh; mul.wide.u32 %rd19,%r6,4; add.u64 %rd18,%rd18,%rd19; ld.shared.f32 %qv,[%rd18];\n"
+         " mov.u32 %r16,%ctaid.x; shl.b32 %r17,%r16,5; add.u32 %r17,%r17,%r6;\n"
+         " mul.wide.u32 %rd12,%r17,4; add.u64 %rd12,%rd6,%rd12; st.global.f32 [%rd12],%qv;\n"
+         " abs.f32 %qa,%qv;\n";
+    for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%qt,%%qa,%d,31,0xffffffff; max.f32 %%qa,%%qa,%%qt;", o);
+    k += " mul.f32 %qd,%qa,0f3C010204; setp.gt.f32 %qp,%qa,0f00000000; div.rn.f32 %qr,0f42FE0000,%qa; selp.f32 %qr,%qr,0f00000000,%qp;\n"
+         " mul.f32 %qr,%qv,%qr; cvt.rni.s32.f32 %qi,%qr; mov.u32 %qs,%qi;\n";
+    for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%qu,%%qs,%d,31,0xffffffff; add.s32 %%qs,%%qs,%%qu;", o);
+    k += " ld.param.u64 %rd20,[pYQ]; ld.param.u64 %rd21,[pYD]; ld.param.u64 %rd22,[pYS];\n"
+         " cvt.u64.u32 %rd23,%r17; add.u64 %rd23,%rd20,%rd23; st.global.s8 [%rd23],%qi;\n"
+         " @!%p3 bra DONE;\n"
+         " mul.wide.u32 %rd19,%r16,4; add.u64 %rd20,%rd21,%rd19; st.global.f32 [%rd20],%qd; add.u64 %rd20,%rd22,%rd19; st.global.s32 [%rd20],%qs;\n"
+         "DONE:\n ret;\n}\n";
+    return k;
+}
+
+// Small batches (draft checks, 2-8 tokens): gen_mv1's loads for R rows x U blocks plus the int8 blocks of all T
+// tokens, all issued before anything waits on them (a warp issues in order), the weights unpacked once, then T dot
+// products per row. grid = (rows / 8R, ceil(n / T)). Each row and token sums in gen_mv1's order.
+static std::string gen_mvt(const char* name, int mode, int R, int T) {
+    const bool qk = mode == 4, q4 = mode == 1 || mode == 2 || qk, qm = mode == 2 || qk, q6 = mode == 3, pair = mode == 2 || q6;
+    const int U = T <= 4 ? kMv1Unroll : 1;
+    std::string k;
+    char b[400];
+    auto L = [&](const char* fmt, auto... a) { snprintf(b, sizeof b, fmt, a...); k += b; k += "\n"; };
+    L(".visible .entry %s(.param .u64 pS, .param .u64 pQ, .param .u64 pXQ, .param .u64 pXD, .param .u64 pXS, .param .u64 pY,"
+      " .param .u32 pC, .param .u32 pR, .param .u32 pN)", name);
+    L("{\n .reg .pred %%p<8>; .reg .pred %%pu<%d>; .reg .pred %%pr<%d>; .reg .pred %%pw<%d>; .reg .pred %%pt<%d>; .reg .pred %%px<%d>; .reg .b32 %%r<32>; .reg .b32 %%ro<%d>; .reg .b32 %%w<%d>; .reg .b32 %%x<%d>;",
+      U, R, U * R, T, T * U, R, U * R * 8, T * U * 8);
+    L(" .reg .b32 %%xs<%d>; .reg .f32 %%xd<%d>; .reg .f32 %%xf<%d>; .reg .f32 %%sc<%d>; .reg .f32 %%mn<%d>; .reg .f32 %%a<%d>; .reg .f32 %%f<8>; .reg .b64 %%rd<24>; .reg .b16 %%hs<2>; .reg .b32 %%hw; .reg .b32 %%qh<%d>; .reg .b32 %%tk<%d>;",
+      T * U, T * U, T * U, U * R, U * R, R * T, U * R * 2, T);
+    k += " ld.param.u64 %rd1,[pS]; ld.param.u64 %rd2,[pQ]; ld.param.u64 %rd3,[pXQ]; ld.param.u64 %rd4,[pXD]; ld.param.u64 %rd5,[pXS]; ld.param.u64 %rd6,[pY];\n";
+    k += " ld.param.u32 %r1,[pC]; ld.param.u32 %r2,[pR]; ld.param.u32 %r3,[pN];\n";
+    k += " mov.u32 %r4,%tid.x; shr.u32 %r5,%r4,5; and.b32 %r6,%r4,31;\n";
+    L(" mov.u32 %%r7,%%ctaid.x; mul.lo.u32 %%r7,%%r7,%d; mad.lo.u32 %%r7,%%r5,%d,%%r7;", 8 * R, R);
+    k += " setp.ge.u32 %p1,%r7,%r2; @%p1 bra DONE;\n shr.u32 %r9,%r1,5;\n";
+    L(" mov.u32 %%r8,%%ctaid.y; mul.lo.u32 %%r8,%%r8,%d;", T);   // first token of the tile
+    for (int t = 0; t < T; t++) L(" add.u32 %%r10,%%r8,%d; setp.lt.u32 %%pt%d,%%r10,%%r3; mul.lo.u32 %%tk%d,%%r10,%%r9;", t, t, t);   // token t's first block
+    for (int j = 0; j < R; j++) L(" add.u32 %%r10,%%r7,%d; setp.lt.u32 %%pr%d,%%r10,%%r2; mul.lo.u32 %%ro%d,%%r10,%%r9;", j, j, j);
+    for (int i = 0; i < R * T; i++) L(" mov.f32 %%a%d,0f00000000;", i);
+    k += " mov.u32 %r11,%r6;\nLOOP:\n setp.ge.u32 %p2,%r11,%r9; @%p2 bra END;\n";
+    for (int u = 0; u < U; u++) {   // the weights of U blocks x R rows
+        L(" add.u32 %%r12,%%r11,%d; setp.lt.u32 %%pu%d,%%r12,%%r9;", u * 32, u);
+        for (int j = 0; j < R; j++) {
+            const int s = u * R + j, w0 = s * 8;
+            L(" and.pred %%pw%d,%%pu%d,%%pr%d; add.u32 %%r13,%%ro%d,%%r12; mov.f32 %%sc%d,0f00000000; mov.f32 %%mn%d,0f00000000;", s, u, j, j, s, s);
+            for (int i = 0; i < 8; i++) L(" mov.b32 %%w%d,0;", w0 + i);
+            if (qk) { char pr[16], sc[8], mn[8]; snprintf(pr, sizeof pr, "@%%pw%d", s); snprintf(sc, sizeof sc, "sc%d", s); snprintf(mn, sizeof mn, "mn%d", s); k += qk_load("rd1", "r13", pr, sc, mn, "hs0", "hs1", "r23", "r24", "r25", "rd13", "rd14", "f7"); }
+            else if (pair) L(" mul.wide.u32 %%rd10,%%r13,4; add.u64 %%rd10,%%rd1,%%rd10; mov.b32 %%hw,0; @%%pw%d ld.global.nc.b32 %%hw,[%%rd10]; mov.b32 {%%hs0,%%hs1},%%hw; cvt.f32.f16 %%sc%d,%%hs0; cvt.f32.f16 %%mn%d,%%hs1;", s, s, s);
+            else L(" mul.wide.u32 %%rd10,%%r13,2; add.u64 %%rd10,%%rd1,%%rd10; mov.b16 %%hs0,0; @%%pw%d ld.global.nc.b16 %%hs0,[%%rd10]; cvt.f32.f16 %%sc%d,%%hs0;", s, s);
+            if (q6) { char pr[16]; snprintf(pr, sizeof pr, "@%%pw%d", s); k += q6_load("rd2", "r13", pr, "w", w0, "qh", s * 2, "r20", "rd13", "rd14"); }
+            else if (q4) L(" mul.wide.u32 %%rd11,%%r13,16; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11];", s, w0, w0 + 1, w0 + 2, w0 + 3);
+            else L(" mul.wide.u32 %%rd11,%%r13,32; add.u64 %%rd11,%%rd2,%%rd11; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11]; @%%pw%d ld.global.nc.v4.u32 {%%w%d,%%w%d,%%w%d,%%w%d},[%%rd11+16];",
+                   s, w0, w0 + 1, w0 + 2, w0 + 3, s, w0 + 4, w0 + 5, w0 + 6, w0 + 7);
+        }
+    }
+    for (int t = 0; t < T; t++)   // every token's blocks too, before anything waits
+        for (int u = 0; u < U; u++) {
+            const int v = t * U + u;
+            L(" add.u32 %%r12,%%r11,%d; add.u32 %%r14,%%tk%d,%%r12; and.pred %%px%d,%%pu%d,%%pt%d;", u * 32, t, v, u, t);
+            for (int i = 0; i < 8; i++) L(" mov.b32 %%x%d,0;", v * 8 + i);
+            L(" mov.f32 %%xd%d,0f00000000; mov.b32 %%xs%d,0;", v, v);
+            L(" mul.wide.u32 %%rd7,%%r14,32; add.u64 %%rd7,%%rd3,%%rd7; @%%px%d ld.global.nc.v4.u32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd7]; @%%px%d ld.global.nc.v4.u32 {%%x%d,%%x%d,%%x%d,%%x%d},[%%rd7+16];",
+              v, v * 8, v * 8 + 1, v * 8 + 2, v * 8 + 3, v, v * 8 + 4, v * 8 + 5, v * 8 + 6, v * 8 + 7);
+            L(" mul.wide.u32 %%rd8,%%r14,4; add.u64 %%rd9,%%rd4,%%rd8; @%%px%d ld.global.nc.f32 %%xd%d,[%%rd9]; add.u64 %%rd9,%%rd5,%%rd8; @%%px%d ld.global.nc.s32 %%xs%d,[%%rd9];", v, v, v, v);
+        }
+    for (int u = 0; u < U; u++)   // unpack once for every token
+        for (int j = 0; j < R; j++) {
+            const int s = u * R + j, w0 = s * 8;
+            if (q4) for (int i = 0; i < 4; i++) L(" shr.u32 %%w%d,%%w%d,4; and.b32 %%w%d,%%w%d,0x0F0F0F0F; and.b32 %%w%d,%%w%d,0x0F0F0F0F;", w0 + 4 + i, w0 + i, w0 + 4 + i, w0 + 4 + i, w0 + i, w0 + i);
+            if (q6) k += q6_unpack("w", w0, "qh", s * 2, "r21", "r22");
+        }
+    for (int t = 0; t < T; t++) {
+        L(" @!%%pt%d bra TS%d;", t, t);
+        for (int u = 0; u < U; u++) {
+            const int v = t * U + u;
+            if (qm) L(" cvt.rn.f32.s32 %%xf%d,%%xs%d;", v, v);
+            for (int j = 0; j < R; j++) {
+                const int s = u * R + j, w0 = s * 8, A = t * R + j;
+                if (q6) {
+                    k += " mov.u32 %r15,0; mov.u32 %r17,0;\n";
+                    for (int i = 0; i < 8; i++) L(" dp4a.s32.s32 %%r%d,%%w%d,%%x%d,%%r%d;", i < 4 ? 15 : 17, w0 + i, v * 8 + i, i < 4 ? 15 : 17);
+                    L(" cvt.rn.f32.s32 %%f3,%%r15; cvt.rn.f32.s32 %%f4,%%r17; mul.f32 %%f3,%%f3,%%sc%d; fma.rn.f32 %%f3,%%f4,%%mn%d,%%f3; fma.rn.f32 %%a%d,%%f3,%%xd%d,%%a%d;", s, s, A, v, A);
+                    continue;
+                }
+                k += " mov.u32 %r15,0;\n";
+                for (int i = 0; i < 8; i++) L(" dp4a.%s.s32 %%r15,%%w%d,%%x%d,%%r15;", q4 ? "u32" : "s32", w0 + i, v * 8 + i);
+                if (qm) L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%sc%d; mul.f32 %%f4,%%xf%d,%%mn%d; sub.f32 %%f3,%%f3,%%f4; fma.rn.f32 %%a%d,%%f3,%%xd%d,%%a%d;", s, v, s, A, v, A);
+                else {
+                    if (q4) L(" mad.lo.s32 %%r15,%%xs%d,-8,%%r15;", v);
+                    L(" cvt.rn.f32.s32 %%f3,%%r15; mul.f32 %%f3,%%f3,%%xd%d; fma.rn.f32 %%a%d,%%f3,%%sc%d,%%a%d;", v, A, s, A);
+                }
+            }
+        }
+        L("TS%d:", t);
+    }
+    L(" add.u32 %%r11,%%r11,%d; bra LOOP;\nEND:", 32 * U);
+    for (int i = 0; i < R * T; i++)
+        for (int o = 16; o >= 1; o /= 2) L(" shfl.sync.bfly.b32 %%f5,%%a%d,%d,31,0xffffffff; add.f32 %%a%d,%%a%d,%%f5;", i, o, i, i);
     k += " setp.ne.u32 %p3,%r6,0; @%p3 bra DONE;\n";
-    for (int j = 0; j < R; j++)
-        L(" add.u32 %%r16,%%r7,%d; mul.wide.u32 %%rd12,%%r16,4; add.u64 %%rd12,%%rd6,%%rd12; @%%pr%d st.global.f32 [%%rd12],%%a%d;", j, j, j);
+    for (int t = 0; t < T; t++)
+        for (int j = 0; j < R; j++)
+            L(" and.pred %%p4,%%pt%d,%%pr%d; add.u32 %%r16,%%r8,%d; add.u32 %%r17,%%r7,%d; mad.lo.u32 %%r16,%%r16,%%r2,%%r17; mul.wide.u32 %%rd12,%%r16,4; add.u64 %%rd12,%%rd6,%%rd12; @%%p4 st.global.f32 [%%rd12],%%a%d;",
+              t, j, t, j, t * R + j);
     k += "DONE:\n ret;\n}\n";
     return k;
 }
@@ -450,7 +591,7 @@ static const char* kTopkPTX =
     "DONE:\n ret;\n}\n"
     // Counting sort of N (token, expert) pairs (token-major ids I / weights W, K per token) by expert, one CTA of 1024:
     // Off[E+1] row ranges per expert, SI = token of each sorted row, SW its weight. E <= 256.
-    ".visible .entry k_moe_sort(.param .u64 pI, .param .u64 pW, .param .u32 pN, .param .u32 pE, .param .u32 pK, .param .u64 pOff, .param .u64 pSI, .param .u64 pSW)\n{\n"
+    ".visible .entry k_moe_sort(.param .u64 pI, .param .u64 pW, .param .u32 pN, .param .u32 pE, .param .u32 pK, .param .u64 pOff, .param .u64 pSI, .param .u64 pSW, .param .u64 pInv)\n{\n"
     " .reg .pred %p<4>; .reg .b32 %r<24>; .reg .f32 %f<4>; .reg .b64 %rd<16>; .shared .align 4 .b32 cnt[256]; .shared .align 4 .b32 cur[256];\n"
     " ld.param.u64 %rd1,[pI]; ld.param.u64 %rd2,[pW]; ld.param.u32 %r1,[pN]; ld.param.u32 %r2,[pE]; ld.param.u32 %r3,[pK];\n"
     " ld.param.u64 %rd3,[pOff]; ld.param.u64 %rd4,[pSI]; ld.param.u64 %rd5,[pSW]; mov.u32 %r4,%tid.x; mov.u64 %rd6,cnt; mov.u64 %rd7,cur;\n"
@@ -463,7 +604,8 @@ static const char* kTopkPTX =
     "PD:\n mul.wide.u32 %rd8,%r2,4; add.u64 %rd11,%rd3,%rd8; st.global.u32 [%rd11],%r8;\nPE:\n bar.sync 0;\n"
     " mov.u32 %r5,%r4;\nS:\n setp.ge.u32 %p1,%r5,%r1; @%p1 bra DONE; mul.wide.u32 %rd8,%r5,4; add.u64 %rd9,%rd1,%rd8; ld.global.u32 %r6,[%rd9]; add.u64 %rd9,%rd2,%rd8; ld.global.f32 %f1,[%rd9];\n"
     " mul.wide.u32 %rd9,%r6,4; add.u64 %rd9,%rd7,%rd9; atom.shared.add.u32 %r10,[%rd9],1; div.u32 %r11,%r5,%r3;\n"
-    " mul.wide.u32 %rd12,%r10,4; add.u64 %rd13,%rd4,%rd12; st.global.u32 [%rd13],%r11; add.u64 %rd13,%rd5,%rd12; st.global.f32 [%rd13],%f1; add.u32 %r5,%r5,1024; bra S;\n"
+    " mul.wide.u32 %rd12,%r10,4; add.u64 %rd13,%rd4,%rd12; st.global.u32 [%rd13],%r11; add.u64 %rd13,%rd5,%rd12; st.global.f32 [%rd13],%f1;\n"
+    " ld.param.u64 %rd14,[pInv]; setp.ne.u64 %p3,%rd14,0; add.u64 %rd15,%rd14,%rd8; @%p3 st.global.u32 [%rd15],%r10; add.u32 %r5,%r5,1024; bra S;\n"   // pair -> its row
     "DONE:\n ret;\n}\n"
     // X[j] += sum_s w[s]*T[s*D+j]
     ".visible .entry k_wsum(.param .u64 pX, .param .u64 pT, .param .u64 pW, .param .u32 pK, .param .u32 pD)\n{\n"
@@ -526,6 +668,55 @@ static void prof_end(int slot, double t0) {
     }
 }
 
+// Set ITHACA_KPROF=1 for GPU-side kernel times (events around each launch, no graphs; per token averages).
+static CUresult(CUAPI* cuEventElapsedTime)(float*, void*, void*);
+static bool g_kprof = getenv("ITHACA_KPROF") != nullptr;
+struct KEv { void* a; void* b; int tag; int shape; };
+struct KShape { int kind, rows, cols; double t; long c; };
+static KShape g_ksh[48]; static int g_nsh = 0, g_cur_shape = -1;
+static void kprof_shape(int kind, int rows, int cols) {
+    if (!g_kprof) return;
+    for (int i = 0; i < g_nsh; i++) if (g_ksh[i].kind == kind && g_ksh[i].rows == rows && g_ksh[i].cols == cols) { g_cur_shape = i; return; }
+    if (g_nsh < 48) { g_ksh[g_nsh] = {kind, rows, cols, 0, 0}; g_cur_shape = g_nsh++; } else g_cur_shape = -1;
+}
+static std::vector<KEv> g_kev; static size_t g_kevn = 0;
+static double g_kt[64]; static long g_kc[64]; static long g_kflush = 0; static double g_kwall = 0, g_kw0 = 0;
+static CUresult klaunch(int tag, void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned sh, void* st, void** a) {
+    if (!g_kprof || !cuEventElapsedTime) return cuLaunchKernel(f, gx, gy, gz, bx, 1, 1, sh, st, a, nullptr);
+    if (g_kevn == g_kev.size()) { KEv e{}; cuEventCreate(&e.a, 0); cuEventCreate(&e.b, 0); g_kev.push_back(e); }
+    KEv& e = g_kev[g_kevn++]; e.tag = tag; e.shape = tag >= 31 && tag <= 37 ? g_cur_shape : -1; if (e.shape >= 0) g_cur_shape = -1;
+    cuEventRecord(e.a, st);
+    CUresult r = cuLaunchKernel(f, gx, gy, gz, bx, 1, 1, sh, st, a, nullptr);
+    cuEventRecord(e.b, st);
+    return r;
+}
+static void kprof_flush() {   // after a stream sync
+    if (!g_kprof || !g_kevn) return;
+    const double t = now_sec();
+    if (g_kw0 > 0) g_kwall += t - g_kw0;
+    g_kw0 = t;
+    for (size_t i = 0; i < g_kevn; i++) { float ms = 0; cuEventElapsedTime(&ms, g_kev[i].a, g_kev[i].b); g_kt[g_kev[i].tag] += ms * 1e-3; g_kc[g_kev[i].tag]++; if (g_kev[i].shape >= 0) { g_ksh[g_kev[i].shape].t += ms * 1e-3; g_ksh[g_kev[i].shape].c++; } }
+    g_kevn = 0;
+    if (++g_kflush % 64) return;
+    static const char* nm[64] = {"add", "bias", "silu", "silu_split", "f16", "copy2d", "rmsnorm", "rope", "attn", "kvstore", "attn_comb", "gelu", "gather", "scatter", "kvstore_q8",
+        "oai", "xbias", "rowexp", "ssm_conv", "ssm_scan", "ssm_gnorm", "sconv", "dnet", "sigmul", "ssm_scan1", "mla", "gadd", "", "", "",
+        "quant", "mv_q4", "mv_q8", "mv_q4m", "mv_q6", "mv_q4k", "mv_tile", "mv_iq", "raw", "x_quant", "mv_experts", "topk", "wsum", "normq", "qkpost", "combq"};
+    double tot = 0; long cnt = 0;
+    for (int i = 0; i < 64; i++) { tot += g_kt[i]; cnt += g_kc[i]; }
+    fprintf(stderr, "[kprof] per token: kernels %.0f us (%.1f launches), wall %.0f us\n", tot / 64 * 1e6, cnt / 64.0, g_kwall / 63 * 1e6);
+    for (int i = 0; i < 64; i++) if (g_kc[i]) fprintf(stderr, "[kprof]   %-11s %7.1f us  x%5.1f  (%.2f us each)\n", nm[i], g_kt[i] / 64 * 1e6, g_kc[i] / 64.0, g_kt[i] / g_kc[i] * 1e6);
+    for (int i = 0; i < g_nsh; i++) if (g_ksh[i].c) { const double bpw = g_ksh[i].kind == 0 ? 0.5625 : g_ksh[i].kind == 1 ? 1.0625 : g_ksh[i].kind == 2 ? 0.625 : g_ksh[i].kind == 3 ? 0.75 : g_ksh[i].kind == 4 ? 0.5625 : 0.4;
+        fprintf(stderr, "[kprof]     kind %2d %6d x %6d  %7.1f us x%5.1f  (%.1f us each, %.0f GB/s)\n", g_ksh[i].kind, g_ksh[i].rows, g_ksh[i].cols, g_ksh[i].t / 64 * 1e6, g_ksh[i].c / 64.0, g_ksh[i].t / g_ksh[i].c * 1e6, (double)g_ksh[i].rows * g_ksh[i].cols * bpw / (g_ksh[i].t / g_ksh[i].c) / 1e9); g_ksh[i].t = 0; g_ksh[i].c = 0; }
+    for (int i = 0; i < 64; i++) { g_kt[i] = 0; g_kc[i] = 0; }
+    g_kwall = 0;
+}
+
+// ITHACA_NO_FUSE=1 turns every fused decode kernel off; a list (normq,qkpost,comb,multi,glu) only those.
+static bool no_fuse(const char* what) {
+    static const char* e = getenv("ITHACA_NO_FUSE");
+    return e && (!strcmp(e, "1") || strstr(e, what));
+}
+
 bool CudaTier::init(std::string& info) {
     HMODULE h = LoadLibraryA("nvcuda.dll");
     if (!h) { info = "no NVIDIA driver (nvcuda.dll) - CPU only"; return false; }
@@ -539,7 +730,7 @@ bool CudaTier::init(std::string& info) {
              load_sym(h, cuMemcpyDtoHAsync, "cuMemcpyDtoHAsync_v2") && load_sym(h, cuStreamCreate, "cuStreamCreate") && load_sym(h, cuMemcpyDtoDAsync, "cuMemcpyDtoDAsync_v2") && load_sym(h, cuMemsetD8Async, "cuMemsetD8Async") &&
              load_sym(h, cuStreamSynchronize, "cuStreamSynchronize") && load_sym(h, cuMemHostAlloc, "cuMemHostAlloc") &&
              load_sym(h, cuEventCreate, "cuEventCreate") && load_sym(h, cuEventRecord, "cuEventRecord") && load_sym(h, cuEventSynchronize, "cuEventSynchronize");
-    load_sym(h, cuMemFreeHost, "cuMemFreeHost"); load_sym(h, cuMemGetAddressRange, "cuMemGetAddressRange_v2");   // parking only
+    load_sym(h, cuMemFreeHost, "cuMemFreeHost"); load_sym(h, cuEventElapsedTime, "cuEventElapsedTime"); load_sym(h, cuMemGetAddressRange, "cuMemGetAddressRange_v2");   // parking only
     has_graphs_ = load_sym(h, cuStreamBeginCapture, "cuStreamBeginCapture_v2") && load_sym(h, cuStreamEndCapture, "cuStreamEndCapture") &&
                   load_sym(h, cuGraphInstantiateWithFlags, "cuGraphInstantiateWithFlags") && load_sym(h, cuGraphLaunch, "cuGraphLaunch") &&
                   load_sym(h, cuGraphExecDestroy, "cuGraphExecDestroy") && load_sym(h, cuGraphDestroy, "cuGraphDestroy");
@@ -555,9 +746,21 @@ bool CudaTier::init(std::string& info) {
     void* mod = nullptr;
     std::string ptx = ".version 6.0\n.target sm_61\n.address_size 64\n" + gen_kernel("mv_q4", 1) + gen_kernel("mv_q8", 0) + gen_kernel("mv_q4m", 2) + gen_kernel("mv_q6", 3) + gen_kernel("mv_q4k", 4) +
         gen_mv1("mv1_q4", 1, 4) + gen_mv1("mv1_q8", 0, 4) + gen_mv1("mv1_q4m", 2, 4) + gen_mv1("mv1_q6", 3, 4) + gen_mv1("mv1_q4k", 4, 4) +
-        gen_mv1("mvs_q4", 1, 1) + gen_mv1("mvs_q8", 0, 1) + gen_mv1("mvs_q4m", 2, 1) + gen_mv1("mvs_q6", 3, 1) + gen_mv1("mvs_q4k", 4, 1) + kQuantPTX + gpu_ops_ptx() +
+        gen_mv1("mvs_q4", 1, 1) + gen_mv1("mvs_q8", 0, 1) + gen_mv1("mvs_q4m", 2, 1) + gen_mv1("mvs_q6", 3, 1) + gen_mv1("mvs_q4k", 4, 1) + kQuantPTX + fuse_ops_ptx() + gpu_ops_ptx() +
                       gen_kernel_ex("mx_q4", 1) + gen_kernel_ex("mx_q8", 0) + gen_kernel_ex("mx_q4m", 2) + gen_kernel_ex("mx_q6", 3) + gen_kernel_ex("mx_q4k", 4) + kTopkPTX;
     for (int m = 0; m < 11; m++) ptx += gen_cv(m);
+    {   // fused decode variants: q/k/v in one launch (1 or 4 rows per warp), gate + up + activation + quantize
+        static const char* kn[N_KINDS] = {"q8", "q4", "q4m", "q6", "q4k"};   // by gen mode
+        for (int m = 0; m < N_KINDS; m++) {
+            ptx += gen_mv1((std::string("mvm1_") + kn[m]).c_str(), m, 1, 1);
+            ptx += gen_mv1((std::string("mvm4_") + kn[m]).c_str(), m, 4, 1);
+            ptx += gen_mv1((std::string("mvg_") + kn[m]).c_str(), m, 8, 2);
+            for (int T : {4, 8}) {   // draft checks
+                ptx += gen_mvt((std::string("mvt") + std::to_string(T) + "_" + kn[m]).c_str(), m, 4, T);
+                ptx += gen_mvt((std::string("mvt") + std::to_string(T) + "s_" + kn[m]).c_str(), m, 1, T);
+            }
+        }
+    }
     ptx += iq_ptx();
     if (getenv("ITHACA_DUMP_PTX")) { FILE* f = fopen(getenv("ITHACA_DUMP_PTX"), "wb"); if (f) { fwrite(ptx.data(), 1, ptx.size(), f); fclose(f); } }
     if (cuModuleLoadDataEx(&mod, ptx.c_str(), 2, opts, vals)) { info = std::string("PTX JIT failed: ") + log; return false; }
@@ -571,6 +774,20 @@ bool CudaTier::init(std::string& info) {
     }
     cuModuleGetFunction(&ftopk_, mod, "k_topk"); cuModuleGetFunction(&fwsum_, mod, "k_wsum"); cuModuleGetFunction(&fsort_, mod, "k_moe_sort");
     cuModuleGetFunction(&fn1_[K_Q4_0], mod, "mv1_q4"); cuModuleGetFunction(&fn1_[K_Q8_0], mod, "mv1_q8"); cuModuleGetFunction(&fn1_[K_Q4M], mod, "mv1_q4m"); cuModuleGetFunction(&fn1_[K_Q6], mod, "mv1_q6"); cuModuleGetFunction(&fn1_[K_Q4K], mod, "mv1_q4k");
+    {   // kind -> generator mode: K_Q4_0 = q4 (mode 1), K_Q8_0 = q8 (mode 0), K_Q4M = q4m, K_Q6 = q6, K_Q4K = q4k
+        static const char* kk[N_KINDS] = {"q4", "q8", "q4m", "q6", "q4k"};
+        for (int i = 0; i < N_KINDS; i++) {
+            cuModuleGetFunction(&fmm_[i][0], mod, (std::string("mvm1_") + kk[i]).c_str());
+            cuModuleGetFunction(&fmm_[i][1], mod, (std::string("mvm4_") + kk[i]).c_str());
+            cuModuleGetFunction(&fglu_[i], mod, (std::string("mvg_") + kk[i]).c_str());
+            for (int t = 0; t < 2; t++) {
+                const std::string T = t ? "8" : "4";
+                cuModuleGetFunction(&fmt_[i][t][0], mod, ("mvt" + T + "s_" + kk[i]).c_str());
+                cuModuleGetFunction(&fmt_[i][t][1], mod, ("mvt" + T + "_" + kk[i]).c_str());
+            }
+        }
+        cuModuleGetFunction(&fnormq_[0], mod, "k_normq8"); cuModuleGetFunction(&fnormq_[1], mod, "k_normq16"); cuModuleGetFunction(&fnormq_[2], mod, "k_normq32"); cuModuleGetFunction(&fqkpost_, mod, "k_qkpost"); cuModuleGetFunction(&fcombq_, mod, "k_attn_combq"); cuModuleGetFunction(&fmcomb_, mod, "k_moe_comb");
+    }
     cuModuleGetFunction(&fns_[K_Q4_0], mod, "mvs_q4"); cuModuleGetFunction(&fns_[K_Q8_0], mod, "mvs_q8"); cuModuleGetFunction(&fns_[K_Q4M], mod, "mvs_q4m"); cuModuleGetFunction(&fns_[K_Q6], mod, "mvs_q6"); cuModuleGetFunction(&fns_[K_Q4K], mod, "mvs_q4k");
     if (cuModuleGetFunction(&fn_[K_Q4_0], mod, "mv_q4") || cuModuleGetFunction(&fn_[K_Q8_0], mod, "mv_q8") || cuModuleGetFunction(&fn_[K_Q4M], mod, "mv_q4m") || cuModuleGetFunction(&fn_[K_Q6], mod, "mv_q6") || cuModuleGetFunction(&fn_[K_Q4K], mod, "mv_q4k")) {
         info = "kernel lookup failed"; return false;
@@ -618,7 +835,9 @@ bool CudaTier::dtoh(void* dst, uint64_t src, size_t bytes) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     if (cuMemcpyDtoHAsync(dst, src, bytes, st_)) return false;
-    return cuStreamSynchronize(st_) == 0;
+    bool ok = cuStreamSynchronize(st_) == 0;
+    kprof_flush();
+    return ok;
 }
 
 bool CudaTier::htod_async(uint64_t dst, const void* src, size_t bytes) {
@@ -628,7 +847,7 @@ bool CudaTier::htod_async(uint64_t dst, const void* src, size_t bytes) {
 }
 
 bool CudaTier::begin_capture() {
-    if (!has_graphs_ || g_prof || getenv("ITHACA_NO_GRAPH")) return false;
+    if (!has_graphs_ || g_prof || g_kprof || getenv("ITHACA_NO_GRAPH")) return false;
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     return cuStreamBeginCapture(st_, 2 /*relaxed*/) == 0;
@@ -663,7 +882,7 @@ bool CudaTier::launch(Op op, unsigned gx, unsigned gy, unsigned block, std::init
     void* a[24]; int n = 0;
     for (void* p : args) a[n++] = p;
     double t0 = g_prof ? now_sec() : 0;
-    bool ok = cuLaunchKernel(ops_[op], gx, gy, 1, block, 1, 1, 0, st_, a, nullptr) == 0;
+    bool ok = klaunch(op, ops_[op], gx, gy, 1, block, 0, st_, a) == 0;
     if (g_prof) prof_end(op, t0);
     return ok;
 }
@@ -675,7 +894,7 @@ bool CudaTier::ew(Op op, unsigned n, std::initializer_list<void*> args) {
     for (void* p : args) a[k++] = p;
     a[k++] = &n;
     double t0 = g_prof ? now_sec() : 0;
-    bool ok = cuLaunchKernel(ops_[op], (n + 255) / 256, 1, 1, 256, 1, 1, 0, st_, a, nullptr) == 0;
+    bool ok = klaunch(op, ops_[op], (n + 255) / 256, 1, 1, 256, 0, st_, a) == 0;
     if (g_prof) prof_end(op, t0);
     return ok;
 }
@@ -699,7 +918,7 @@ void* CudaTier::function(void* mod, const char* name) {
 bool CudaTier::launch_raw(void* fn, unsigned gx, unsigned gy, unsigned gz, unsigned block, unsigned shmem, void** args) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
-    return cuLaunchKernel(fn, gx, gy, gz, block, 1, 1, shmem, st_, args, nullptr) == 0;
+    return klaunch(38, fn, gx, gy, gz, block, shmem, st_, args) == 0;
 }
 
 bool CudaTier::dtod(uint64_t dst, uint64_t src, size_t bytes) {
@@ -725,8 +944,10 @@ bool CudaTier::reserve_act(size_t elems) {
     cuCtxSetCurrent(ctx_);
     if (elems <= cap_q_) return true;
     if (xq_) { cuMemFree(xq_); cuMemFree(xd_); cuMemFree(xs_); }
-    xq_ = xd_ = xs_ = 0; cap_q_ = 0;
+    if (xq2_) { cuMemFree(xq2_); cuMemFree(xd2_); cuMemFree(xs2_); }
+    xq_ = xd_ = xs_ = xq2_ = xd2_ = xs2_ = 0; cap_q_ = 0; qx_src_ = 0;
     if (cuMemAlloc(&xq_, elems) || cuMemAlloc(&xd_, elems / 32 * 4 + 4) || cuMemAlloc(&xs_, elems / 32 * 4 + 4)) return false;
+    if (cuMemAlloc(&xq2_, elems) || cuMemAlloc(&xd2_, elems / 32 * 4 + 4) || cuMemAlloc(&xs2_, elems / 32 * 4 + 4)) return false;
     cap_q_ = elems;
     return true;
 }
@@ -739,9 +960,10 @@ bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int 
     unsigned c = (unsigned)cols, r = (unsigned)rows, un = (unsigned)n;
     void* qa[5] = {&dX, &xq_, &xd_, &xs_, &c};
     if (!(same_x && qx_src_ == dX && qx_n_ == n && qx_cols_ == cols)) {   // q/k/v and gate/up share one quantized input
-        if (cuLaunchKernel(quant_, c / 32, un, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
+        if (klaunch(30, quant_, c / 32, un, 1, 32, 0, st_, qa)) return false;
         qx_src_ = dX; qx_n_ = n; qx_cols_ = cols;
     }
+    kprof_shape(kind, rows, cols);
     uint64_t Q = W + qoff;
     void* args[9] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &un};
     // Single tokens: kernels without the token tile; 4 rows per warp, or 1 when that would leave too few CTAs.
@@ -751,18 +973,111 @@ bool CudaTier::matmul_dev(uint64_t W, uint64_t qoff, int kind, uint64_t dX, int 
         void* ia[9] = {&W, &T, &xq_, &xd_, &xs_, &dY, &c, &r, &un};
         const int v = n > 1 ? 2 : r / (8 * 4) < 96 ? 1 : 0, R = v == 0 ? 4 : v == 1 ? 1 : 2, TT = v == 2 ? 8 : 1;
         if (!fiq_[i][v] || !iqtab_) return false;
-        CUresult e = cuLaunchKernel(fiq_[i][v], (r + 8 * R - 1) / (8 * R), (un + TT - 1) / TT, 1, 256, 1, 1, 0, st_, ia, nullptr);
+        CUresult e = klaunch(37, fiq_[i][v], (r + 8 * R - 1) / (8 * R), (un + TT - 1) / TT, 1, 256, 0, st_, ia);
         if (e) { static int warned = 0; if (warned++ < 3) fprintf(stderr, "[gpu] IQ matmul launch failed (%d), %s variant %d\n", (int)e, iq_name(i), v); }
         return e == 0;
     }
+    // 2-8 tokens (draft checks): the single-token kernels' loads, the weights reused for every token
+    if (n >= 2 && n <= 8 && kind < N_KINDS && !no_fuse("few")) {
+        const int t = n <= 4 ? 0 : 1, big = r / (8 * 4) < 96 ? 0 : 1, rw = big ? 4 : 1;
+        if (void* f = fmt_[kind][t][big]) {
+            const bool ok = klaunch(36, f, (r + 8 * rw - 1) / (8 * rw), 1, 1, 256, 0, st_, args) == 0;
+            if (g_prof) prof_end(20 + kind, t0);
+            return ok;
+        }
+    }
     const bool one = n == 1 && fn1_[kind] && fns_[kind];
     const unsigned rpw = !one ? kRows : r / (8 * 4) < 96 ? 1 : 4;
-    bool ok = cuLaunchKernel(one ? (rpw == 1 ? fns_[kind] : fn1_[kind]) : fn_[kind], (r + 8 * rpw - 1) / (8 * rpw), one ? 1 : (un + kTokTile - 1) / kTokTile, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
+    bool ok = klaunch(one ? 31 + kind : 36, one ? (rpw == 1 ? fns_[kind] : fn1_[kind]) : fn_[kind], (r + 8 * rpw - 1) / (8 * rpw), one ? 1 : (un + kTokTile - 1) / kTokTile, 1, 256, 0, st_, args) == 0;
     if (g_prof && kind < N_KINDS) prof_end(20 + kind, t0);
     return ok;
 }
 
-bool CudaTier::matmul_experts(uint64_t W, uint64_t qoff, int kind, uint64_t ids, int slots, uint64_t dX, int xrows, int xstep, int cols, int R, uint64_t dY) {
+
+bool CudaTier::quantize_input(uint64_t dX, int n, int cols, bool same_x) {
+    if ((size_t)n * cols > cap_q_ && !reserve_act((size_t)n * cols)) { qx_src_ = 0; return false; }
+    if (same_x && qx_src_ == dX && qx_n_ == n && qx_cols_ == cols) return true;
+    unsigned c = (unsigned)cols, un = (unsigned)n;
+    void* qa[5] = {&dX, &xq_, &xd_, &xs_, &c};
+    if (klaunch(30, quant_, c / 32, un, 1, 32, 0, st_, qa)) { qx_src_ = 0; return false; }
+    qx_src_ = dX; qx_n_ = n; qx_cols_ = cols;
+    return true;
+}
+
+bool CudaTier::norm_quant(uint64_t X, uint64_t T, uint64_t Wp, float res, uint64_t Wn, uint64_t XN, int n, int D, float eps) {
+    void* fn = D <= 2048 ? fnormq_[0] : D <= 4096 ? fnormq_[1] : D <= 8192 ? fnormq_[2] : nullptr;
+    if (!fn || D % 32 || no_fuse("normq")) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    if ((size_t)n * D > cap_q_ && !reserve_act((size_t)n * D)) { qx_src_ = 0; return false; }
+    unsigned d = (unsigned)D, f = (T ? 1u : 0u) | (T && Wp ? 2u : 0u) | (XN ? 4u : 0u);
+    void* a[12] = {&X, &T, &Wp, &Wn, &XN, &xq_, &xd_, &xs_, &d, &eps, &res, &f};
+    if (klaunch(43, fn, (unsigned)n, 1, 1, 256, 0, st_, a)) { qx_src_ = 0; return false; }
+    qx_src_ = XN; qx_n_ = n; qx_cols_ = D;
+    return true;
+}
+
+bool CudaTier::qk_post(uint64_t Q, uint64_t K, uint64_t V, uint64_t bq, uint64_t bk, uint64_t bv, uint64_t qn, uint64_t kn, uint64_t cs,
+                       uint64_t Kc, uint64_t Vc, uint64_t Ks, uint64_t Vs, uint64_t pos, int n, int nh, int nkv, int hd, int half, bool neox, bool rope, float eps) {
+    if (!fqkpost_ || hd > 256 || no_fuse("qkpost")) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    unsigned unh = nh, unkv = nkv, uhd = hd, uhalf = half, f = (neox ? 1u : 0u) | (rope ? 2u : 0u);
+    void* a[20] = {&Q, &K, &V, &bq, &bk, &bv, &qn, &kn, &cs, &Kc, &Vc, &Ks, &Vs, &pos, &unh, &unkv, &uhd, &uhalf, &eps, &f};
+    return klaunch(44, fqkpost_, unh + 2 * unkv, (unsigned)n, 1, 256, 0, st_, a) == 0;
+}
+
+bool CudaTier::attn_comb_q(uint64_t PM, uint64_t PL, uint64_t PO, uint64_t O, int nh, int hd, int spl, int n) {
+    if (!fcombq_ || hd % 32 || no_fuse("comb")) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    const int cols = nh * hd;
+    if ((size_t)n * cols > cap_q_ && !reserve_act((size_t)n * cols)) { qx_src_ = 0; return false; }
+    unsigned unh = nh, uhd = hd, us = spl;
+    void* a[10] = {&PM, &PL, &PO, &O, &unh, &uhd, &us, &xq_, &xd_, &xs_};
+    if (klaunch(45, fcombq_, unh, (unsigned)n, 1, uhd, 0, st_, a)) { qx_src_ = 0; return false; }
+    qx_src_ = O; qx_n_ = n; qx_cols_ = cols;
+    return true;
+}
+
+bool CudaTier::matmul_multi(int kind, int cnt, const uint64_t* W, const uint64_t* qoff, const int* rows, const uint64_t* dY, uint64_t dX, int cols, bool same_x) {
+    if (kind < 0 || kind >= N_KINDS || cnt < 2 || cnt > 3 || no_fuse("multi")) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    int tot = 0;
+    for (int i = 0; i < cnt; i++) tot += rows[i];
+    const int v = tot / (8 * 4) < 96 ? 0 : 1, rpw = v ? 4 : 1;
+    if (!fmm_[kind][v]) return false;
+    if (!quantize_input(dX, 1, cols, same_x)) return false;
+    kprof_shape(kind, tot, cols);
+    uint64_t S[3], Q[3], Y[3]; unsigned R[3], cta[3];
+    for (int i = 0; i < 3; i++) {
+        const int j = i < cnt ? i : cnt - 1;
+        S[i] = W[j]; Q[i] = W[j] + qoff[j]; Y[i] = dY[j]; R[i] = (unsigned)rows[j];
+        cta[i] = i < cnt ? (R[i] + 8 * rpw - 1) / (8 * rpw) : 0;
+    }
+    unsigned c = (unsigned)cols, un = 1, b1 = cta[0], b2 = cnt == 3 ? cta[0] + cta[1] : 0xFFFFFFFFu;
+    void* a[19] = {&S[0], &Q[0], &xq_, &xd_, &xs_, &Y[0], &c, &R[0], &un, &S[1], &Q[1], &Y[1], &R[1], &S[2], &Q[2], &Y[2], &R[2], &b1, &b2};
+    return klaunch(31 + kind, fmm_[kind][v], cta[0] + cta[1] + cta[2], 1, 1, 256, 0, st_, a) == 0;
+}
+
+bool CudaTier::matmul_glu(int kind, uint64_t Wg, uint64_t qg, uint64_t Wu, uint64_t qu, uint64_t dX, int cols, int rows, uint64_t dY, bool gelu, bool same_x) {
+    if (kind < 0 || kind >= N_KINDS || !fglu_[kind] || rows % 32 || no_fuse("glu")) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    if ((size_t)rows > cap_q_ && !reserve_act((size_t)rows)) { qx_src_ = 0; return false; }
+    if (!quantize_input(dX, 1, cols, same_x)) return false;
+    kprof_shape(kind, 2 * rows, cols);
+    uint64_t Qg = Wg + qg, Qu = Wu + qu;
+    unsigned c = (unsigned)cols, r = (unsigned)rows, un = 1, act = gelu ? 1u : 0u;
+    void* a[15] = {&Wg, &Qg, &xq_, &xd_, &xs_, &dY, &c, &r, &un, &Wu, &Qu, &xq2_, &xd2_, &xs2_, &act};
+    if (klaunch(31 + kind, fglu_[kind], r / 32, 1, 1, 256, 0, st_, a)) { qx_src_ = 0; return false; }
+    std::swap(xq_, xq2_); std::swap(xd_, xd2_); std::swap(xs_, xs2_);   // the output's int8 copy is now the current input
+    qx_src_ = dY; qx_n_ = 1; qx_cols_ = rows;
+    return true;
+}
+
+bool CudaTier::matmul_experts(uint64_t W, uint64_t qoff, int kind, uint64_t ids, int slots, uint64_t dX, int xrows, int xstep, int cols, int R, uint64_t dY, bool same_x) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     const int iq = kind - K_IQ;
@@ -770,40 +1085,53 @@ bool CudaTier::matmul_experts(uint64_t W, uint64_t qoff, int kind, uint64_t ids,
     if ((size_t)xrows * cols > cap_q_ && !reserve_act((size_t)xrows * cols)) return false;
     unsigned c = (unsigned)cols, r = (unsigned)R, xn = (unsigned)xrows, xs = (unsigned)xstep;
     void* qa[5] = {&dX, &xq_, &xd_, &xs_, &c};
-    if (cuLaunchKernel(quant_, c / 32, xn, 1, 32, 1, 1, 0, st_, qa, nullptr)) return false;
+    if (!(same_x && qx_src_ == dX && qx_n_ == xrows && qx_cols_ == cols)) {
+        qx_src_ = 0;
+        if (klaunch(39, quant_, c / 32, xn, 1, 32, 0, st_, qa)) return false;
+        qx_src_ = dX; qx_n_ = xrows; qx_cols_ = cols;
+    }
     uint64_t Q = W + qoff;
     if (iq >= 0 && iq < N_IQ) {
         uint64_t T = iqtab_;
         void* ia[10] = {&W, &T, &xq_, &xd_, &xs_, &dY, &c, &r, &ids, &xs};
-        return cuLaunchKernel(fiqx_[iq], (r + 7) / 8, (unsigned)slots, 1, 256, 1, 1, 0, st_, ia, nullptr) == 0;
+        return klaunch(40, fiqx_[iq], (r + 7) / 8, (unsigned)slots, 1, 256, 0, st_, ia) == 0;
     }
     void* args[10] = {&W, &Q, &xq_, &xd_, &xs_, &dY, &c, &r, &ids, &xs};
-    return cuLaunchKernel(fe_[kind], (r + 7) / 8, (unsigned)slots, 1, 256, 1, 1, 0, st_, args, nullptr) == 0;
+    return klaunch(40, fe_[kind], (r + 7) / 8, (unsigned)slots, 1, 256, 0, st_, args) == 0;
 }
 bool CudaTier::topk(uint64_t logits, int E, int K, bool norm, float scale, uint64_t ids, uint64_t w) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     unsigned e = E, k = K, nm = norm ? 1 : 0;
     void* a[7] = {&logits, &e, &k, &nm, &scale, &ids, &w};
-    return ftopk_ && cuLaunchKernel(ftopk_, 1, 1, 1, 32, 1, 1, 0, st_, a, nullptr) == 0;
+    return ftopk_ && klaunch(41, ftopk_, 1, 1, 1, 32, 0, st_, a) == 0;
 }
 bool CudaTier::moe_route(uint64_t logits, int n, int E, int K, bool norm, float scale, uint64_t ids, uint64_t w,
-                         uint64_t off, uint64_t sorted_ids, uint64_t sorted_w) {
+                         uint64_t off, uint64_t sorted_ids, uint64_t sorted_w, uint64_t inv) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     if (!ftopk_ || !fsort_ || E > 256) return false;
     unsigned e = E, k = K, nm = norm ? 1 : 0, nk = (unsigned)(n * K);
     void* a[7] = {&logits, &e, &k, &nm, &scale, &ids, &w};
     if (cuLaunchKernel(ftopk_, n, 1, 1, 32, 1, 1, 0, st_, a, nullptr)) return false;
-    void* b[8] = {&ids, &w, &nk, &e, &k, &off, &sorted_ids, &sorted_w};
+    void* b[9] = {&ids, &w, &nk, &e, &k, &off, &sorted_ids, &sorted_w, &inv};
     return cuLaunchKernel(fsort_, 1, 1, 1, 1024, 1, 1, 0, st_, b, nullptr) == 0;
 }
+bool CudaTier::moe_combine(uint64_t X, uint64_t T, uint64_t inv, uint64_t w, int n, int K, int D) {
+    if (!fmcomb_) return false;
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    unsigned k = K, d = D, tot = (unsigned)(n * D);
+    void* a[7] = {&X, &T, &inv, &w, &k, &d, &tot};
+    return klaunch(42, fmcomb_, (tot + 255) / 256, 1, 1, 256, 0, st_, a) == 0;
+}
+
 bool CudaTier::wsum(uint64_t X, uint64_t T, uint64_t w, int K, int D) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);
     unsigned k = K, d = D;
     void* a[5] = {&X, &T, &w, &k, &d};
-    return fwsum_ && cuLaunchKernel(fwsum_, (d + 255) / 256, 1, 1, 256, 1, 1, 0, st_, a, nullptr) == 0;
+    return fwsum_ && klaunch(42, fwsum_, (d + 255) / 256, 1, 1, 256, 0, st_, a) == 0;
 }
 
 uint64_t CudaTier::alloc_upload(const void* host, size_t bytes) {
