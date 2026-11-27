@@ -939,6 +939,18 @@ bool CudaTier::sync() {
     return cuStreamSynchronize(st_) == 0;
 }
 
+void CudaTier::release_act() {
+    std::lock_guard<std::recursive_mutex> l(m_);
+    cuCtxSetCurrent(ctx_);
+    cuStreamSynchronize(st_);
+    if (xq_) { cuMemFree(xq_); cuMemFree(xd_); cuMemFree(xs_); }
+    if (xq2_) { cuMemFree(xq2_); cuMemFree(xd2_); cuMemFree(xs2_); }
+    xq_ = xd_ = xs_ = xq2_ = xd2_ = xs2_ = 0; cap_q_ = 0; qx_src_ = 0;
+    if (dx_) cuMemFree(dx_);
+    if (dy_) cuMemFree(dy_);
+    dx_ = dy_ = 0; cap_x_ = cap_y_ = 0;
+}
+
 bool CudaTier::reserve_act(size_t elems) {
     std::lock_guard<std::recursive_mutex> l(m_);
     cuCtxSetCurrent(ctx_);

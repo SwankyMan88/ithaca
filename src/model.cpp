@@ -42,6 +42,8 @@ static size_t gpu_cost(const Lin& l) {
 
 int iq_index(int gtype);
 static const int kExpChunk = 8;   // IQ experts converted to Q8_0 this many at a time for prompts
+static std::atomic<int> s_loaded{0};   // models loaded right now (the chat model, a draft): they share CudaTier's scratch
+
 bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) {
     unload();
     double t0 = now_sec();
@@ -273,7 +275,10 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     gpu_info = gpu_init_info();
     int64_t vram_budget = 0;
     size_t vfree = 0, vtotal = 0;
+    // the last model's scratch, before measuring (only with no other model loaded: its CUDA graphs point at it)
+    if (cuda().ok() && s_loaded.load() == 0) { cuda().release_act(); if (gx().ok()) gx().release_scratch(); }
     if (o.vram_mb != 0 && cuda().ok() && cuda().mem_info(vfree, vtotal)) {
+        if (getenv("ITHACA_KINFO")) fprintf(stderr, "[tier] %lld MB VRAM free when planning\n", (long long)(vfree >> 20));
         int64_t reserve = 768ll << 20;  // leave headroom for other apps (Blender, the desktop)
         vram_budget = o.vram_mb < 0 ? (int64_t)vfree - reserve : std::min<int64_t>(o.vram_mb << 20, (int64_t)vfree - (256ll << 20));
         // With tensor-core flash attention, prompt batches never materialize a score matrix, so the
@@ -300,6 +305,8 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
         if (o.vram_mb < 0) {   // a model that only misses by the headroom runs all on the GPU with a smaller one (a layer on the CPU halves the speed)
             int64_t need = gpu_cost(out_);
             for (auto& L : layers_) { for (Lin* l : L.lins()) need += gpu_cost(*l); need += (int64_t)ctx * kv_pos_bytes(); }
+            if (getenv("ITHACA_KINFO")) fprintf(stderr, "[tier] all-GPU needs %lld MB; budget %lld MB after %lld MB activations, %lld MB expert scratch\n",
+                                                (long long)(need >> 20), (long long)(vram_budget >> 20), (long long)(act >> 20), (long long)(w16_plan_ >> 20));
             if (need > vram_budget && need <= vram_budget + (512ll << 20)) vram_budget = need;
         }
     }
@@ -335,6 +342,7 @@ bool Model::load(const std::wstring& path, const LoadOpts& o, std::string& err) 
     tier_th_ = std::thread([this] { tier_thread(); });
     pre_th_ = std::thread([this] { prefetch_thread(); });
     loaded_ = true;
+    s_loaded++;
     load_sec_ = now_sec() - t0;
     return true;
 }
@@ -524,6 +532,7 @@ void Model::unload() {
     bufn_ = 0; gpu_bytes_ = 0; ram_bytes_ = 0; n_past = 0;
     SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0);
     g_.close();
+    if (loaded_) s_loaded--;
     loaded_ = false;
 }
 

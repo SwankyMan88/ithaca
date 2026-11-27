@@ -48,6 +48,7 @@ public:
     GT alloc(size_t n);
     void free(GT& t);
     void trim();                 // give cached blocks back to the driver
+    void release_scratch();      // trim, plus the prompt and staging scratch buffers (they come back on use)
     size_t vram_free();
 
     // ---- weights: fp16 in VRAM; whatever doesn't fit the budget is streamed per use ----

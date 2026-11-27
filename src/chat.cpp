@@ -376,10 +376,33 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
     bool done = false;
     hs_ = {};
     std::string pc;
+    // JSON-constrained stretches (tool calls): after a trigger (json_after, several separated by '|', e.g.
+    // "<json>|```json") each token must keep the JSON valid until the value is complete.
+    JsonCheck jc; bool json_on = false; std::string tail;
+    auto track = [&](const std::string& t) {
+        if (o.json_after.empty()) return;
+        if (json_on) {   // advance the checker; the value is complete: free text again
+            for (char ch : t) if (!jc.feed(ch)) { json_on = false; break; }
+            if (jc.done()) json_on = false;
+            return;
+        }
+        tail += t; if (tail.size() > 64) tail.erase(0, tail.size() - 64);
+        size_t e = tail.find_last_not_of(" \t\r\n");
+        bool hit = false;
+        for (size_t b = 0; e != std::string::npos && b <= o.json_after.size() && !hit;) {
+            size_t z = o.json_after.find('|', b); if (z == std::string::npos) z = o.json_after.size();
+            const std::string tr = o.json_after.substr(b, z - b);
+            hit = !tr.empty() && e + 1 >= tr.size() && tail.compare(e + 1 - tr.size(), tr.size(), tr) == 0;
+            b = z + 1;
+        }
+        if (hit) { json_on = true; jc = JsonCheck(); tail.clear(); }   // what follows the tag is only whitespace
+    };
+    auto pick = [&](const float* lg) { int id = json_on ? sample_json(lg, o, recent, jc) : -1; return id >= 0 ? id : sample(lg, o, recent); };
     auto emit = [&](int id) -> bool {
         if (st.gen_tokens >= budget) { done = true; return false; }   // the budget is spent: this token isn't shown (as without drafting)
         if (token_text(id, pc)) { pending += pc; done = true; return false; }
         pending += pc;
+        track(pc);
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {
             unsigned char c = pending[pending.size() - back];
@@ -396,12 +419,11 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         }
         return true;
     };
-    // JSON-constrained stretches (tool calls) need token-by-token control: no drafting then
-    JsonCheck jc; bool json_on = false; std::string tail;
-    const bool use_draft = draft_ && draft_->loaded(), use_lookup = lookup && !m_.recurrent();   // both may run: each step takes the better guess
-    if ((use_draft || use_lookup) && o.json_after.empty()) {
+    // Drafting works in JSON stretches too: each checked position is sampled under the constraint, as plain steps are.
+    const bool use_draft = draft_ && draft_->loaded() && m_.hp.n_expert == 0, use_lookup = lookup && !m_.recurrent() && m_.hp.n_expert == 0;   // both may run: each step takes the better guess
+    if (use_draft || use_lookup) {
         const int V = m_.hp.n_vocab, DV = use_draft ? draft_->hp.n_vocab : V;
-        int next = sample(logits, o, recent);   // emitted, not yet in the main model's cache
+        int next = pick(logits);   // emitted, not yet in the main model's cache
         if (emit(next)) {
             // Guessing pays when the tokens a check gains outweigh what drafting and the bigger check cost, so all of it is
             // measured as it goes: a plain step, one drafted token (none for lookup), what each extra token adds to a check,
@@ -410,7 +432,7 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
             // keep probing now and then, so a change from prose to code (or back) is noticed.
             double tp = 0, td = 0, beta = 0.1;               // plain step (s), drafted token (s), check cost per extra token (x tp)
             double an[5] = {1, 1, 1, 1, 1}, ad[5] = {2, 2, 2, 2, 2};   // accepted / drafted, decaying: [0] draft model, [N] lookup match length N
-            int probe = 0;                                    // plain steps since the last check
+            int probe = 0, every = 12;                        // plain steps since the last check; probe spacing (doubles while checks lose)
             const int Kmax = std::max(1, std::min(7, draft_k + 2));
             auto rate = [&](double a, int K, double tdk) {   // expected tokens per second of a check of K guesses
                 const double tok = a > 0.999 ? K + 1 : (1 - std::pow(a, K + 1)) / (1 - a);
@@ -438,7 +460,7 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
                     if (td == 0) td = 0.25 * tp;   // a first guess until it is measured
                     km = best_k(an[0] / ad[0], Kmax, td, rm);
                 }
-                if (!kl && !km && probe >= 12) { if (!d.empty()) kl = 1; else if (use_draft) km = 1; }   // probe now and then
+                if (!kl && !km && probe >= every) { if (!d.empty()) kl = 1; else if (use_draft) km = 1; }   // probe now and then
                 if (kl && (!km || rl >= rm)) d.resize(kl);   // the lookup guess (free)
                 else {
                     d.clear(); src = 0;
@@ -474,7 +496,7 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
                     cache_.push_back(next);
                     const float* lg = m_.eval(&next, 1);
                     if (!lg) { done = true; break; }
-                    int id = sample(lg, o, recent);
+                    int id = pick(lg);
                     if (!emit(id)) break;
                     next = id;
                     const double t = now_sec() - tb;
@@ -496,7 +518,7 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
                 st.drafted += (int)d.size();
                 size_t j = 0; int s = -1;
                 for (; j <= d.size(); j++) {
-                    s = sample(L + j * (size_t)V, o, recent);
+                    s = pick(L + j * (size_t)V);
                     if (j < d.size() && s == d[j]) { st.accepted++; if (!emit(s)) break; continue; }
                     break;
                 }
@@ -509,13 +531,14 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
                 an[src] = 0.85 * an[src] + (double)std::min(j, d.size());
                 ad[src] = 0.85 * ad[src] + (double)d.size();
                 const double tv = now_sec() - tb;   // the first check of each size also records its CUDA graph: not a fair sample
+                every = (1.0 + std::min(j, d.size())) / std::max(1e-6, now_sec() - ts) < 1.0 / tp ? std::min(256, every * 2) : 12;
                 if (tv < 3 * tp * (1 + d.size())) beta = 0.8 * beta + 0.2 * std::min(1.0, std::max(0.0, (tv / tp - 1) / d.size()));
             }
             if (!done && !(m_.n_past >= m_.ctx)) {   // context nearly full: finish without drafting
                 cache_.push_back(next);
                 logits = m_.eval(&next, 1);
                 for (; logits && !done && m_.n_past < m_.ctx;) {
-                    int id = sample(logits, o, recent);
+                    int id = pick(logits);
                     if (!emit(id)) break;
                     cache_.push_back(id);
                     logits = m_.eval(&id, 1);
@@ -524,30 +547,10 @@ GenStats Chat::generate(const std::vector<Msg>& msgs_in, const GenOpts& o, const
         }
     }
     else for (int i = 0; i < budget; i++) {
-        int id = -1;
-        if (json_on) id = sample_json(logits, o, recent, jc);
-        if (id < 0) id = sample(logits, o, recent);
+        const int id = pick(logits);
         if (token_text(id, pc)) { pending += pc; break; }
         pending += pc;
-        if (!o.json_after.empty()) {
-            if (json_on) {   // advance the checker; the value is complete: free text again
-                for (char ch : pc) if (!jc.feed(ch)) { json_on = false; break; }
-                if (jc.done()) json_on = false;
-            } else {
-                tail += pc; if (tail.size() > 64) tail.erase(0, tail.size() - 64);
-                size_t e = tail.find_last_not_of(" \t\r\n");
-                bool hit = false;   // json_after may list several triggers separated by '|' (e.g. "<json>|```json")
-                for (size_t b = 0; e != std::string::npos && b <= o.json_after.size() && !hit;) {
-                    size_t z = o.json_after.find('|', b); if (z == std::string::npos) z = o.json_after.size();
-                    const std::string t = o.json_after.substr(b, z - b);
-                    hit = !t.empty() && e + 1 >= t.size() && tail.compare(e + 1 - t.size(), t.size(), t) == 0;
-                    b = z + 1;
-                }
-                if (hit) {
-                    json_on = true; jc = JsonCheck(); tail.clear();   // what follows the tag is only whitespace
-                }
-            }
-        }
+        track(pc);
         // Emit only complete UTF-8 sequences.
         size_t ok = pending.size();
         for (size_t back = 1; back <= 4 && back <= pending.size(); back++) {

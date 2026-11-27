@@ -126,6 +126,20 @@ void Gx::trim() {
     for (auto& kv : pool_) cu().free(kv.second);
     pool_.clear();
 }
+void Gx::release_scratch() {   // a new chat model plans its VRAM: hand back what the last one's prompts left cached
+    if (!ok_) return;
+    trim();
+    if (xq_) cu().free(xq_);
+    xq_ = xq_src_ = 0; xq_cap_ = 0;
+    if (qtmp_) cu().free(qtmp_);
+    qtmp_ = 0; qtmp_cap_ = 0;
+    if (!st_) {   // no media weights resident: their staging buffers can go too
+        if (f8_buf_) cu().free(f8_buf_);
+        f8_buf_ = 0; f8_cap_ = 0;
+        if (ring_) cu().free(ring_);
+        ring_ = 0; ring_cap_ = ring_pos_ = 0;
+    }
+}
 size_t Gx::vram_free() { size_t f = 0, t = 0; cu().mem_info(f, t); return f; }
 
 // ---------------- weights ----------------

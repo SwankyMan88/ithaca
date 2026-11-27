@@ -296,6 +296,9 @@ static void start_draft(bool force = false) {   // force: the user just switched
     const int gen = ++g_load_gen;
     if (!force && !spec_enabled()) { g_chat.lookup = false; set_draft_state("off"); return; }
     if (g_model.recurrent()) { g_chat.lookup = false; set_draft_state("not available: this model's state layers can't undo rejected guesses"); return; }
+    if (g_model.hp.n_expert > 0) {   // every guessed token pulls in its own experts: checking costs more than it saves
+        g_chat.lookup = false; set_draft_state("not used with mixture-of-experts models: checking guesses costs them more than it saves"); return;
+    }
     g_chat.lookup = true;   // until a draft model is attached: guesses from the conversation itself
     set_draft_state("looking for a draft model");
     std::thread([gen] {

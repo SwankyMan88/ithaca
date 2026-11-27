@@ -42,6 +42,7 @@ public:
     // Elementwise helper: launches ceil(n/256) blocks and appends n as the last parameter.
     bool ew(Op op, unsigned n, std::initializer_list<void*> args);
     bool reserve_act(size_t elems);  // int8 activation scratch for n*cols elements
+    void release_act();              // free it (and the host round-trip buffers): a new model sizes them again
     // ---- fused decode steps (false: not available here, use the separate kernels) ----
     // X += res * T (T rmsnorm'd with Wp first when Wp != 0; no add when T == 0), XN = rmsnorm(X) * Wn, quantized as the
     // int8 input of the next matmul_dev(XN, ..., same_x = true). XN may be 0 (then only the int8 copy is made).
